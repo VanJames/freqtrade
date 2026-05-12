@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import subprocess
 import smtplib
@@ -608,7 +609,12 @@ class SampleStrategy(IStrategy):
     def _dispatch_hotcoin_signal(
         self, pair: str, side: str, last: pd.Series, candle_time: str
     ) -> None:
-        enabled = os.getenv("HOTCOIN_SIGNAL_BRIDGE_ENABLED", "false").lower() in {
+        bridge_settings = self._load_trade_execution_settings()
+        enabled_raw = bridge_settings.get(
+            "hotcoin_signal_bridge_enabled",
+            os.getenv("HOTCOIN_SIGNAL_BRIDGE_ENABLED", "false"),
+        )
+        enabled = str(enabled_raw).lower() in {
             "1",
             "true",
             "yes",
@@ -617,7 +623,7 @@ class SampleStrategy(IStrategy):
         if not enabled:
             return
 
-        amount_raw = os.getenv("HOTCOIN_ORDER_AMOUNT", "0")
+        amount_raw = bridge_settings.get("hotcoin_order_amount", os.getenv("HOTCOIN_ORDER_AMOUNT", "0"))
         try:
             amount = float(amount_raw)
         except ValueError:
@@ -627,12 +633,19 @@ class SampleStrategy(IStrategy):
             logger.warning("HOTCOIN_ORDER_AMOUNT must be > 0; Hotcoin signal skipped.")
             return
 
-        script = os.getenv("HOTCOIN_ADAPTER_PATH", "/freqtrade/scripts/hotcoin_adapter.py")
+        script = bridge_settings.get(
+            "hotcoin_adapter_path",
+            os.getenv("HOTCOIN_ADAPTER_PATH", "/freqtrade/scripts/hotcoin_adapter.py"),
+        )
         symbol = pair.split(":")[0]
         order_side = "open_long" if side == "long" else "open_short"
-        order_type = os.getenv("HOTCOIN_ORDER_TYPE", "market")
-        mode = os.getenv("HOTCOIN_MODE", "web")
-        execute = os.getenv("HOTCOIN_SIGNAL_EXECUTE", "false").lower() in {
+        order_type = bridge_settings.get("hotcoin_order_type", os.getenv("HOTCOIN_ORDER_TYPE", "market"))
+        mode = bridge_settings.get("hotcoin_mode", os.getenv("HOTCOIN_MODE", "web"))
+        execute_raw = bridge_settings.get(
+            "hotcoin_signal_execute",
+            os.getenv("HOTCOIN_SIGNAL_EXECUTE", "false"),
+        )
+        execute = str(execute_raw).lower() in {
             "1",
             "true",
             "yes",
@@ -641,8 +654,12 @@ class SampleStrategy(IStrategy):
 
         close = float(last["close"])
         atr = float(last.get("atr", close * 0.02) or close * 0.02)
-        stop_mult = float(os.getenv("HOTCOIN_ATR_STOP_MULT", str(self.atr_stop_mult.value)))
-        reward_mult = float(os.getenv("HOTCOIN_REWARD_RISK_MULT", "1.6"))
+        stop_mult = float(
+            bridge_settings.get("hotcoin_atr_stop_mult", os.getenv("HOTCOIN_ATR_STOP_MULT", str(self.atr_stop_mult.value)))
+        )
+        reward_mult = float(
+            bridge_settings.get("hotcoin_reward_risk_mult", os.getenv("HOTCOIN_REWARD_RISK_MULT", "1.6"))
+        )
         stop_distance = atr * stop_mult
         if side == "long":
             stop_loss = close - stop_distance
@@ -677,15 +694,38 @@ class SampleStrategy(IStrategy):
 
         threading.Thread(
             target=self._run_hotcoin_bridge,
-            args=(command, pair, side, candle_time, execute),
+            args=(command, pair, side, candle_time, execute, bridge_settings),
             daemon=True,
         ).start()
 
+    def _load_trade_execution_settings(self) -> dict:
+        path = os.getenv("TRADE_EXECUTION_SETTINGS_PATH", "/freqtrade/user_data/trade_execution.json")
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:
+            logger.warning("Failed to load trade execution settings from %s: %s", path, exc)
+            return {}
+
     def _run_hotcoin_bridge(
-        self, command: list[str], pair: str, side: str, candle_time: str, execute: bool
+        self,
+        command: list[str],
+        pair: str,
+        side: str,
+        candle_time: str,
+        execute: bool,
+        bridge_settings: dict,
     ) -> None:
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            env = os.environ.copy()
+            if "hotcoin_session_path" in bridge_settings:
+                env["HOTCOIN_SESSION_PATH"] = str(bridge_settings["hotcoin_session_path"])
+            if "hotcoin_mode" in bridge_settings:
+                env["HOTCOIN_MODE"] = str(bridge_settings["hotcoin_mode"])
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=env)
             if result.returncode != 0:
                 logger.warning(
                     "Hotcoin bridge failed for %s %s %s: %s",

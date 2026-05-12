@@ -27,6 +27,8 @@ import requests
 DEFAULT_API_BASE_URL = "https://api.hotcoin.top"
 DEFAULT_WEB_BASE_URL = "https://bi.hotcoins.cn"
 DEFAULT_WEB_ORIGIN = "https://www.hotcoinv5.com"
+HOTCOIN_QR_BASE_URL = "https://binn.adffhttct.com"
+HOTCOIN_LOGIN_BASE_URL = "https://binn.hotcoins.cn"
 DEFAULT_SESSION_PATH = Path("user_data/hotcoin_session.json")
 
 
@@ -250,6 +252,46 @@ class HotcoinWebClient:
         if self.token:
             params["token"] = self.token
         return f"{self.base_url}{path}?{urllib.parse.urlencode(params)}"
+
+    def generate_qr_token(self) -> str:
+        response = self.session.get(
+            f"{HOTCOIN_QR_BASE_URL}/hk-web/scanLogin/generateQRCodeToken",
+            timeout=self.timeout,
+        )
+        data = _json_response(response)
+        if not isinstance(data, dict) or data.get("code") != 200:
+            raise HotcoinError(f"Failed to generate Hotcoin QR token: {data}")
+        token = data.get("data", {}).get("qrCodeToken")
+        if not token:
+            raise HotcoinError(f"Hotcoin QR token missing in response: {data}")
+        return str(token)
+
+    def check_qr_login(self, qr_token: str) -> dict[str, Any] | list[Any]:
+        query = {
+            "platform": "1",
+            "client": "1",
+            "deviceId": self.device_id,
+            "versionCode": "3.2.0",
+            "deviceModel": "Chrome 143.0.0.0 (macOS)",
+            "lang": "zh_CN",
+        }
+        headers = self.session.headers.copy()
+        headers.pop("Content-Type", None)
+        response = self.session.post(
+            f"{HOTCOIN_LOGIN_BASE_URL}/hk-web/scanLogin/login",
+            params=query,
+            files={"qrCodeToken": (None, qr_token)},
+            headers=headers,
+            timeout=self.timeout,
+        )
+        data = _json_response(response)
+        if isinstance(data, dict) and data.get("code") == 200:
+            token = data.get("data", {}).get("token")
+            if token:
+                self.token = str(token)
+                self.load_session()
+                self.save_session()
+        return data
 
     def request(
         self,

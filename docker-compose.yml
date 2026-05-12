@@ -109,3 +109,32 @@ services:
       - LightGBMRegressor
       - --apply
       - --restart-bot
+
+  trade-settings:
+    image: freqtrade-local-freqai
+    build:
+      context: .
+      dockerfile: "./docker/Dockerfile.freqai"
+      args:
+        sourceimage: freqtradeorg/freqtrade
+        sourcetag: stable
+    restart: unless-stopped
+    container_name: freqtrade-trade-settings
+    env_file:
+      - .env
+    environment:
+      TRADE_SETTINGS_ROOT: /workspace
+    volumes:
+      - ".:/workspace"
+    working_dir: /workspace
+    ports:
+      - "0.0.0.0:3001:8090"
+    entrypoint: ["python"]
+    command:
+      - -m
+      - uvicorn
+      - scripts.trade_settings_server:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8090"
