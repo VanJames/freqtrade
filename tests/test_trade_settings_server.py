@@ -148,3 +148,19 @@ def test_hotcoin_qr_status_endpoint(monkeypatch, tmp_path):
         "message": "扫码登录成功，session 已保存。",
         "started_at": 123,
     }
+
+
+def test_hotcoin_status_prefers_session_token(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    server.SESSION_PATH.parent.mkdir(parents=True)
+    server.SESSION_PATH.write_text(json.dumps({"token": "abcdef1234567890"}))
+    client = TestClient(server.app)
+
+    response = client.get("/hotcoin/status", auth=("admin", "secret"))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "token_mask": "abcd...7890",
+        "has_token": True,
+        "session_exists": True,
+    }

@@ -121,6 +121,27 @@ def _masked(value: str | None) -> str:
     return f"{value[:4]}...{value[-4:]}"
 
 
+def _read_hotcoin_session() -> dict[str, Any]:
+    if not SESSION_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SESSION_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _hotcoin_login_status(env: dict[str, str] | None = None) -> dict[str, Any]:
+    env = env or _read_env()
+    session = _read_hotcoin_session()
+    token = session.get("token") or env.get("HOTCOIN_WEB_TOKEN")
+    return {
+        "token_mask": _masked(token),
+        "has_token": bool(token),
+        "session_exists": SESSION_PATH.exists(),
+    }
+
+
 def _selected_exchange(env: dict[str, str]) -> str:
     state = _read_state()
     if state.get("hotcoin_signal_bridge_enabled") is True:
@@ -142,8 +163,7 @@ def _page(message: str = "") -> str:
     execute = str(state.get("hotcoin_signal_execute", env.get("HOTCOIN_SIGNAL_EXECUTE", "false"))).lower()
     amount = str(state.get("hotcoin_order_amount", env.get("HOTCOIN_ORDER_AMOUNT", "0")))
     order_type = str(state.get("hotcoin_order_type", env.get("HOTCOIN_ORDER_TYPE", "market")))
-    token_mask = _masked(env.get("HOTCOIN_WEB_TOKEN"))
-    session_exists = SESSION_PATH.exists()
+    login_status = _hotcoin_login_status(env)
     with _qr_lock:
         qr = dict(_qr_state)
 
@@ -219,8 +239,8 @@ def _page(message: str = "") -> str:
     </section>
     <aside class="card">
       <h2>Hotcoin 登录状态</h2>
-      <p>Token：{html.escape(token_mask)}</p>
-      <p>Session 文件：{"已保存" if session_exists else "未保存"}</p>
+      <p>Token：<span id="hotcoin-token">{html.escape(login_status["token_mask"])}</span></p>
+      <p>Session 文件：<span id="hotcoin-session">{"已保存" if login_status["session_exists"] else "未保存"}</span></p>
       <form method="post" action="/hotcoin/qr/start">
         <button class="secondary" type="submit">启动 Hotcoin 扫码登录</button>
       </form>
@@ -232,6 +252,18 @@ def _page(message: str = "") -> str:
 <script>
   const qrStatus = document.getElementById('qr-status');
   const qrMessage = document.getElementById('qr-message');
+  const hotcoinToken = document.getElementById('hotcoin-token');
+  const hotcoinSession = document.getElementById('hotcoin-session');
+  async function refreshHotcoinLoginStatus() {{
+    if (!hotcoinToken || !hotcoinSession) return;
+    try {{
+      const response = await fetch('/hotcoin/status', {{ credentials: 'same-origin' }});
+      if (!response.ok) return;
+      const data = await response.json();
+      hotcoinToken.textContent = data.token_mask || '未配置';
+      hotcoinSession.textContent = data.session_exists ? '已保存' : '未保存';
+    }} catch (error) {{}}
+  }}
   async function refreshQrStatus() {{
     if (!qrStatus || !qrMessage) return;
     try {{
@@ -242,6 +274,9 @@ def _page(message: str = "") -> str:
       qrMessage.textContent = data.message || '';
       if (['logged_in', 'error', 'timeout'].includes(data.status)) {{
         window.clearInterval(window.__hotcoinQrTimer);
+      }}
+      if (data.status === 'logged_in') {{
+        refreshHotcoinLoginStatus();
       }}
     }} catch (error) {{
       qrMessage.textContent = '二维码状态刷新失败：' + error;
@@ -356,6 +391,11 @@ def hotcoin_qr_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
             "message": _qr_state.get("message", ""),
             "started_at": _qr_state.get("started_at"),
         }
+
+
+@app.get("/hotcoin/status")
+def hotcoin_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
+    return _hotcoin_login_status()
 
 
 @app.get("/", response_class=HTMLResponse)
