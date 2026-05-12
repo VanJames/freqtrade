@@ -54,7 +54,7 @@ def test_fetch_okx_klines_uses_okx_swap_and_sorts_oldest_first(monkeypatch):
 def test_build_snapshot_uses_configured_exchange(monkeypatch):
     calls = []
 
-    def fake_fetch(exchange, pair, interval, limit, trading_mode):
+    def fake_fetch(exchange, pair, interval, limit, trading_mode, datadir):
         calls.append((exchange, pair, interval, limit, trading_mode))
         return pd.DataFrame(
             {
@@ -66,7 +66,7 @@ def test_build_snapshot_uses_configured_exchange(monkeypatch):
             }
         )
 
-    monkeypatch.setattr(build_market_snapshot, "fetch_klines", fake_fetch)
+    monkeypatch.setattr(build_market_snapshot, "load_or_fetch_klines", fake_fetch)
     snapshot = build_market_snapshot.build_snapshot(
         {
             "exchange": {"name": "okx", "pair_whitelist": ["BTC/USDT:USDT"]},
@@ -81,3 +81,41 @@ def test_build_snapshot_uses_configured_exchange(monkeypatch):
     assert calls == [("okx", "BTC/USDT:USDT", "5m", 220, "futures")]
     assert snapshot["exchange"] == "okx"
     assert snapshot["per_pair"][0]["last_close"] == 220.0
+
+
+def test_load_or_fetch_prefers_local_feather(monkeypatch, tmp_path):
+    path = tmp_path / "futures" / "BTC_USDT_USDT-5m-futures.feather"
+    path.parent.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=5, freq="5min", tz="UTC"),
+            "open": [1, 2, 3, 4, 5],
+            "high": [2, 3, 4, 5, 6],
+            "low": [0, 1, 2, 3, 4],
+            "close": [1.5, 2.5, 3.5, 4.5, 5.5],
+            "volume": [10, 20, 30, 40, 50],
+        }
+    ).to_feather(path)
+
+    def fail_fetch(*args, **kwargs):
+        raise AssertionError("Network fetch should not be used when local data exists")
+
+    monkeypatch.setattr(build_market_snapshot, "fetch_klines", fail_fetch)
+
+    frame = build_market_snapshot.load_or_fetch_klines(
+        exchange="okx",
+        pair="BTC/USDT:USDT",
+        interval="5m",
+        limit=3,
+        trading_mode="futures",
+        datadir=tmp_path,
+    )
+
+    assert list(frame["close"]) == [3.5, 4.5, 5.5]
+
+
+def test_default_datadir_uses_config_user_data_dir(tmp_path):
+    config_path = tmp_path / "user_data" / "config.json"
+    assert build_market_snapshot.default_datadir(str(config_path), "okx") == (
+        tmp_path / "user_data" / "data" / "okx"
+    )

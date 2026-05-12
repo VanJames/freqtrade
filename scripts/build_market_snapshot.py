@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=str(Path("user_data/config.json")))
     parser.add_argument("--output", required=True)
     parser.add_argument("--limit", type=int, default=220)
+    parser.add_argument(
+        "--datadir",
+        default="",
+        help="Optional data directory. Defaults to user_data/data/<exchange> beside the config file.",
+    )
     return parser.parse_args()
 
 
@@ -58,6 +63,10 @@ def load_config(path: str) -> dict[str, Any]:
 
 def pair_to_symbol(pair: str) -> str:
     return pair.split(":")[0].replace("/", "")
+
+
+def pair_to_data_symbol(pair: str) -> str:
+    return pair.replace("/", "_").replace(":", "_")
 
 
 def pair_to_okx_inst_id(pair: str, trading_mode: str) -> str:
@@ -128,6 +137,45 @@ def fetch_klines(
     return fetch_binance_klines(pair, interval, limit, trading_mode)
 
 
+def default_datadir(config_path: str, exchange: str) -> Path:
+    config_parent = Path(config_path).resolve().parent
+    user_data_dir = config_parent if config_parent.name == "user_data" else config_parent / "user_data"
+    return user_data_dir / "data" / exchange
+
+
+def local_ohlcv_path(datadir: Path, pair: str, timeframe: str, trading_mode: str) -> Path:
+    market_type = "futures" if trading_mode == "futures" else "spot"
+    candle_type = "futures" if trading_mode == "futures" else "spot"
+    return datadir / market_type / f"{pair_to_data_symbol(pair)}-{timeframe}-{candle_type}.feather"
+
+
+def load_local_klines(
+    datadir: Path, pair: str, interval: str, limit: int, trading_mode: str
+) -> pd.DataFrame:
+    path = local_ohlcv_path(datadir, pair, interval, trading_mode)
+    if not path.is_file():
+        raise FileNotFoundError(f"Local OHLCV file not found: {path}")
+    frame = pd.read_feather(path)
+    if frame.empty:
+        raise ValueError(f"Local OHLCV file is empty: {path}")
+    return frame.tail(limit).reset_index(drop=True)
+
+
+def load_or_fetch_klines(
+    *,
+    exchange: str,
+    pair: str,
+    interval: str,
+    limit: int,
+    trading_mode: str,
+    datadir: Path,
+) -> pd.DataFrame:
+    try:
+        return load_local_klines(datadir, pair, interval, limit, trading_mode)
+    except (FileNotFoundError, ValueError):
+        return fetch_klines(exchange, pair, interval, limit, trading_mode)
+
+
 def empty_summary(pair: str, timeframe: str, error: str) -> dict[str, Any]:
     return {
         "pair": pair,
@@ -187,9 +235,10 @@ def summarize_frame(pair: str, timeframe: str, frame: pd.DataFrame) -> CandleSum
     )
 
 
-def build_snapshot(config: dict[str, Any], limit: int) -> dict[str, Any]:
+def build_snapshot(config: dict[str, Any], limit: int, datadir: Path | None = None) -> dict[str, Any]:
     exchange = config.get("exchange", {}).get("name", "")
     trading_mode = config.get("trading_mode", "spot")
+    data_root = datadir if datadir is not None else Path("user_data") / "data" / exchange
     pair_whitelist = config.get("exchange", {}).get("pair_whitelist", [])
     timeframes = config.get("freqai", {}).get("feature_parameters", {}).get(
         "include_timeframes", [config.get("timeframe", "5m")]
@@ -201,7 +250,14 @@ def build_snapshot(config: dict[str, Any], limit: int) -> dict[str, Any]:
             if timeframe not in TIMEFRAME_TO_MINUTES:
                 continue
             try:
-                frame = fetch_klines(exchange, pair, timeframe, limit, trading_mode)
+                frame = load_or_fetch_klines(
+                    exchange=exchange,
+                    pair=pair,
+                    interval=timeframe,
+                    limit=limit,
+                    trading_mode=trading_mode,
+                    datadir=data_root,
+                )
                 summary = summarize_frame(pair, timeframe, frame)
                 per_pair.append(
                     {
@@ -259,7 +315,9 @@ def build_snapshot(config: dict[str, Any], limit: int) -> dict[str, Any]:
 def main() -> int:
     args = parse_args()
     config = load_config(args.config)
-    snapshot = build_snapshot(config, args.limit)
+    exchange = config.get("exchange", {}).get("name", "")
+    datadir = Path(args.datadir) if args.datadir else default_datadir(args.config, exchange)
+    snapshot = build_snapshot(config, args.limit, datadir=datadir)
     rendered = json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True)
     Path(args.output).write_text(rendered + "\n")
     print(rendered)
