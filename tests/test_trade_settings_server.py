@@ -25,6 +25,18 @@ def test_settings_page_requires_basic_auth(monkeypatch, tmp_path):
     assert response.status_code == 401
 
 
+def test_landing_page_has_ai_trading_menu(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    client = TestClient(server.app)
+
+    response = client.get("/landing")
+
+    assert response.status_code == 200
+    assert "<title>AI Trading</title>" in response.text
+    assert 'href="/trade"' in response.text
+    assert 'href="/trade-settings/"' in response.text
+
+
 def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
     _setup_paths(monkeypatch, tmp_path)
     client = TestClient(server.app)

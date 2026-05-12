@@ -324,6 +324,60 @@ def _page(message: str = "") -> str:
 </html>"""
 
 
+def _landing_page() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Trading</title>
+  <style>
+    :root { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #122033; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 18% 12%, #d9f99d 0, transparent 28%), radial-gradient(circle at 82% 18%, #bae6fd 0, transparent 26%), linear-gradient(135deg, #fff7ed, #eef2ff 52%, #ecfdf5); }
+    header { width: min(1080px, calc(100vw - 32px)); margin: 0 auto; padding: 26px 0; display: flex; justify-content: space-between; align-items: center; }
+    .brand { font-size: 22px; font-weight: 900; letter-spacing: -0.04em; }
+    nav { display: flex; gap: 10px; flex-wrap: wrap; }
+    a { color: inherit; text-decoration: none; }
+    nav a { padding: 10px 14px; border: 1px solid rgba(18,32,51,.16); border-radius: 999px; background: rgba(255,255,255,.72); }
+    main { width: min(1080px, calc(100vw - 32px)); margin: 84px auto 0; }
+    h1 { max-width: 760px; font-size: clamp(42px, 8vw, 88px); line-height: .92; letter-spacing: -0.07em; margin: 0; }
+    p { max-width: 620px; font-size: 18px; line-height: 1.75; color: #4b5b70; }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 42px; }
+    .card { padding: 24px; border-radius: 24px; background: rgba(255,255,255,.82); border: 1px solid rgba(18,32,51,.12); box-shadow: 0 24px 70px rgba(24,39,75,.14); }
+    .card h2 { margin: 0 0 8px; font-size: 24px; }
+    .button { display: inline-flex; margin-top: 16px; padding: 13px 17px; border-radius: 14px; background: #0f766e; color: #fff; font-weight: 850; }
+    .button.dark { background: #172033; }
+    @media (max-width: 760px) { header { align-items: flex-start; flex-direction: column; gap: 16px; } main { margin-top: 38px; } .cards { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="brand" href="/">AI Trading</a>
+    <nav>
+      <a href="/trade">交易面板</a>
+      <a href="/trade-settings/">交易设置</a>
+    </nav>
+  </header>
+  <main>
+    <h1>AI Trading Control Center</h1>
+    <p>统一进入策略监控、交易执行设置和 Hotcoin 扫码登录。策略仍由 Freqtrade 执行，交易所执行目标可在设置页切换。</p>
+    <section class="cards">
+      <article class="card">
+        <h2>Freqtrade 面板</h2>
+        <p>查看运行状态、交易、收益、日志和策略指标。</p>
+        <a class="button" href="/trade">打开交易面板</a>
+      </article>
+      <article class="card">
+        <h2>交易执行设置</h2>
+        <p>选择 OKX/Freqtrade 或 Hotcoin，下单数量、真实执行开关和 Hotcoin 扫码登录。</p>
+        <a class="button dark" href="/trade-settings/">打开交易设置</a>
+      </article>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
 def _poll_hotcoin_qr(token: str) -> None:
     client = HotcoinWebClient(session_path=SESSION_PATH)
     deadline = time.time() + 120
@@ -442,6 +496,11 @@ def hotcoin_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
 @app.get("/hotcoin/verify")
 def hotcoin_verify_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
     return _verify_hotcoin_login()
+
+
+@app.get("/landing", response_class=HTMLResponse)
+def landing() -> str:
+    return _landing_page()
 
 
 @app.get("/", response_class=HTMLResponse)
