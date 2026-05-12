@@ -39,6 +39,7 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL}
     volumes:
       - "./user_data:/freqtrade/user_data"
+      - "./scripts:/freqtrade/scripts:ro"
     ports:
       - "0.0.0.0:3000:8080"
     # Default command used when running `docker compose up`

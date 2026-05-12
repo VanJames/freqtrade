@@ -1,5 +1,6 @@
 import logging
 import os
+import subprocess
 import smtplib
 import ssl
 import threading
@@ -564,7 +565,7 @@ class SampleStrategy(IStrategy):
         if dataframe.empty:
             return
 
-        signal_col = f"{action}_{side}"
+        signal_col = f"enter_{side}" if action == "entry" else f"{action}_{side}"
         if signal_col not in dataframe.columns or dataframe[signal_col].iloc[-1] != 1:
             return
 
@@ -601,6 +602,109 @@ class SampleStrategy(IStrategy):
             ]
         )
         self._send_email_async(subject, body)
+        if action == "entry":
+            self._dispatch_hotcoin_signal(metadata["pair"], side, last, candle_time)
+
+    def _dispatch_hotcoin_signal(
+        self, pair: str, side: str, last: pd.Series, candle_time: str
+    ) -> None:
+        enabled = os.getenv("HOTCOIN_SIGNAL_BRIDGE_ENABLED", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not enabled:
+            return
+
+        amount_raw = os.getenv("HOTCOIN_ORDER_AMOUNT", "0")
+        try:
+            amount = float(amount_raw)
+        except ValueError:
+            logger.warning("Invalid HOTCOIN_ORDER_AMOUNT=%s; Hotcoin signal skipped.", amount_raw)
+            return
+        if amount <= 0:
+            logger.warning("HOTCOIN_ORDER_AMOUNT must be > 0; Hotcoin signal skipped.")
+            return
+
+        script = os.getenv("HOTCOIN_ADAPTER_PATH", "/freqtrade/scripts/hotcoin_adapter.py")
+        symbol = pair.split(":")[0]
+        order_side = "open_long" if side == "long" else "open_short"
+        order_type = os.getenv("HOTCOIN_ORDER_TYPE", "market")
+        mode = os.getenv("HOTCOIN_MODE", "web")
+        execute = os.getenv("HOTCOIN_SIGNAL_EXECUTE", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+        close = float(last["close"])
+        atr = float(last.get("atr", close * 0.02) or close * 0.02)
+        stop_mult = float(os.getenv("HOTCOIN_ATR_STOP_MULT", str(self.atr_stop_mult.value)))
+        reward_mult = float(os.getenv("HOTCOIN_REWARD_RISK_MULT", "1.6"))
+        stop_distance = atr * stop_mult
+        if side == "long":
+            stop_loss = close - stop_distance
+            take_profit = close + (stop_distance * reward_mult)
+        else:
+            stop_loss = close + stop_distance
+            take_profit = close - (stop_distance * reward_mult)
+
+        command = [
+            "python",
+            script,
+            "order",
+            "--mode",
+            mode,
+            "--symbol",
+            symbol,
+            "--side",
+            order_side,
+            "--amount",
+            f"{amount:g}",
+            "--type",
+            order_type,
+            "--stop-loss",
+            f"{stop_loss:.8f}",
+            "--take-profit",
+            f"{take_profit:.8f}",
+        ]
+        if order_type == "limit":
+            command.extend(["--price", f"{close:.8f}"])
+        if execute:
+            command.append("--yes")
+
+        threading.Thread(
+            target=self._run_hotcoin_bridge,
+            args=(command, pair, side, candle_time, execute),
+            daemon=True,
+        ).start()
+
+    def _run_hotcoin_bridge(
+        self, command: list[str], pair: str, side: str, candle_time: str, execute: bool
+    ) -> None:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                logger.warning(
+                    "Hotcoin bridge failed for %s %s %s: %s",
+                    pair,
+                    side,
+                    candle_time,
+                    result.stderr.strip() or result.stdout.strip(),
+                )
+                return
+            logger.info(
+                "Hotcoin bridge %s for %s %s %s: %s",
+                "executed" if execute else "dry-run",
+                pair,
+                side,
+                candle_time,
+                result.stdout.strip()[:1000],
+            )
+        except Exception as exc:
+            logger.warning("Hotcoin bridge exception for %s %s: %s", pair, side, exc)
 
     def _send_email_async(self, subject: str, body: str) -> None:
         host = os.getenv("FT_EMAIL_HOST", "smtp.qq.com")
