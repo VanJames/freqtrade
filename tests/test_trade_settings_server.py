@@ -127,3 +127,24 @@ def test_hotcoin_qr_poll_keeps_waiting_on_timeout(monkeypatch, tmp_path):
 
     assert attempts["count"] == 2
     assert server._qr_state["status"] == "logged_in"
+
+
+def test_hotcoin_qr_status_endpoint(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    server._qr_state.update(
+        {
+            "status": "logged_in",
+            "message": "扫码登录成功，session 已保存。",
+            "started_at": 123,
+        }
+    )
+    client = TestClient(server.app)
+
+    response = client.get("/hotcoin/qr/status", auth=("admin", "secret"))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "logged_in",
+        "message": "扫码登录成功，session 已保存。",
+        "started_at": 123,
+    }

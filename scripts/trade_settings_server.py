@@ -150,14 +150,11 @@ def _page(message: str = "") -> str:
     qr_block = ""
     if qr.get("image_url"):
         qr_block = f"""
-        <section class="card qr">
+        <section class="card qr" id="qr-section">
           <h2>Hotcoin 扫码登录</h2>
           <img src="{html.escape(qr['image_url'])}" alt="Hotcoin QR Code" />
-          <p>状态：{html.escape(str(qr.get('status', '')))}</p>
-          <p>{html.escape(str(qr.get('message', '')))}</p>
-          <script>
-            setTimeout(() => window.location.reload(), 3000);
-          </script>
+          <p>状态：<span id="qr-status">{html.escape(str(qr.get('status', '')))}</span></p>
+          <p id="qr-message">{html.escape(str(qr.get('message', '')))}</p>
         </section>
         """
 
@@ -232,6 +229,28 @@ def _page(message: str = "") -> str:
   </div>
   {qr_block}
 </main>
+<script>
+  const qrStatus = document.getElementById('qr-status');
+  const qrMessage = document.getElementById('qr-message');
+  async function refreshQrStatus() {{
+    if (!qrStatus || !qrMessage) return;
+    try {{
+      const response = await fetch('/hotcoin/qr/status', {{ credentials: 'same-origin' }});
+      if (!response.ok) return;
+      const data = await response.json();
+      qrStatus.textContent = data.status || '';
+      qrMessage.textContent = data.message || '';
+      if (['logged_in', 'error', 'timeout'].includes(data.status)) {{
+        window.clearInterval(window.__hotcoinQrTimer);
+      }}
+    }} catch (error) {{
+      qrMessage.textContent = '二维码状态刷新失败：' + error;
+    }}
+  }}
+  if (qrStatus && qrMessage && !['logged_in', 'error', 'timeout'].includes(qrStatus.textContent)) {{
+    window.__hotcoinQrTimer = window.setInterval(refreshQrStatus, 3000);
+  }}
+</script>
 </body>
 </html>"""
 
@@ -327,6 +346,16 @@ def start_hotcoin_qr(_: Annotated[str, Depends(_auth)]) -> RedirectResponse:
     except HotcoinError as exc:
         message = f"生成二维码失败：{exc}"
     return RedirectResponse(f"/?message={urllib.parse.quote(message)}", status_code=303)
+
+
+@app.get("/hotcoin/qr/status")
+def hotcoin_qr_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
+    with _qr_lock:
+        return {
+            "status": _qr_state.get("status", "idle"),
+            "message": _qr_state.get("message", ""),
+            "started_at": _qr_state.get("started_at"),
+        }
 
 
 @app.get("/", response_class=HTMLResponse)
