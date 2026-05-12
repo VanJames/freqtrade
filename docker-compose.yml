@@ -91,7 +91,7 @@ services:
       - --strategy-path
       - /workspace/user_data/strategies
       - --interval-hours
-      - "24"
+      - "6"
       - --jitter-seconds
       - "300"
       - --backtest-days
