@@ -1,8 +1,13 @@
 ---
 services:
   freqtrade:
-    image: freqtradeorg/freqtrade:stable
-    # image: freqtradeorg/freqtrade:develop
+    image: freqtrade-local-freqai
+    build:
+      context: .
+      dockerfile: "./docker/Dockerfile.freqai"
+      args:
+        sourceimage: freqtradeorg/freqtrade
+        sourcetag: stable
     # Use plotting image
     # image: freqtradeorg/freqtrade:develop_plot
     # # Enable GPU Image and GPU Resources (only relevant for freqAI)
@@ -20,17 +25,86 @@ services:
     #   dockerfile: "./docker/Dockerfile.custom"
     restart: unless-stopped
     container_name: freqtrade
+    env_file:
+      - .env
+    environment:
+      FT_EMAIL_HOST: ${FT_EMAIL_HOST}
+      FT_EMAIL_PORT: ${FT_EMAIL_PORT}
+      FT_EMAIL_USER: ${FT_EMAIL_USER}
+      FT_EMAIL_PASSWORD: ${FT_EMAIL_PASSWORD}
+      FT_EMAIL_FROM: ${FT_EMAIL_FROM}
+      FT_EMAIL_TO: ${FT_EMAIL_TO}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+      OPENAI_MODEL: ${OPENAI_MODEL}
     volumes:
       - "./user_data:/freqtrade/user_data"
-    # Expose api on port 8080 (localhost only)
-    # Please read the https://www.freqtrade.io/en/stable/rest-api/ documentation
-    # for more information.
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:3000:8080"
     # Default command used when running `docker compose up`
     command: >
       trade
       --logfile /freqtrade/user_data/logs/freqtrade.log
       --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
       --config /freqtrade/user_data/config.json
+      --freqaimodel LightGBMRegressor
       --strategy SampleStrategy
+
+  optimizer:
+    image: freqtrade-local-freqai
+    build:
+      context: .
+      dockerfile: "./docker/Dockerfile.freqai"
+      args:
+        sourceimage: freqtradeorg/freqtrade
+        sourcetag: stable
+    profiles:
+      - optimizer
+    restart: unless-stopped
+    container_name: freqtrade-optimizer
+    user: ftuser
+    entrypoint: ["python"]
+    env_file:
+      - .env
+    environment:
+      FT_EMAIL_HOST: ${FT_EMAIL_HOST}
+      FT_EMAIL_PORT: ${FT_EMAIL_PORT}
+      FT_EMAIL_USER: ${FT_EMAIL_USER}
+      FT_EMAIL_PASSWORD: ${FT_EMAIL_PASSWORD}
+      FT_EMAIL_FROM: ${FT_EMAIL_FROM}
+      FT_EMAIL_TO: ${FT_EMAIL_TO}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+      OPENAI_MODEL: ${OPENAI_MODEL}
+    volumes:
+      - ".:/workspace"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    working_dir: /workspace
+    command:
+      - /workspace/scripts/auto_optimize_loop.py
+      - --backend
+      - local
+      - --strategy
+      - SampleStrategy
+      - --config
+      - /workspace/user_data/config.json
+      - --strategy-path
+      - /workspace/user_data/strategies
+      - --interval-hours
+      - "24"
+      - --jitter-seconds
+      - "300"
+      - --backtest-days
+      - "60"
+      - --epochs
+      - "60"
+      - --min-trades
+      - "20"
+      - --min-profit-delta-pct
+      - "0.25"
+      - --max-drawdown-worsen
+      - "0.02"
+      - --freqaimodel
+      - LightGBMRegressor
+      - --apply
+      - --restart-bot

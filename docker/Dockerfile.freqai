@@ -5,4 +5,10 @@ FROM ${sourceimage}:${sourcetag}
 # Install dependencies
 COPY requirements-freqai.txt /freqtrade/
 
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends docker-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+USER ftuser
 RUN pip install -r requirements-freqai.txt --user --no-cache-dir
