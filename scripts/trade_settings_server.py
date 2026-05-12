@@ -25,6 +25,7 @@ from scripts.hotcoin_adapter import HotcoinError, HotcoinWebClient, _load_dotenv
 
 ROOT = Path(os.getenv("TRADE_SETTINGS_ROOT", "/workspace"))
 ENV_PATH = ROOT / ".env"
+CONFIG_PATH = ROOT / "user_data" / "config.json"
 STATE_PATH = ROOT / "user_data" / "trade_execution.json"
 SESSION_PATH = ROOT / "user_data" / "hotcoin_session.json"
 PUBLIC_BASE_PATH = os.getenv("PUBLIC_BASE_PATH", "").rstrip("/")
@@ -109,6 +110,24 @@ def _read_state() -> dict[str, Any]:
         return {}
 
 
+def _read_freqtrade_config() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        data = json.loads(CONFIG_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_freqtrade_dry_run(dry_run: bool) -> None:
+    config = _read_freqtrade_config()
+    if not config:
+        raise HTTPException(status_code=500, detail=f"Config not found or invalid: {CONFIG_PATH}")
+    config["dry_run"] = dry_run
+    CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=4) + "\n")
+
+
 def _write_state(data: dict[str, Any]) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
@@ -184,6 +203,8 @@ def _selected_exchange(env: dict[str, str]) -> str:
 def _page(message: str = "") -> str:
     env = _read_env()
     state = _read_state()
+    freqtrade_config = _read_freqtrade_config()
+    dry_run = bool(freqtrade_config.get("dry_run", True))
     selected = _selected_exchange(env)
     bridge_enabled = str(
         state.get("hotcoin_signal_bridge_enabled", env.get("HOTCOIN_SIGNAL_BRIDGE_ENABLED", "false"))
@@ -211,6 +232,9 @@ def _page(message: str = "") -> str:
     checked_execute = "checked" if execute.lower() in {"1", "true", "yes", "on"} else ""
     selected_market = "selected" if order_type == "market" else ""
     selected_limit = "selected" if order_type == "limit" else ""
+    checked_dry = "checked" if dry_run else ""
+    checked_live = "checked" if not dry_run else ""
+    mode_label = "模拟盘 dry_run=true" if dry_run else "真实盘 dry_run=false"
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -253,6 +277,13 @@ def _page(message: str = "") -> str:
           <label><input type="radio" name="exchange" value="freqtrade" {checked_freqtrade}> Freqtrade 当前交易所 / OKX</label>
           <label><input type="radio" name="exchange" value="hotcoin" {checked_hotcoin}> Hotcoin 网页接口</label>
         </div>
+        <h2>Freqtrade 交易模式</h2>
+        <div class="radio">
+          <label><input type="radio" name="freqtrade_mode" value="dry_run" {checked_dry}> 模拟盘</label>
+          <label><input type="radio" name="freqtrade_mode" value="live" {checked_live}> 真实盘</label>
+        </div>
+        <label><input type="checkbox" name="live_confirm" value="true" style="width:auto"> 我确认已配置交易所 Key，并理解真实盘会实际下单</label>
+        <p class="muted">当前 Freqtrade 模式：{html.escape(mode_label)}。修改该项后必须重启 freqtrade 容器才生效。</p>
         <label>Hotcoin 下单数量</label>
         <input name="hotcoin_amount" value="{html.escape(amount)}" placeholder="例如 1" />
         <label>订单类型</label>
@@ -421,14 +452,21 @@ async def save_settings(
     hotcoin_amount = form.get("hotcoin_amount", "0")
     hotcoin_order_type = form.get("hotcoin_order_type", "market")
     hotcoin_execute = form.get("hotcoin_execute")
+    freqtrade_mode = form.get("freqtrade_mode", "dry_run")
+    live_confirm = form.get("live_confirm")
     if exchange not in {"freqtrade", "hotcoin"}:
         raise HTTPException(status_code=400, detail="Invalid exchange.")
     if hotcoin_order_type not in {"market", "limit"}:
         raise HTTPException(status_code=400, detail="Invalid order type.")
+    if freqtrade_mode not in {"dry_run", "live"}:
+        raise HTTPException(status_code=400, detail="Invalid Freqtrade mode.")
+    if freqtrade_mode == "live" and live_confirm != "true":
+        raise HTTPException(status_code=400, detail="切换真实盘必须勾选确认。")
     try:
         amount = float(hotcoin_amount)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Hotcoin amount must be numeric.") from exc
+    _write_freqtrade_dry_run(freqtrade_mode != "live")
     _write_state(
         {
             "hotcoin_signal_bridge_enabled": exchange == "hotcoin",
@@ -441,7 +479,10 @@ async def save_settings(
             "updated_at": int(time.time()),
         }
     )
-    message = "设置已保存，策略会在下一次信号实时读取，无需重启 Freqtrade。"
+    if freqtrade_mode == "live":
+        message = "设置已保存：Freqtrade 已切换为真实盘配置。请重启 freqtrade 容器后生效。"
+    else:
+        message = "设置已保存：Freqtrade 已切换为模拟盘配置。请重启 freqtrade 容器后生效；Hotcoin 桥接设置下一次信号实时读取。"
     return RedirectResponse(_redirect_url(message), status_code=303)
 
 

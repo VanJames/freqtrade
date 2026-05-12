@@ -8,8 +8,12 @@ from scripts import trade_settings_server as server
 def _setup_paths(monkeypatch, tmp_path):
     env_path = tmp_path / ".env"
     env_path.write_text("SETTINGS_USERNAME=admin\nSETTINGS_PASSWORD=secret\n")
+    config_path = tmp_path / "user_data" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({"dry_run": True, "exchange": {"name": "okx"}}))
     monkeypatch.setattr(server, "ROOT", tmp_path)
     monkeypatch.setattr(server, "ENV_PATH", env_path)
+    monkeypatch.setattr(server, "CONFIG_PATH", config_path)
     monkeypatch.setattr(server, "STATE_PATH", tmp_path / "user_data" / "trade_execution.json")
     monkeypatch.setattr(server, "SESSION_PATH", tmp_path / "user_data" / "hotcoin_session.json")
     monkeypatch.setattr(server, "PUBLIC_BASE_PATH", "")
@@ -47,6 +51,7 @@ def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
             "exchange": "hotcoin",
             "hotcoin_amount": "3",
             "hotcoin_order_type": "market",
+            "freqtrade_mode": "dry_run",
         },
         auth=("admin", "secret"),
         follow_redirects=False,
@@ -58,6 +63,7 @@ def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
     assert state["hotcoin_signal_execute"] is False
     assert state["hotcoin_order_amount"] == 3.0
     assert state["hotcoin_session_path"] == "/freqtrade/user_data/hotcoin_session.json"
+    assert json.loads(server.CONFIG_PATH.read_text())["dry_run"] is True
 
 
 def test_save_settings_redirects_with_public_base_path(monkeypatch, tmp_path):
@@ -71,6 +77,7 @@ def test_save_settings_redirects_with_public_base_path(monkeypatch, tmp_path):
             "exchange": "hotcoin",
             "hotcoin_amount": "3",
             "hotcoin_order_type": "market",
+            "freqtrade_mode": "dry_run",
         },
         auth=("admin", "secret"),
         follow_redirects=False,
@@ -91,6 +98,7 @@ def test_save_settings_can_disable_hotcoin(monkeypatch, tmp_path):
             "hotcoin_amount": "0",
             "hotcoin_order_type": "limit",
             "hotcoin_execute": "true",
+            "freqtrade_mode": "dry_run",
         },
         auth=("admin", "secret"),
         follow_redirects=False,
@@ -101,6 +109,47 @@ def test_save_settings_can_disable_hotcoin(monkeypatch, tmp_path):
     assert state["hotcoin_signal_bridge_enabled"] is False
     assert state["hotcoin_signal_execute"] is True
     assert state["hotcoin_order_type"] == "limit"
+
+
+def test_save_settings_switches_freqtrade_to_live_with_confirmation(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/settings",
+        data={
+            "exchange": "freqtrade",
+            "hotcoin_amount": "0",
+            "hotcoin_order_type": "market",
+            "freqtrade_mode": "live",
+            "live_confirm": "true",
+        },
+        auth=("admin", "secret"),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert json.loads(server.CONFIG_PATH.read_text())["dry_run"] is False
+
+
+def test_save_settings_rejects_live_without_confirmation(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/settings",
+        data={
+            "exchange": "freqtrade",
+            "hotcoin_amount": "0",
+            "hotcoin_order_type": "market",
+            "freqtrade_mode": "live",
+        },
+        auth=("admin", "secret"),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
+    assert json.loads(server.CONFIG_PATH.read_text())["dry_run"] is True
 
 
 def test_hotcoin_qr_start_renders_qr(monkeypatch, tmp_path):
@@ -185,7 +234,7 @@ def test_hotcoin_qr_status_endpoint(monkeypatch, tmp_path):
 
 def test_hotcoin_status_prefers_session_token(monkeypatch, tmp_path):
     _setup_paths(monkeypatch, tmp_path)
-    server.SESSION_PATH.parent.mkdir(parents=True)
+    server.SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
     server.SESSION_PATH.write_text(json.dumps({"token": "abcdef1234567890"}))
     client = TestClient(server.app)
 
@@ -203,7 +252,7 @@ def test_hotcoin_status_prefers_session_token(monkeypatch, tmp_path):
 
 def test_hotcoin_verify_login_success(monkeypatch, tmp_path):
     _setup_paths(monkeypatch, tmp_path)
-    server.SESSION_PATH.parent.mkdir(parents=True)
+    server.SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
     server.SESSION_PATH.write_text(json.dumps({"token": "abcdef1234567890"}))
 
     class FakeHotcoinWebClient:
@@ -225,7 +274,7 @@ def test_hotcoin_verify_login_success(monkeypatch, tmp_path):
 
 def test_hotcoin_verify_login_failure(monkeypatch, tmp_path):
     _setup_paths(monkeypatch, tmp_path)
-    server.SESSION_PATH.parent.mkdir(parents=True)
+    server.SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
     server.SESSION_PATH.write_text(json.dumps({"token": "abcdef1234567890"}))
 
     class FakeHotcoinWebClient:
