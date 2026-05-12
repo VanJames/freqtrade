@@ -15,6 +15,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Annotated, Any
 
+import requests
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -250,6 +251,10 @@ def _poll_hotcoin_qr(token: str) -> None:
                     _qr_state["status"] = "logged_in"
                     _qr_state["message"] = "扫码登录成功，session 已保存。"
                 return
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            with _qr_lock:
+                _qr_state["status"] = "waiting"
+                _qr_state["message"] = f"Hotcoin 登录状态接口暂时无响应，继续等待扫码确认：{exc}"
         except Exception as exc:
             with _qr_lock:
                 _qr_state["status"] = "error"

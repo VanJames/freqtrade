@@ -104,3 +104,26 @@ def test_hotcoin_qr_start_renders_qr(monkeypatch, tmp_path):
     assert response.status_code == 303
     assert server._qr_state["status"] == "logged_in"
     assert "扫码登录成功" in server._qr_state["message"]
+
+
+def test_hotcoin_qr_poll_keeps_waiting_on_timeout(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    attempts = {"count": 0}
+
+    class FakeHotcoinWebClient:
+        def __init__(self, session_path):
+            self.session_path = session_path
+
+        def check_qr_login(self, token):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise server.requests.Timeout("read timed out")
+            return {"code": 200, "data": {"token": "web-token"}}
+
+    monkeypatch.setattr(server, "HotcoinWebClient", FakeHotcoinWebClient)
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: None)
+
+    server._poll_hotcoin_qr("qr-token")
+
+    assert attempts["count"] == 2
+    assert server._qr_state["status"] == "logged_in"
