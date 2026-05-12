@@ -27,16 +27,6 @@ services:
     container_name: freqtrade
     env_file:
       - .env
-    environment:
-      FT_EMAIL_HOST: ${FT_EMAIL_HOST}
-      FT_EMAIL_PORT: ${FT_EMAIL_PORT}
-      FT_EMAIL_USER: ${FT_EMAIL_USER}
-      FT_EMAIL_PASSWORD: ${FT_EMAIL_PASSWORD}
-      FT_EMAIL_FROM: ${FT_EMAIL_FROM}
-      FT_EMAIL_TO: ${FT_EMAIL_TO}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
-      OPENAI_MODEL: ${OPENAI_MODEL}
     volumes:
       - "./user_data:/freqtrade/user_data"
       - "./scripts:/freqtrade/scripts:ro"
@@ -67,16 +57,6 @@ services:
     entrypoint: ["python"]
     env_file:
       - .env
-    environment:
-      FT_EMAIL_HOST: ${FT_EMAIL_HOST}
-      FT_EMAIL_PORT: ${FT_EMAIL_PORT}
-      FT_EMAIL_USER: ${FT_EMAIL_USER}
-      FT_EMAIL_PASSWORD: ${FT_EMAIL_PASSWORD}
-      FT_EMAIL_FROM: ${FT_EMAIL_FROM}
-      FT_EMAIL_TO: ${FT_EMAIL_TO}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
-      OPENAI_MODEL: ${OPENAI_MODEL}
     volumes:
       - ".:/workspace"
       - "/var/run/docker.sock:/var/run/docker.sock"
