@@ -26,6 +26,7 @@ import pandas as pd
 TIMEFRAME_TO_MINUTES = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
 BINANCE_SPOT_URL = "https://api.binance.com/api/v3/klines"
 BINANCE_FUTURES_URL = "https://fapi.binance.com/fapi/v1/klines"
+OKX_CANDLES_URL = "https://www.okx.com/api/v5/market/candles"
 
 
 @dataclass
@@ -59,11 +60,21 @@ def pair_to_symbol(pair: str) -> str:
     return pair.split(":")[0].replace("/", "")
 
 
+def pair_to_okx_inst_id(pair: str, trading_mode: str) -> str:
+    base_quote = pair.split(":")[0].replace("/", "-")
+    if trading_mode == "futures":
+        return f"{base_quote}-SWAP"
+    return base_quote
+
+
 def klines_url(trading_mode: str) -> str:
     return BINANCE_FUTURES_URL if trading_mode == "futures" else BINANCE_SPOT_URL
 
 
-def fetch_klines(symbol: str, interval: str, limit: int, trading_mode: str) -> pd.DataFrame:
+def fetch_binance_klines(
+    pair: str, interval: str, limit: int, trading_mode: str
+) -> pd.DataFrame:
+    symbol = pair_to_symbol(pair)
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     url = klines_url(trading_mode) + "?" + urlencode(params)
     with urlopen(url, timeout=30) as response:
@@ -81,6 +92,40 @@ def fetch_klines(symbol: str, interval: str, limit: int, trading_mode: str) -> p
             }
         )
     return pd.DataFrame(rows)
+
+
+def fetch_okx_klines(pair: str, interval: str, limit: int, trading_mode: str) -> pd.DataFrame:
+    inst_id = pair_to_okx_inst_id(pair, trading_mode)
+    params = {"instId": inst_id, "bar": interval, "limit": limit}
+    url = OKX_CANDLES_URL + "?" + urlencode(params)
+    with urlopen(url, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if payload.get("code") != "0":
+        raise ValueError(f"OKX candles error for {inst_id}: {payload.get('msg') or payload}")
+
+    rows = []
+    # OKX returns newest candles first. Sort ascending so indicators match the
+    # rest of the optimizer's chronological calculations.
+    for row in reversed(payload.get("data", [])):
+        rows.append(
+            {
+                "open_time": int(row[0]),
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "volume": float(row[5]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def fetch_klines(
+    exchange: str, pair: str, interval: str, limit: int, trading_mode: str
+) -> pd.DataFrame:
+    if exchange.lower() == "okx":
+        return fetch_okx_klines(pair, interval, limit, trading_mode)
+    return fetch_binance_klines(pair, interval, limit, trading_mode)
 
 
 def empty_summary(pair: str, timeframe: str, error: str) -> dict[str, Any]:
@@ -143,6 +188,7 @@ def summarize_frame(pair: str, timeframe: str, frame: pd.DataFrame) -> CandleSum
 
 
 def build_snapshot(config: dict[str, Any], limit: int) -> dict[str, Any]:
+    exchange = config.get("exchange", {}).get("name", "")
     trading_mode = config.get("trading_mode", "spot")
     pair_whitelist = config.get("exchange", {}).get("pair_whitelist", [])
     timeframes = config.get("freqai", {}).get("feature_parameters", {}).get(
@@ -151,12 +197,11 @@ def build_snapshot(config: dict[str, Any], limit: int) -> dict[str, Any]:
 
     per_pair: list[dict[str, Any]] = []
     for pair in pair_whitelist:
-        symbol = pair_to_symbol(pair)
         for timeframe in timeframes:
             if timeframe not in TIMEFRAME_TO_MINUTES:
                 continue
             try:
-                frame = fetch_klines(symbol, timeframe, limit, trading_mode)
+                frame = fetch_klines(exchange, pair, timeframe, limit, trading_mode)
                 summary = summarize_frame(pair, timeframe, frame)
                 per_pair.append(
                     {
@@ -194,7 +239,7 @@ def build_snapshot(config: dict[str, Any], limit: int) -> dict[str, Any]:
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "exchange": config.get("exchange", {}).get("name", ""),
+        "exchange": exchange,
         "trading_mode": trading_mode,
         "stake_currency": config.get("stake_currency", "USDT"),
         "timeframes": timeframes,
