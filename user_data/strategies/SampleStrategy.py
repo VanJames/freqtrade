@@ -140,6 +140,7 @@ class SampleStrategy(IStrategy):
 
     def bot_start(self, **kwargs) -> None:
         self._signal_email_cache: set[str] = set()
+        self._signal_diagnostic_cache: set[str] = set()
         self._email_warned = False
         self._freqai_warned = False
 
@@ -179,6 +180,187 @@ class SampleStrategy(IStrategy):
         values = values.where(~dataframe["regime_high_vol"], base + conservative_delta)
         values = values.where(~dataframe["regime_low_vol"], base - aggressive_delta)
         return values
+
+    @staticmethod
+    def _last_bool(series: pd.Series) -> bool:
+        if series.empty:
+            return False
+        return bool(series.iloc[-1])
+
+    @staticmethod
+    def _last_float(row: pd.Series, key: str, default: float = 0.0) -> float:
+        try:
+            value = float(row.get(key, default) or default)
+        except (TypeError, ValueError):
+            return default
+        if not np.isfinite(value):
+            return default
+        return value
+
+    def _log_entry_diagnostics(
+        self,
+        dataframe: DataFrame,
+        metadata: dict,
+        adx_threshold: pd.Series,
+        volume_threshold: pd.Series,
+        long_rsi_threshold: pd.Series,
+        short_rsi_threshold: pd.Series,
+        long_trend: pd.Series,
+        long_trigger: pd.Series,
+        long_range: pd.Series,
+        short_trend: pd.Series,
+        short_trigger: pd.Series,
+        short_range: pd.Series,
+    ) -> None:
+        if self.config.get("runmode") not in (RunMode.DRY_RUN, RunMode.LIVE):
+            return
+        if dataframe.empty:
+            return
+        if self._last_bool(dataframe.get("enter_long", pd.Series(dtype=float))) or self._last_bool(
+            dataframe.get("enter_short", pd.Series(dtype=float))
+        ):
+            return
+
+        last = dataframe.iloc[-1]
+        candle_time = last.get("date")
+        if hasattr(candle_time, "isoformat"):
+            candle_time = candle_time.isoformat()
+
+        cache_key = f"{metadata.get('pair', '')}:entry_diagnostics:{candle_time}"
+        diagnostic_cache = getattr(self, "_signal_diagnostic_cache", set())
+        if cache_key in diagnostic_cache:
+            return
+        diagnostic_cache.add(cache_key)
+        self._signal_diagnostic_cache = diagnostic_cache
+
+        close = self._last_float(last, "close")
+        ema20 = self._last_float(last, "ema20")
+        ema50 = self._last_float(last, "ema50")
+        ema200 = self._last_float(last, "ema200")
+        rsi = self._last_float(last, "rsi")
+        adx = self._last_float(last, "adx")
+        macd = self._last_float(last, "macd")
+        macdsignal = self._last_float(last, "macdsignal")
+        macdhist = self._last_float(last, "macdhist")
+        volume_ratio = self._last_float(last, "volume_ratio")
+        volatility_ratio = self._last_float(last, "volatility_ratio", 1.0)
+        adx_limit = float(adx_threshold.iloc[-1])
+        volume_limit = float(volume_threshold.iloc[-1])
+        long_rsi_limit = float(long_rsi_threshold.iloc[-1])
+        short_rsi_limit = float(short_rsi_threshold.iloc[-1])
+
+        long_blockers: list[str] = []
+        if not bool(last.get("trend_context_long", False)):
+            long_blockers.append("no_long_trend_context")
+        if close <= ema20:
+            long_blockers.append("close<=ema20")
+        if ema20 <= ema50:
+            long_blockers.append("ema20<=ema50")
+        if ema50 <= ema200:
+            long_blockers.append("ema50<=ema200")
+        if adx <= adx_limit:
+            long_blockers.append(f"adx {adx:.2f}<={adx_limit:.2f}")
+        if not (
+            (bool(last.get("trend_up_15m", False)) and volume_ratio > 0.95)
+            or volume_ratio > (volume_limit - 0.15)
+        ):
+            long_blockers.append(f"volume_ratio {volume_ratio:.2f}<={volume_limit - 0.15:.2f}")
+        if rsi <= 52:
+            long_blockers.append("rsi<=52")
+        if macdhist <= 0:
+            long_blockers.append("macdhist<=0")
+        if self._last_bool(long_trend) and not self._last_bool(long_trigger):
+            long_blockers.append(f"no_long_trigger rsi_limit={long_rsi_limit:.2f}")
+        if not self._last_bool(long_range):
+            range_reasons = []
+            if not bool(last.get("range_market_1h", False)):
+                range_reasons.append("not_range_1h")
+            if not bool(last.get("regime_low_vol", False)):
+                range_reasons.append("not_low_vol")
+            if rsi >= 34:
+                range_reasons.append("rsi>=34")
+            if volume_ratio <= 1.0:
+                range_reasons.append("volume<=1")
+            if range_reasons:
+                long_blockers.append("meanrev_long:" + ",".join(range_reasons[:3]))
+
+        short_blockers: list[str] = []
+        if not (bool(last.get("trend_down_1h", False)) and bool(last.get("trend_down_15m", False))):
+            short_blockers.append("no_short_alignment")
+        if close >= ema20:
+            short_blockers.append("close>=ema20")
+        if ema20 >= ema50:
+            short_blockers.append("ema20>=ema50")
+        if ema50 >= ema200:
+            short_blockers.append("ema50>=ema200")
+        if adx <= (adx_limit + 1.0):
+            short_blockers.append(f"adx {adx:.2f}<={adx_limit + 1.0:.2f}")
+        if volume_ratio <= (volume_limit + 0.05):
+            short_blockers.append(f"volume_ratio {volume_ratio:.2f}<={volume_limit + 0.05:.2f}")
+        if rsi >= 45:
+            short_blockers.append("rsi>=45")
+        if macd >= macdsignal:
+            short_blockers.append("macd>=signal")
+        if macdhist >= 0:
+            short_blockers.append("macdhist>=0")
+        if self._last_bool(short_trend) and not self._last_bool(short_trigger):
+            short_blockers.append(f"no_short_trigger rsi_limit={short_rsi_limit:.2f}")
+        if not self._last_bool(short_range):
+            range_reasons = []
+            if not bool(last.get("range_market_1h", False)):
+                range_reasons.append("not_range_1h")
+            if not bool(last.get("regime_low_vol", False)):
+                range_reasons.append("not_low_vol")
+            if rsi <= 66:
+                range_reasons.append("rsi<=66")
+            if volume_ratio <= 1.0:
+                range_reasons.append("volume<=1")
+            if range_reasons:
+                short_blockers.append("meanrev_short:" + ",".join(range_reasons[:3]))
+
+        if self._freqai_enabled() and "&-future_return" in dataframe.columns:
+            future_return = self._last_float(last, "&-future_return")
+            do_predict = last.get("do_predict", "n/a")
+            long_ai_limit = float(self.ai_edge_threshold.value) + self._last_float(last, "atr_pct") * 0.8
+            short_ai_limit = -long_ai_limit
+            if not self._last_bool(self._freqai_long_ok(dataframe)):
+                long_blockers.append(f"freqai future_return {future_return:.4f}<={long_ai_limit:.4f}")
+            if not self._last_bool(self._freqai_short_ok(dataframe)):
+                short_blockers.append(
+                    f"freqai future_return {future_return:.4f}>={short_ai_limit:.4f}"
+                )
+        else:
+            future_return = None
+            do_predict = "n/a"
+
+        logger.info(
+            "Signal diagnostics %s time=%s close=%.8f rsi=%.2f adx=%.2f "
+            "volume_ratio=%.2f volatility_ratio=%.2f regime=%s trends="
+            "1h_up:%s 1h_down:%s 15m_up:%s 15m_down:%s freqai_do_predict=%s "
+            "freqai_future_return=%s long_blockers=%s short_blockers=%s",
+            metadata.get("pair", "unknown"),
+            candle_time,
+            close,
+            rsi,
+            adx,
+            volume_ratio,
+            volatility_ratio,
+            (
+                "high"
+                if bool(last.get("regime_high_vol", False))
+                else "low"
+                if bool(last.get("regime_low_vol", False))
+                else "balanced"
+            ),
+            bool(last.get("trend_up_1h", False)),
+            bool(last.get("trend_down_1h", False)),
+            bool(last.get("trend_up_15m", False)),
+            bool(last.get("trend_down_15m", False)),
+            do_predict,
+            f"{future_return:.4f}" if future_return is not None else "n/a",
+            long_blockers[:8] or ["waiting_trigger"],
+            short_blockers[:8] or ["waiting_trigger"],
+        )
 
     @informative("1h")
     def populate_indicators_1h(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -397,6 +579,20 @@ class SampleStrategy(IStrategy):
 
         self._emit_signal_email(dataframe, metadata, "entry", "long")
         self._emit_signal_email(dataframe, metadata, "entry", "short")
+        self._log_entry_diagnostics(
+            dataframe,
+            metadata,
+            adx_threshold,
+            volume_threshold,
+            long_rsi_threshold,
+            short_rsi_threshold,
+            long_trend,
+            long_trigger,
+            long_range,
+            short_trend,
+            short_trigger,
+            short_range,
+        )
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:

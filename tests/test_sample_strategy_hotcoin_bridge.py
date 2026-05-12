@@ -1,4 +1,5 @@
 import json
+import logging
 import sys
 import types
 
@@ -177,3 +178,56 @@ def test_hotcoin_bridge_disabled_does_not_spawn(monkeypatch, tmp_path):
     _strategy()._dispatch_hotcoin_signal(
         "BTC/USDT:USDT", "long", pd.Series({"close": 100.0, "atr": 5.0}), "time"
     )
+
+
+def test_entry_diagnostics_logs_blockers(caplog):
+    strategy = _strategy()
+    dataframe = pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp("2026-05-12T08:00:00Z"),
+                "close": 100.0,
+                "ema20": 101.0,
+                "ema50": 102.0,
+                "ema200": 103.0,
+                "rsi": 48.0,
+                "adx": 15.0,
+                "macd": -0.2,
+                "macdsignal": 0.1,
+                "macdhist": -0.3,
+                "volume_ratio": 0.75,
+                "volatility_ratio": 0.9,
+                "atr_pct": 0.01,
+                "trend_context_long": False,
+                "trend_down_1h": False,
+                "trend_down_15m": False,
+                "trend_up_1h": False,
+                "trend_up_15m": False,
+                "range_market_1h": False,
+                "regime_high_vol": False,
+                "regime_low_vol": False,
+                "regime_balanced": True,
+            }
+        ]
+    )
+    false_series = pd.Series([False])
+
+    with caplog.at_level(logging.INFO):
+        strategy._log_entry_diagnostics(
+            dataframe,
+            {"pair": "BTC/USDT:USDT"},
+            pd.Series([22.0]),
+            pd.Series([1.2]),
+            pd.Series([34.0]),
+            pd.Series([66.0]),
+            false_series,
+            false_series,
+            false_series,
+            false_series,
+            false_series,
+            false_series,
+        )
+
+    assert "Signal diagnostics BTC/USDT:USDT" in caplog.text
+    assert "no_long_trend_context" in caplog.text
+    assert "volume_ratio 0.75<=1.05" in caplog.text
