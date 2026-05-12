@@ -12,6 +12,7 @@ def _setup_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "ENV_PATH", env_path)
     monkeypatch.setattr(server, "STATE_PATH", tmp_path / "user_data" / "trade_execution.json")
     monkeypatch.setattr(server, "SESSION_PATH", tmp_path / "user_data" / "hotcoin_session.json")
+    monkeypatch.setattr(server, "PUBLIC_BASE_PATH", "")
     return env_path
 
 
@@ -45,6 +46,26 @@ def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
     assert state["hotcoin_signal_execute"] is False
     assert state["hotcoin_order_amount"] == 3.0
     assert state["hotcoin_session_path"] == "/freqtrade/user_data/hotcoin_session.json"
+
+
+def test_save_settings_redirects_with_public_base_path(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "PUBLIC_BASE_PATH", "/trade-settings")
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/settings",
+        data={
+            "exchange": "hotcoin",
+            "hotcoin_amount": "3",
+            "hotcoin_order_type": "market",
+        },
+        auth=("admin", "secret"),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/trade-settings/?message=")
 
 
 def test_save_settings_can_disable_hotcoin(monkeypatch, tmp_path):

@@ -27,6 +27,7 @@ ROOT = Path(os.getenv("TRADE_SETTINGS_ROOT", "/workspace"))
 ENV_PATH = ROOT / ".env"
 STATE_PATH = ROOT / "user_data" / "trade_execution.json"
 SESSION_PATH = ROOT / "user_data" / "hotcoin_session.json"
+PUBLIC_BASE_PATH = os.getenv("PUBLIC_BASE_PATH", "").rstrip("/")
 
 security = HTTPBasic()
 app = FastAPI(title="Trade Execution Settings")
@@ -111,6 +112,10 @@ def _read_state() -> dict[str, Any]:
 def _write_state(data: dict[str, Any]) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def _redirect_url(message: str) -> str:
+    return f"{PUBLIC_BASE_PATH}/?message={urllib.parse.quote(message)}"
 
 
 def _masked(value: str | None) -> str:
@@ -242,7 +247,7 @@ def _page(message: str = "") -> str:
   {f'<div class="msg">{html.escape(message)}</div>' if message else ''}
   <div class="grid">
     <section class="card">
-      <form method="post" action="/settings">
+      <form method="post" action="{PUBLIC_BASE_PATH}/settings">
         <h2>下单交易所</h2>
         <div class="radio">
           <label><input type="radio" name="exchange" value="freqtrade" {checked_freqtrade}> Freqtrade 当前交易所 / OKX</label>
@@ -265,10 +270,10 @@ def _page(message: str = "") -> str:
       <p>Token：<span id="hotcoin-token">{html.escape(login_status["token_mask"])}</span></p>
       <p>Session 文件：<span id="hotcoin-session">{"已保存" if login_status["session_exists"] else "未保存"}</span></p>
       <p>状态：<span id="hotcoin-login-message">{html.escape(login_status["message"])}</span></p>
-      <form method="post" action="/hotcoin/qr/start">
+      <form method="post" action="{PUBLIC_BASE_PATH}/hotcoin/qr/start">
         <button class="secondary" type="submit">{"重新扫码登录" if login_status["has_token"] else "启动 Hotcoin 扫码登录"}</button>
       </form>
-      <form method="post" action="/hotcoin/verify" style="margin-top:10px">
+      <form method="post" action="{PUBLIC_BASE_PATH}/hotcoin/verify" style="margin-top:10px">
         <button type="submit">验证登录状态</button>
       </form>
       <p class="muted">扫码成功后会保存到 <code>user_data/hotcoin_session.json</code>，该文件不会进入 Git。</p>
@@ -285,7 +290,7 @@ def _page(message: str = "") -> str:
   async function refreshHotcoinLoginStatus() {{
     if (!hotcoinToken || !hotcoinSession) return;
     try {{
-      const response = await fetch('/hotcoin/status', {{ credentials: 'same-origin' }});
+      const response = await fetch('{PUBLIC_BASE_PATH}/hotcoin/status', {{ credentials: 'same-origin' }});
       if (!response.ok) return;
       const data = await response.json();
       hotcoinToken.textContent = data.token_mask || '未配置';
@@ -296,7 +301,7 @@ def _page(message: str = "") -> str:
   async function refreshQrStatus() {{
     if (!qrStatus || !qrMessage) return;
     try {{
-      const response = await fetch('/hotcoin/qr/status', {{ credentials: 'same-origin' }});
+      const response = await fetch('{PUBLIC_BASE_PATH}/hotcoin/qr/status', {{ credentials: 'same-origin' }});
       if (!response.ok) return;
       const data = await response.json();
       qrStatus.textContent = data.status || '';
@@ -383,7 +388,7 @@ async def save_settings(
         }
     )
     message = "设置已保存，策略会在下一次信号实时读取，无需重启 Freqtrade。"
-    return RedirectResponse(f"/?message={urllib.parse.quote(message)}", status_code=303)
+    return RedirectResponse(_redirect_url(message), status_code=303)
 
 
 @app.post("/hotcoin/qr/start")
@@ -409,14 +414,14 @@ def start_hotcoin_qr(_: Annotated[str, Depends(_auth)]) -> RedirectResponse:
         message = "二维码已生成，请扫码。"
     except HotcoinError as exc:
         message = f"生成二维码失败：{exc}"
-    return RedirectResponse(f"/?message={urllib.parse.quote(message)}", status_code=303)
+    return RedirectResponse(_redirect_url(message), status_code=303)
 
 
 @app.post("/hotcoin/verify")
 def verify_hotcoin(_: Annotated[str, Depends(_auth)]) -> RedirectResponse:
     status_data = _verify_hotcoin_login()
     message = str(status_data.get("message", "验证完成。"))
-    return RedirectResponse(f"/?message={urllib.parse.quote(message)}", status_code=303)
+    return RedirectResponse(_redirect_url(message), status_code=303)
 
 
 @app.get("/hotcoin/qr/status")

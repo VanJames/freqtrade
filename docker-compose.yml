@@ -124,6 +124,7 @@ services:
       - .env
     environment:
       TRADE_SETTINGS_ROOT: /workspace
+      PUBLIC_BASE_PATH: /trade-settings
     volumes:
       - ".:/workspace"
     working_dir: /workspace
