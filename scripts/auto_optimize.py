@@ -18,6 +18,7 @@ import subprocess
 import smtplib
 import ssl
 import sys
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
@@ -615,6 +616,10 @@ def main() -> int:
     active_strategy_dir = Path(args.strategy_path).resolve()
     active_strategy_py = active_strategy_dir / f"{strategy}.py"
     active_strategy_json = active_strategy_dir / f"{strategy}.json"
+    for _ in range(10):
+        if active_strategy_py.is_file():
+            break
+        time.sleep(1)
     if not active_strategy_py.is_file():
         raise FileNotFoundError(f"Strategy file not found: {active_strategy_py}")
 

@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 import pandas as pd
@@ -82,6 +83,23 @@ def fetch_klines(symbol: str, interval: str, limit: int, trading_mode: str) -> p
     return pd.DataFrame(rows)
 
 
+def empty_summary(pair: str, timeframe: str, error: str) -> dict[str, Any]:
+    return {
+        "pair": pair,
+        "timeframe": timeframe,
+        "error": error,
+        "last_close": 0.0,
+        "return_pct": 0.0,
+        "atr_pct": 0.0,
+        "bb_width": 0.0,
+        "ema20_above_ema50": False,
+        "ema50_above_ema200": False,
+        "ema20_below_ema50": False,
+        "ema50_below_ema200": False,
+        "volume_ratio": 0.0,
+    }
+
+
 def summarize_frame(pair: str, timeframe: str, frame: pd.DataFrame) -> CandleSummary:
     if frame.empty:
         raise ValueError(f"No candles returned for {pair} {timeframe}")
@@ -137,23 +155,26 @@ def build_snapshot(config: dict[str, Any], limit: int) -> dict[str, Any]:
         for timeframe in timeframes:
             if timeframe not in TIMEFRAME_TO_MINUTES:
                 continue
-            frame = fetch_klines(symbol, timeframe, limit, trading_mode)
-            summary = summarize_frame(pair, timeframe, frame)
-            per_pair.append(
-                {
-                    "pair": summary.pair,
-                    "timeframe": summary.timeframe,
-                    "last_close": summary.last_close,
-                    "return_pct": summary.return_pct,
-                    "atr_pct": summary.atr_pct,
-                    "bb_width": summary.bb_width,
-                    "ema20_above_ema50": summary.ema20_above_ema50,
-                    "ema50_above_ema200": summary.ema50_above_ema200,
-                    "ema20_below_ema50": summary.ema20_below_ema50,
-                    "ema50_below_ema200": summary.ema50_below_ema200,
-                    "volume_ratio": summary.volume_ratio,
-                }
-            )
+            try:
+                frame = fetch_klines(symbol, timeframe, limit, trading_mode)
+                summary = summarize_frame(pair, timeframe, frame)
+                per_pair.append(
+                    {
+                        "pair": summary.pair,
+                        "timeframe": summary.timeframe,
+                        "last_close": summary.last_close,
+                        "return_pct": summary.return_pct,
+                        "atr_pct": summary.atr_pct,
+                        "bb_width": summary.bb_width,
+                        "ema20_above_ema50": summary.ema20_above_ema50,
+                        "ema50_above_ema200": summary.ema50_above_ema200,
+                        "ema20_below_ema50": summary.ema20_below_ema50,
+                        "ema50_below_ema200": summary.ema50_below_ema200,
+                        "volume_ratio": summary.volume_ratio,
+                    }
+                )
+            except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+                per_pair.append(empty_summary(pair, timeframe, str(exc)))
 
     atr_values = [item["atr_pct"] for item in per_pair if item["atr_pct"] > 0]
     bb_values = [item["bb_width"] for item in per_pair if item["bb_width"] > 0]
