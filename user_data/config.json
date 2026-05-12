@@ -55,6 +55,7 @@
         "secret": "",
         "password": "",
         "log_responses": false,
+        "enable_ws": false,
         "ccxt_config": {
             "enableRateLimit": true,
             "rateLimit": 500,
