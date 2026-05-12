@@ -1004,6 +1004,14 @@ CONF_SCHEMA = {
                     "type": "integer",
                     "default": 60,
                 },
+                "leverage_tiers_pair_whitelist_only": {
+                    "description": (
+                        "Only load futures leverage tiers for configured pair_whitelist pairs. "
+                        "Useful on exchanges that return leverage-tier errors for unrelated markets."
+                    ),
+                    "type": "boolean",
+                    "default": False,
+                },
                 "ccxt_config": {"description": "CCXT configuration settings.", "type": "object"},
                 "ccxt_async_config": {
                     "description": (

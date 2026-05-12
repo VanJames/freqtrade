@@ -79,7 +79,8 @@
             "DOGE/USDT:USDT"
         ],
         "outdated_offset": 5,
-        "markets_refresh_interval": 60
+        "markets_refresh_interval": 60,
+        "leverage_tiers_pair_whitelist_only": true
     },
     "pairlists": [
         {

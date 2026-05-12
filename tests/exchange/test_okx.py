@@ -513,6 +513,48 @@ def test_load_leverage_tiers_okx(default_conf, mocker, markets, tmp_path, caplog
     assert log_has(logmsg, caplog)
 
 
+def test_load_leverage_tiers_okx_pair_whitelist_only(default_conf, mocker, markets, tmp_path):
+    default_conf["datadir"] = tmp_path
+    default_conf["trading_mode"] = "futures"
+    default_conf["margin_mode"] = "isolated"
+    default_conf["stake_currency"] = "USDT"
+    default_conf["exchange"]["pair_whitelist"] = ["ETH/USDT:USDT"]
+    default_conf["exchange"]["leverage_tiers_pair_whitelist_only"] = True
+
+    api_mock = MagicMock()
+    type(api_mock).has = PropertyMock(
+        return_value={
+            "fetchLeverageTiers": False,
+            "fetchMarketLeverageTiers": True,
+        }
+    )
+    api_mock.fetch_market_leverage_tiers = AsyncMock(
+        return_value=[
+            {
+                "tier": 1,
+                "minNotional": 0,
+                "maxNotional": 2000,
+                "maintenanceMarginRate": 0.01,
+                "maxLeverage": 75,
+                "info": {"uly": "ETH-USDT"},
+            }
+        ]
+    )
+
+    exchange = get_patched_exchange(mocker, default_conf, api_mock, exchange="okx")
+    exchange.trading_mode = TradingMode.FUTURES
+    exchange.margin_mode = MarginMode.ISOLATED
+    exchange.markets = markets
+
+    api_mock.fetch_market_leverage_tiers.reset_mock()
+    tiers = exchange.load_leverage_tiers()
+
+    assert set(tiers) == {"ETH/USDT:USDT"}
+    assert [
+        call_args.args[0] for call_args in api_mock.fetch_market_leverage_tiers.await_args_list
+    ] == ["ETH/USDT:USDT"]
+
+
 def test__set_leverage_okx(mocker, default_conf):
     api_mock = MagicMock()
     api_mock.set_leverage = MagicMock()

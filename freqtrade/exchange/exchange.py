@@ -3572,6 +3572,16 @@ class Exchange:
                         and market["quote"] == self._config["stake_currency"]
                     )
                 ]
+                if self._config.get("exchange", {}).get("leverage_tiers_pair_whitelist_only"):
+                    configured_pairs = set(
+                        self._config.get("exchange", {}).get("pair_whitelist") or []
+                    )
+                    if configured_pairs:
+                        symbols = [symbol for symbol in symbols if symbol in configured_pairs]
+                        logger.info(
+                            f"Restricting leverage_tiers initialization to "
+                            f"{len(symbols)} whitelisted markets."
+                        )
 
                 tiers: dict[str, list[dict]] = {}
 
