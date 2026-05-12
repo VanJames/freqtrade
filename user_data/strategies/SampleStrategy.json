@@ -1,0 +1,38 @@
+{
+  "strategy_name": "SampleStrategy",
+  "params": {
+    "max_open_trades": {
+      "max_open_trades": 3
+    },
+    "buy": {
+      "risk_per_trade": 0.005,
+      "adx_threshold": 23,
+      "ai_edge_threshold": 0.0192,
+      "long_rsi_trigger": 38,
+      "volume_ratio_min": 1.9
+    },
+    "sell": {
+      "atr_stop_mult": 1.51,
+      "atr_trail_mult": 0.98,
+      "short_rsi_trigger": 58
+    },
+    "protection": {},
+    "roi": {
+      "0": 0.247,
+      "31": 0.079,
+      "71": 0.01,
+      "177": 0
+    },
+    "stoploss": {
+      "stoploss": -0.28
+    },
+    "trailing": {
+      "trailing_stop": true,
+      "trailing_stop_positive": 0.072,
+      "trailing_stop_positive_offset": 0.091,
+      "trailing_only_offset_is_reached": false
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2026-05-12 02:14:17.819890+00:00"
+}

@@ -40,7 +40,7 @@ services:
     volumes:
       - "./user_data:/freqtrade/user_data"
     ports:
-      - "127.0.0.1:3000:8080"
+      - "0.0.0.0:3000:8080"
     # Default command used when running `docker compose up`
     command: >
       trade

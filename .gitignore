@@ -12,6 +12,16 @@ user_data/*
 user_data/freqaimodels/*
 user_data/models/*
 user_data/notebooks/*
+!user_data/config.json
+!user_data/strategies/
+!user_data/strategies/SampleStrategy.py
+!user_data/strategies/SampleStrategy.json
+!user_data/data/
+user_data/data/*
+!user_data/data/okx/
+user_data/data/okx/*
+!user_data/data/okx/futures/
+!user_data/data/okx/futures/*
 freqtrade-plot.html
 freqtrade-profit-plot.html
 freqtrade/rpc/api_server/ui/*
