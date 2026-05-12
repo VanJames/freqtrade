@@ -139,7 +139,30 @@ def _hotcoin_login_status(env: dict[str, str] | None = None) -> dict[str, Any]:
         "token_mask": _masked(token),
         "has_token": bool(token),
         "session_exists": SESSION_PATH.exists(),
+        "verified": None,
+        "message": "已保存登录态，建议点击验证确认是否仍有效。" if token else "未登录，请扫码登录。",
     }
+
+
+def _verify_hotcoin_login() -> dict[str, Any]:
+    status_data = _hotcoin_login_status()
+    if not status_data["has_token"]:
+        return {**status_data, "verified": False, "message": "未登录，请扫码登录。"}
+    try:
+        client = HotcoinWebClient(session_path=SESSION_PATH)
+        data = client.user_info()
+        ok = isinstance(data, dict) and data.get("code") == 200 and bool(data.get("data"))
+        return {
+            **_hotcoin_login_status(),
+            "verified": ok,
+            "message": "Hotcoin 登录态有效。" if ok else f"Hotcoin 登录态可能已失效：{data}",
+        }
+    except Exception as exc:
+        return {
+            **_hotcoin_login_status(),
+            "verified": False,
+            "message": f"验证失败，可能已失效或网络异常：{exc}",
+        }
 
 
 def _selected_exchange(env: dict[str, str]) -> str:
@@ -241,8 +264,12 @@ def _page(message: str = "") -> str:
       <h2>Hotcoin 登录状态</h2>
       <p>Token：<span id="hotcoin-token">{html.escape(login_status["token_mask"])}</span></p>
       <p>Session 文件：<span id="hotcoin-session">{"已保存" if login_status["session_exists"] else "未保存"}</span></p>
+      <p>状态：<span id="hotcoin-login-message">{html.escape(login_status["message"])}</span></p>
       <form method="post" action="/hotcoin/qr/start">
-        <button class="secondary" type="submit">启动 Hotcoin 扫码登录</button>
+        <button class="secondary" type="submit">{"重新扫码登录" if login_status["has_token"] else "启动 Hotcoin 扫码登录"}</button>
+      </form>
+      <form method="post" action="/hotcoin/verify" style="margin-top:10px">
+        <button type="submit">验证登录状态</button>
       </form>
       <p class="muted">扫码成功后会保存到 <code>user_data/hotcoin_session.json</code>，该文件不会进入 Git。</p>
     </aside>
@@ -254,6 +281,7 @@ def _page(message: str = "") -> str:
   const qrMessage = document.getElementById('qr-message');
   const hotcoinToken = document.getElementById('hotcoin-token');
   const hotcoinSession = document.getElementById('hotcoin-session');
+  const hotcoinLoginMessage = document.getElementById('hotcoin-login-message');
   async function refreshHotcoinLoginStatus() {{
     if (!hotcoinToken || !hotcoinSession) return;
     try {{
@@ -262,6 +290,7 @@ def _page(message: str = "") -> str:
       const data = await response.json();
       hotcoinToken.textContent = data.token_mask || '未配置';
       hotcoinSession.textContent = data.session_exists ? '已保存' : '未保存';
+      if (hotcoinLoginMessage) hotcoinLoginMessage.textContent = data.message || '';
     }} catch (error) {{}}
   }}
   async function refreshQrStatus() {{
@@ -383,6 +412,13 @@ def start_hotcoin_qr(_: Annotated[str, Depends(_auth)]) -> RedirectResponse:
     return RedirectResponse(f"/?message={urllib.parse.quote(message)}", status_code=303)
 
 
+@app.post("/hotcoin/verify")
+def verify_hotcoin(_: Annotated[str, Depends(_auth)]) -> RedirectResponse:
+    status_data = _verify_hotcoin_login()
+    message = str(status_data.get("message", "验证完成。"))
+    return RedirectResponse(f"/?message={urllib.parse.quote(message)}", status_code=303)
+
+
 @app.get("/hotcoin/qr/status")
 def hotcoin_qr_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
     with _qr_lock:
@@ -396,6 +432,11 @@ def hotcoin_qr_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
 @app.get("/hotcoin/status")
 def hotcoin_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
     return _hotcoin_login_status()
+
+
+@app.get("/hotcoin/verify")
+def hotcoin_verify_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
+    return _verify_hotcoin_login()
 
 
 @app.get("/", response_class=HTMLResponse)

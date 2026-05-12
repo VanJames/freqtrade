@@ -163,4 +163,50 @@ def test_hotcoin_status_prefers_session_token(monkeypatch, tmp_path):
         "token_mask": "abcd...7890",
         "has_token": True,
         "session_exists": True,
+        "verified": None,
+        "message": "已保存登录态，建议点击验证确认是否仍有效。",
     }
+
+
+def test_hotcoin_verify_login_success(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    server.SESSION_PATH.parent.mkdir(parents=True)
+    server.SESSION_PATH.write_text(json.dumps({"token": "abcdef1234567890"}))
+
+    class FakeHotcoinWebClient:
+        def __init__(self, session_path):
+            self.session_path = session_path
+
+        def user_info(self):
+            return {"code": 200, "data": {"fid": 123}}
+
+    monkeypatch.setattr(server, "HotcoinWebClient", FakeHotcoinWebClient)
+    client = TestClient(server.app)
+
+    response = client.get("/hotcoin/verify", auth=("admin", "secret"))
+
+    assert response.status_code == 200
+    assert response.json()["verified"] is True
+    assert response.json()["message"] == "Hotcoin 登录态有效。"
+
+
+def test_hotcoin_verify_login_failure(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    server.SESSION_PATH.parent.mkdir(parents=True)
+    server.SESSION_PATH.write_text(json.dumps({"token": "abcdef1234567890"}))
+
+    class FakeHotcoinWebClient:
+        def __init__(self, session_path):
+            self.session_path = session_path
+
+        def user_info(self):
+            return {"code": 401, "msg": "unauthorized"}
+
+    monkeypatch.setattr(server, "HotcoinWebClient", FakeHotcoinWebClient)
+    client = TestClient(server.app)
+
+    response = client.get("/hotcoin/verify", auth=("admin", "secret"))
+
+    assert response.status_code == 200
+    assert response.json()["verified"] is False
+    assert "可能已失效" in response.json()["message"]
