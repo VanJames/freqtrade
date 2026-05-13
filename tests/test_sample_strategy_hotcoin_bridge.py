@@ -231,3 +231,22 @@ def test_entry_diagnostics_logs_blockers(caplog):
     assert "Signal diagnostics BTC/USDT:USDT" in caplog.text
     assert "no_long_trend_context" in caplog.text
     assert "volume_ratio 0.75<=1.05" in caplog.text
+
+
+def test_emit_signal_email_ignores_non_entry(monkeypatch):
+    strategy = _strategy()
+    calls = []
+    monkeypatch.setattr(strategy, "_send_email_async", lambda *args: calls.append(args))
+    dataframe = pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp("2026-05-12T08:00:00Z"),
+                "exit_long": 1,
+                "close": 100.0,
+            }
+        ]
+    )
+
+    strategy._emit_signal_email(dataframe, {"pair": "BTC/USDT:USDT"}, "exit", "long")
+
+    assert calls == []

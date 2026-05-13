@@ -757,6 +757,14 @@ class SampleStrategy(IStrategy):
         return True
 
     def _emit_signal_email(self, dataframe: DataFrame, metadata: dict, action: str, side: str) -> None:
+        if action != "entry":
+            logger.debug(
+                "Ignoring non-entry signal email for %s action=%s side=%s",
+                metadata.get("pair", "unknown"),
+                action,
+                side,
+            )
+            return
         if self.config.get("runmode") not in (RunMode.DRY_RUN, RunMode.LIVE):
             return
         if dataframe.empty:
