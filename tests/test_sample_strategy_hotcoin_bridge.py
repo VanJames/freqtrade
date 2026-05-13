@@ -70,6 +70,21 @@ def test_load_trade_execution_settings_missing(monkeypatch, tmp_path):
     assert _strategy()._load_trade_execution_settings() == {}
 
 
+def test_new_entries_disabled_reads_runtime_state(monkeypatch, tmp_path):
+    settings_path = tmp_path / "trade_execution.json"
+    settings_path.write_text(json.dumps({"live_trading_disabled": True}))
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+
+    assert _strategy()._new_entries_disabled() is True
+
+
+def test_new_entries_disabled_reads_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("LIVE_TRADING_DISABLED", "true")
+
+    assert _strategy()._new_entries_disabled() is True
+
+
 def test_hotcoin_bridge_generates_dry_run_command(monkeypatch, tmp_path):
     settings_path = tmp_path / "trade_execution.json"
     settings_path.write_text(

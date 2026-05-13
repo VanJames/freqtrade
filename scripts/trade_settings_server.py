@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import base64
 import html
 import json
 import os
@@ -28,6 +27,8 @@ ENV_PATH = ROOT / ".env"
 CONFIG_PATH = ROOT / "user_data" / "config.json"
 STATE_PATH = ROOT / "user_data" / "trade_execution.json"
 SESSION_PATH = ROOT / "user_data" / "hotcoin_session.json"
+SIGNAL_DIAGNOSTICS_PATH = ROOT / "user_data" / "signals" / "signal_diagnostics.jsonl"
+RESEARCH_LEDGER_PATH = ROOT / "user_data" / "autoopt" / "research_ledger.jsonl"
 PUBLIC_BASE_PATH = os.getenv("PUBLIC_BASE_PATH", "").rstrip("/")
 
 security = HTTPBasic()
@@ -133,6 +134,22 @@ def _write_state(data: dict[str, Any]) -> None:
     STATE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
+def _read_jsonl_tail(path: Path, limit: int = 100) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for raw in path.read_text().splitlines()[-limit:]:
+        if not raw.strip():
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            records.append({"raw": raw})
+            continue
+        records.append(data if isinstance(data, dict) else {"value": data})
+    return records
+
+
 def _redirect_url(message: str) -> str:
     return f"{PUBLIC_BASE_PATH}/?message={urllib.parse.quote(message)}"
 
@@ -212,6 +229,9 @@ def _page(message: str = "") -> str:
     execute = str(state.get("hotcoin_signal_execute", env.get("HOTCOIN_SIGNAL_EXECUTE", "false"))).lower()
     amount = str(state.get("hotcoin_order_amount", env.get("HOTCOIN_ORDER_AMOUNT", "0")))
     order_type = str(state.get("hotcoin_order_type", env.get("HOTCOIN_ORDER_TYPE", "market")))
+    entries_disabled = bool(state.get("live_trading_disabled", False)) or env.get(
+        "LIVE_TRADING_DISABLED", ""
+    ).lower() in {"1", "true", "yes", "on"}
     login_status = _hotcoin_login_status(env)
     with _qr_lock:
         qr = dict(_qr_state)
@@ -234,6 +254,7 @@ def _page(message: str = "") -> str:
     selected_limit = "selected" if order_type == "limit" else ""
     checked_dry = "checked" if dry_run else ""
     checked_live = "checked" if not dry_run else ""
+    checked_disabled = "checked" if entries_disabled else ""
     mode_label = "模拟盘 dry_run=true" if dry_run else "真实盘 dry_run=false"
 
     return f"""<!doctype html>
@@ -261,6 +282,7 @@ def _page(message: str = "") -> str:
     .muted {{ color: #5f6b7a; font-size: 14px; }}
     .msg {{ margin: 18px 0; padding: 12px 14px; background: #ecfeff; border: 1px solid #67e8f9; border-radius: 14px; }}
     .qr img {{ width: 280px; max-width: 100%; border-radius: 16px; background: #fff; padding: 12px; }}
+    .links {{ display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0; }}
     @media (max-width: 760px) {{ .grid {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
@@ -268,6 +290,10 @@ def _page(message: str = "") -> str:
 <main>
   <h1>交易执行设置</h1>
   <p class="muted">选择策略信号最终在哪个交易所执行。默认建议先使用 Hotcoin dry-run，确认日志正常后再开启真实执行。</p>
+  <div class="links">
+    <a class="button secondary" href="{PUBLIC_BASE_PATH}/signals">信号诊断</a>
+    <a class="button secondary" href="{PUBLIC_BASE_PATH}/research">优化审计</a>
+  </div>
   {f'<div class="msg">{html.escape(message)}</div>' if message else ''}
   <div class="grid">
     <section class="card">
@@ -284,6 +310,9 @@ def _page(message: str = "") -> str:
         </div>
         <label><input type="checkbox" name="live_confirm" value="true" style="width:auto"> 我确认已配置交易所 Key，并理解真实盘会实际下单</label>
         <p class="muted">当前 Freqtrade 模式：{html.escape(mode_label)}。修改该项后必须重启 freqtrade 容器才生效。</p>
+        <h2>全局风控</h2>
+        <label><input type="checkbox" name="live_trading_disabled" value="true" {checked_disabled} style="width:auto"> 暂停新开仓</label>
+        <p class="muted">开启后策略会继续计算和记录诊断，但不会产生新的多/空入场信号；适合接口异常、连续亏损或人工接管时使用。</p>
         <label>Hotcoin 下单数量</label>
         <input name="hotcoin_amount" value="{html.escape(amount)}" placeholder="例如 1" />
         <label>订单类型</label>
@@ -387,6 +416,8 @@ def _landing_page() -> str:
     <nav>
       <a href="/trade">交易面板</a>
       <a href="/trade-settings/">交易设置</a>
+      <a href="/trade-settings/signals">信号诊断</a>
+      <a href="/trade-settings/research">优化审计</a>
     </nav>
   </header>
   <main>
@@ -402,6 +433,11 @@ def _landing_page() -> str:
         <h2>交易执行设置</h2>
         <p>选择 OKX/Freqtrade 或 Hotcoin，下单数量、真实执行开关和 Hotcoin 扫码登录。</p>
         <a class="button dark" href="/trade-settings/">打开交易设置</a>
+      </article>
+      <article class="card">
+        <h2>策略审计</h2>
+        <p>查看没有开仓的具体阻断原因，以及 AI 调参进化的每次审计记录。</p>
+        <a class="button" href="/trade-settings/signals">查看信号诊断</a>
       </article>
     </section>
   </main>
@@ -454,6 +490,7 @@ async def save_settings(
     hotcoin_execute = form.get("hotcoin_execute")
     freqtrade_mode = form.get("freqtrade_mode", "dry_run")
     live_confirm = form.get("live_confirm")
+    live_trading_disabled = form.get("live_trading_disabled") == "true"
     if exchange not in {"freqtrade", "hotcoin"}:
         raise HTTPException(status_code=400, detail="Invalid exchange.")
     if hotcoin_order_type not in {"market", "limit"}:
@@ -474,6 +511,7 @@ async def save_settings(
             "hotcoin_order_amount": amount,
             "hotcoin_order_type": hotcoin_order_type,
             "hotcoin_mode": "web",
+            "live_trading_disabled": live_trading_disabled,
             "hotcoin_session_path": "/freqtrade/user_data/hotcoin_session.json",
             "hotcoin_adapter_path": "/freqtrade/scripts/hotcoin_adapter.py",
             "updated_at": int(time.time()),
@@ -484,6 +522,44 @@ async def save_settings(
     else:
         message = "设置已保存：Freqtrade 已切换为模拟盘配置。请重启 freqtrade 容器后生效；Hotcoin 桥接设置下一次信号实时读取。"
     return RedirectResponse(_redirect_url(message), status_code=303)
+
+
+def _audit_page(title: str, description: str, records: list[dict[str, Any]]) -> str:
+    rows = "\n".join(
+        f"<tr><td>{idx}</td><td><pre>{html.escape(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True))}</pre></td></tr>"
+        for idx, record in enumerate(reversed(records), start=1)
+    )
+    if not rows:
+        rows = '<tr><td colspan="2">暂无记录</td></tr>'
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{html.escape(title)}</title>
+  <style>
+    :root {{ font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #172033; }}
+    body {{ margin: 0; background: linear-gradient(135deg, #f8fafc, #ecfeff); }}
+    main {{ width: min(1120px, calc(100vw - 32px)); margin: 32px auto; }}
+    a {{ color: #0f766e; font-weight: 800; text-decoration: none; }}
+    .card {{ background: rgba(255,255,255,.9); border: 1px solid rgba(23,32,51,.12); border-radius: 22px; padding: 22px; box-shadow: 0 18px 48px rgba(28,43,70,.10); }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 18px; }}
+    td {{ vertical-align: top; border-top: 1px solid #d8e1ea; padding: 12px; }}
+    pre {{ white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 13px; }}
+    .muted {{ color: #64748b; }}
+  </style>
+</head>
+<body>
+<main>
+  <p><a href="{PUBLIC_BASE_PATH}/">返回交易设置</a></p>
+  <section class="card">
+    <h1>{html.escape(title)}</h1>
+    <p class="muted">{html.escape(description)}</p>
+    <table><tbody>{rows}</tbody></table>
+  </section>
+</main>
+</body>
+</html>"""
 
 
 @app.post("/hotcoin/qr/start")
@@ -537,6 +613,24 @@ def hotcoin_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
 @app.get("/hotcoin/verify")
 def hotcoin_verify_status(_: Annotated[str, Depends(_auth)]) -> dict[str, Any]:
     return _verify_hotcoin_login()
+
+
+@app.get("/signals", response_class=HTMLResponse)
+def signal_diagnostics(_: Annotated[str, Depends(_auth)]) -> str:
+    return _audit_page(
+        "信号诊断",
+        "最近 100 条未开仓诊断和入场阻断原因，用于判断为什么没有开单。",
+        _read_jsonl_tail(SIGNAL_DIAGNOSTICS_PATH),
+    )
+
+
+@app.get("/research", response_class=HTMLResponse)
+def research_ledger(_: Annotated[str, Depends(_auth)]) -> str:
+    return _audit_page(
+        "优化审计",
+        "最近 100 次自动优化、AI advisor 建议和参数晋级记录。",
+        _read_jsonl_tail(RESEARCH_LEDGER_PATH),
+    )
 
 
 @app.get("/landing", response_class=HTMLResponse)

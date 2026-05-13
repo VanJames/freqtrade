@@ -14,12 +14,13 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
+VALID_PROFILES = {"conservative", "balanced", "aggressive"}
 
 
 def infer_base_url(model: str, base_url: str | None = None) -> str:
@@ -72,11 +73,98 @@ def build_prompt(snapshot: dict[str, Any]) -> str:
                 "confidence": "number from 0 to 1",
                 "reason": "short explanation",
                 "suggested_changes": ["optional short bullet strings"],
+                "agents": {
+                    "market_agent": "market regime and trend assessment",
+                    "risk_agent": "risk level and blockers",
+                    "parameter_agent": "parameter profile preference",
+                    "final_judge": "final profile decision",
+                },
             },
             "snapshot": snapshot,
         },
         ensure_ascii=False,
     )
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def build_agent_assessments(snapshot: dict[str, Any]) -> dict[str, Any]:
+    summary = snapshot.get("summary", {}) if isinstance(snapshot, dict) else {}
+    per_pair = snapshot.get("per_pair", []) if isinstance(snapshot, dict) else []
+    per_pair = per_pair if isinstance(per_pair, list) else []
+
+    observations = int(_as_float(summary.get("observations"), 0.0))
+    error_count = sum(1 for item in per_pair if isinstance(item, dict) and item.get("error"))
+    usable_count = max(observations - error_count, 0)
+    median_atr_pct = _as_float(summary.get("median_atr_pct"))
+    median_bb_width = _as_float(summary.get("median_bb_width"))
+    trend_up_count = int(_as_float(summary.get("trend_up_count")))
+    trend_down_count = int(_as_float(summary.get("trend_down_count")))
+
+    if observations <= 0 or usable_count <= 0:
+        profile = "conservative"
+        risk_level = "blocked"
+        confidence = 0.1
+        reason = "No usable market observations are available."
+    elif error_count / max(observations, 1) >= 0.5:
+        profile = "conservative"
+        risk_level = "high"
+        confidence = 0.35
+        reason = "Most market observations failed, so profile should remain defensive."
+    elif median_atr_pct >= 0.025 or median_bb_width >= 0.08:
+        profile = "conservative"
+        risk_level = "high"
+        confidence = 0.62
+        reason = "Volatility is elevated across the snapshot."
+    elif (
+        max(trend_up_count, trend_down_count) >= max(2, int(observations * 0.45))
+        and median_atr_pct >= 0.006
+    ):
+        profile = "aggressive"
+        risk_level = "medium"
+        confidence = 0.58
+        reason = "Directional alignment is broad enough to allow a more active profile."
+    elif median_atr_pct < 0.003 and median_bb_width < 0.015:
+        profile = "conservative"
+        risk_level = "low_activity"
+        confidence = 0.52
+        reason = "Market movement is too compressed for reliable signal generation."
+    else:
+        profile = "balanced"
+        risk_level = "normal"
+        confidence = 0.55
+        reason = "Market regime is mixed without an extreme risk condition."
+
+    return {
+        "market_agent": {
+            "trend_up_count": trend_up_count,
+            "trend_down_count": trend_down_count,
+            "median_atr_pct": median_atr_pct,
+            "median_bb_width": median_bb_width,
+            "assessment": reason,
+        },
+        "risk_agent": {
+            "risk_level": risk_level,
+            "observations": observations,
+            "usable_observations": usable_count,
+            "error_count": error_count,
+        },
+        "parameter_agent": {
+            "preferred_profile": profile,
+            "confidence": confidence,
+            "reason": reason,
+        },
+        "final_judge": {
+            "profile": profile,
+            "confidence": confidence,
+            "reason": reason,
+        },
+    }
 
 
 def extract_output_text(payload: dict[str, Any]) -> str:
@@ -173,6 +261,20 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def merge_agent_assessments(result: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
+    agents = build_agent_assessments(snapshot)
+    if not isinstance(result, dict):
+        result = {"raw_output": result}
+    if result.get("profile") not in VALID_PROFILES:
+        result["profile"] = agents["final_judge"]["profile"]
+    result.setdefault("confidence", agents["final_judge"]["confidence"])
+    result.setdefault("reason", agents["final_judge"]["reason"])
+    result.setdefault("suggested_changes", [])
+    result["agents"] = agents
+    result.setdefault("risk_level", agents["risk_agent"]["risk_level"])
+    return result
+
+
 def main() -> int:
     args = parse_args()
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
@@ -189,7 +291,7 @@ def main() -> int:
         prompt=prompt,
         timeout=args.timeout,
     )
-    result = normalize_payload(payload)
+    result = merge_agent_assessments(normalize_payload(payload), snapshot)
 
     rendered = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
     print(rendered)

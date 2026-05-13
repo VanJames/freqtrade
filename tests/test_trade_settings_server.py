@@ -16,6 +16,14 @@ def _setup_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "CONFIG_PATH", config_path)
     monkeypatch.setattr(server, "STATE_PATH", tmp_path / "user_data" / "trade_execution.json")
     monkeypatch.setattr(server, "SESSION_PATH", tmp_path / "user_data" / "hotcoin_session.json")
+    monkeypatch.setattr(
+        server,
+        "SIGNAL_DIAGNOSTICS_PATH",
+        tmp_path / "user_data" / "signals" / "signal_diagnostics.jsonl",
+    )
+    monkeypatch.setattr(
+        server, "RESEARCH_LEDGER_PATH", tmp_path / "user_data" / "autoopt" / "research_ledger.jsonl"
+    )
     monkeypatch.setattr(server, "PUBLIC_BASE_PATH", "")
     return env_path
 
@@ -39,6 +47,7 @@ def test_landing_page_has_ai_trading_menu(monkeypatch, tmp_path):
     assert "<title>AI Trading</title>" in response.text
     assert 'href="/trade"' in response.text
     assert 'href="/trade-settings/"' in response.text
+    assert 'href="/trade-settings/signals"' in response.text
 
 
 def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
@@ -52,6 +61,7 @@ def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
             "hotcoin_amount": "3",
             "hotcoin_order_type": "market",
             "freqtrade_mode": "dry_run",
+            "live_trading_disabled": "true",
         },
         auth=("admin", "secret"),
         follow_redirects=False,
@@ -61,9 +71,33 @@ def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
     state = json.loads(server.STATE_PATH.read_text())
     assert state["hotcoin_signal_bridge_enabled"] is True
     assert state["hotcoin_signal_execute"] is False
+    assert state["live_trading_disabled"] is True
     assert state["hotcoin_order_amount"] == 3.0
     assert state["hotcoin_session_path"] == "/freqtrade/user_data/hotcoin_session.json"
     assert json.loads(server.CONFIG_PATH.read_text())["dry_run"] is True
+
+
+def test_audit_pages_render_jsonl_tail(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    server.SIGNAL_DIAGNOSTICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    server.SIGNAL_DIAGNOSTICS_PATH.write_text(
+        json.dumps({"pair": "BTC/USDT:USDT", "long_blockers": ["adx<=23"]}) + "\n"
+    )
+    server.RESEARCH_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    server.RESEARCH_LEDGER_PATH.write_text(
+        json.dumps({"run_id": "20260513-010000", "promoted": False}) + "\n"
+    )
+    client = TestClient(server.app)
+
+    signals = client.get("/signals", auth=("admin", "secret"))
+    research = client.get("/research", auth=("admin", "secret"))
+
+    assert signals.status_code == 200
+    assert "信号诊断" in signals.text
+    assert "BTC/USDT:USDT" in signals.text
+    assert research.status_code == 200
+    assert "优化审计" in research.text
+    assert "20260513-010000" in research.text
 
 
 def test_save_settings_redirects_with_public_base_path(monkeypatch, tmp_path):

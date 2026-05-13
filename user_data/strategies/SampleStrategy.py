@@ -148,6 +148,7 @@ class SampleStrategy(IStrategy):
         self._signal_diagnostic_cache: set[str] = set()
         self._email_warned = False
         self._freqai_warned = False
+        self._trading_disabled_warned = False
 
     def _freqai_enabled(self) -> bool:
         return self.config.get("freqai", {}).get("enabled", False)
@@ -619,6 +620,16 @@ class SampleStrategy(IStrategy):
 
         trend_long_entry = long_trend & long_trigger_recent
         trend_short_entry = short_trend & short_trigger_recent
+        trading_disabled = self._new_entries_disabled()
+        if trading_disabled:
+            trend_long_entry = pd.Series(False, index=dataframe.index)
+            long_range = pd.Series(False, index=dataframe.index)
+            trend_short_entry = pd.Series(False, index=dataframe.index)
+            short_range = pd.Series(False, index=dataframe.index)
+            if not getattr(self, "_trading_disabled_warned", False):
+                logger.warning("New entries are disabled by trade execution settings.")
+                self._trading_disabled_warned = True
+
         dataframe.loc[trend_long_entry, ["enter_long", "enter_tag"]] = (1, "trend_long")
         dataframe.loc[long_range, ["enter_long", "enter_tag"]] = (1, "meanrev_long")
         dataframe.loc[trend_short_entry, ["enter_short", "enter_tag"]] = (1, "trend_short")
@@ -960,6 +971,13 @@ class SampleStrategy(IStrategy):
         except Exception as exc:
             logger.warning("Failed to load trade execution settings from %s: %s", path, exc)
             return {}
+
+    def _new_entries_disabled(self) -> bool:
+        env_value = os.getenv("LIVE_TRADING_DISABLED", "")
+        if env_value.lower() in {"1", "true", "yes", "on"}:
+            return True
+        settings = self._load_trade_execution_settings()
+        return bool(settings.get("live_trading_disabled", False))
 
     def _run_hotcoin_bridge(
         self,
