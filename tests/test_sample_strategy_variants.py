@@ -53,6 +53,7 @@ sys.modules.setdefault("freqtrade.strategy", freqtrade_strategy)
 
 from user_data.strategies.SampleStrategy import SampleStrategy
 from user_data.strategies.SampleStrategyActive import SampleStrategyActive
+from user_data.strategies.SampleStrategyScalp import SampleStrategyScalp
 
 for _module_name, _previous_module in _PREVIOUS_MODULES.items():
     if _previous_module is None:
@@ -66,3 +67,11 @@ def test_active_variant_lowers_entry_gates():
     assert SampleStrategyActive.volume_ratio_min.value < SampleStrategy.volume_ratio_min.value
     assert SampleStrategyActive.ai_edge_threshold.value < SampleStrategy.ai_edge_threshold.value
     assert SampleStrategyActive.short_rsi_trigger.value < SampleStrategy.short_rsi_trigger.value
+
+
+def test_scalp_variant_is_more_active_than_active_variant():
+    assert SampleStrategyScalp.adx_threshold.value < SampleStrategyActive.adx_threshold.value
+    assert SampleStrategyScalp.volume_ratio_min.value < SampleStrategyActive.volume_ratio_min.value
+    assert SampleStrategyScalp.ai_edge_threshold.value < SampleStrategyActive.ai_edge_threshold.value
+    assert SampleStrategyScalp.short_rsi_trigger.value < SampleStrategyActive.short_rsi_trigger.value
+    assert SampleStrategyScalp.risk_per_trade.value < SampleStrategyActive.risk_per_trade.value
