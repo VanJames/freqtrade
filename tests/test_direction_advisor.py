@@ -163,3 +163,47 @@ def test_build_feedback_summary_groups_historical_recommendations():
     assert summary["by_action"]["short"]["positive_rate"] == 0.5
     assert summary["by_action"]["short"]["avg_profit_total_pct"] == 0.15
     assert summary["last_run_id"] == "r3"
+
+
+def test_run_once_holds_when_all_strategy_backtests_fail(monkeypatch, tmp_path):
+    strategy_path = tmp_path / "strategies"
+    strategy_path.mkdir()
+    (strategy_path / "SampleStrategy.py").write_text("class SampleStrategy: pass\n")
+    output = tmp_path / "direction.json"
+    ledger = tmp_path / "direction.jsonl"
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+
+    def fail_backtest(**kwargs):
+        raise RuntimeError("backtest failed")
+
+    monkeypatch.setattr(direction_advisor, "run_strategy_backtest", fail_backtest)
+    monkeypatch.setattr(direction_advisor, "latest_prices", lambda config, limit: {"summary": {}})
+    monkeypatch.setattr(direction_advisor.auto_optimize, "build_walk_forward_timeranges", lambda days, confirm: ("20260512-20260513", ""))
+    monkeypatch.setattr(direction_advisor, "AUTOOPT_DIR", tmp_path / "autoopt")
+
+    args = type(
+        "Args",
+        (),
+        {
+            "config": str(config),
+            "strategy_path": str(strategy_path),
+            "backtest_days": 1,
+            "strategies": ["SampleStrategy"],
+            "freqaimodel": "LightGBMRegressor",
+            "backend": "local",
+            "min_side_trades": 1,
+            "min_side_profit_pct": 0.0,
+            "snapshot_limit": 10,
+            "ledger": str(ledger),
+            "output": str(output),
+            "use_llm_advisor": False,
+        },
+    )()
+
+    payload = direction_advisor.run_once(args)
+
+    assert payload["final_action"] == "hold"
+    assert payload["recommended_side"] == "hold"
+    assert payload["errors"][0]["strategy"] == "SampleStrategy"
+    assert "All strategy backtests failed" in payload["reason"]

@@ -366,25 +366,32 @@ def run_once(args: argparse.Namespace) -> dict:
     run_dir = AUTOOPT_DIR / "direction-advisor" / run_id
 
     all_metrics: list[DirectionMetrics] = []
+    errors: list[dict[str, str]] = []
     for strategy in dict.fromkeys(args.strategies):
         if not (strategy_path / f"{strategy}.py").is_file():
+            errors.append({"strategy": strategy, "error": "strategy file not found"})
             continue
-        stats = run_strategy_backtest(
-            strategy=strategy,
-            strategy_path=strategy_path,
-            config=config,
-            timerange=train_timerange,
-            run_dir=run_dir / strategy,
-            freqaimodel=args.freqaimodel,
-            backend=args.backend,
-        )
-        all_metrics.extend(extract_direction_metrics(strategy, stats))
+        try:
+            stats = run_strategy_backtest(
+                strategy=strategy,
+                strategy_path=strategy_path,
+                config=config,
+                timerange=train_timerange,
+                run_dir=run_dir / strategy,
+                freqaimodel=args.freqaimodel,
+                backend=args.backend,
+            )
+            all_metrics.extend(extract_direction_metrics(strategy, stats))
+        except Exception as exc:
+            errors.append({"strategy": strategy, "error": str(exc)[-2000:]})
 
     action, best, reason = choose_recommendation(
         all_metrics,
         min_trades=args.min_side_trades,
         min_profit_pct=args.min_side_profit_pct,
     )
+    if not all_metrics and errors:
+        reason = "All strategy backtests failed; holding until advisor can evaluate fresh data."
     market = latest_prices(config, args.snapshot_limit)
     feedback_summary = build_feedback_summary(load_jsonl_tail(Path(args.ledger), limit=100))
     payload = {
@@ -399,6 +406,7 @@ def run_once(args: argparse.Namespace) -> dict:
         "reason": reason,
         "best": asdict(best) if best else None,
         "metrics": [asdict(item) for item in sorted(all_metrics, key=lambda x: x.score, reverse=True)],
+        "errors": errors,
         "market": market,
         "feedback_summary": feedback_summary,
         "usage_note": (
