@@ -250,3 +250,11 @@ def test_emit_signal_email_ignores_non_entry(monkeypatch):
     strategy._emit_signal_email(dataframe, {"pair": "BTC/USDT:USDT"}, "exit", "long")
 
     assert calls == []
+
+
+def test_recent_signal_keeps_trigger_alive_for_window():
+    series = pd.Series([False, True, False, False, False])
+
+    recent = SampleStrategy._recent_signal(series, 3)
+
+    assert list(recent) == [False, True, True, True, False]

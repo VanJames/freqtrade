@@ -188,6 +188,10 @@ class SampleStrategy(IStrategy):
         return bool(series.iloc[-1])
 
     @staticmethod
+    def _recent_signal(series: pd.Series, window: int) -> pd.Series:
+        return series.fillna(False).astype(int).rolling(window, min_periods=1).max().astype(bool)
+
+    @staticmethod
     def _last_float(row: pd.Series, key: str, default: float = 0.0) -> float:
         try:
             value = float(row.get(key, default) or default)
@@ -532,6 +536,7 @@ class SampleStrategy(IStrategy):
             qtpylib.crossed_above(dataframe["rsi"], long_rsi_threshold)
             | ((dataframe["rsi"] > 48) & qtpylib.crossed_above(dataframe["close"], dataframe["ema20"]))
         )
+        long_trigger_recent = self._recent_signal(long_trigger, 12)
         long_range = (
             dataframe["range_market_1h"] & dataframe["regime_low_vol"]
             & (dataframe["rsi"] < 34)
@@ -559,6 +564,7 @@ class SampleStrategy(IStrategy):
             qtpylib.crossed_below(dataframe["rsi"], short_rsi_threshold)
             | ((dataframe["rsi"] < 52) & qtpylib.crossed_below(dataframe["close"], dataframe["ema20"]))
         )
+        short_trigger_recent = self._recent_signal(short_trigger, 12)
         short_range = (
             dataframe["range_market_1h"] & dataframe["regime_low_vol"]
             & (dataframe["rsi"] > 66)
@@ -570,8 +576,8 @@ class SampleStrategy(IStrategy):
             & self._freqai_short_ok(dataframe)
         )
 
-        trend_long_entry = long_trend & long_trigger
-        trend_short_entry = short_trend & short_trigger
+        trend_long_entry = long_trend & long_trigger_recent
+        trend_short_entry = short_trend & short_trigger_recent
         dataframe.loc[trend_long_entry, ["enter_long", "enter_tag"]] = (1, "trend_long")
         dataframe.loc[long_range, ["enter_long", "enter_tag"]] = (1, "meanrev_long")
         dataframe.loc[trend_short_entry, ["enter_short", "enter_tag"]] = (1, "trend_short")
@@ -587,10 +593,10 @@ class SampleStrategy(IStrategy):
             long_rsi_threshold,
             short_rsi_threshold,
             long_trend,
-            long_trigger,
+            long_trigger_recent,
             long_range,
             short_trend,
-            short_trigger,
+            short_trigger_recent,
             short_range,
         )
         return dataframe
