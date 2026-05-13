@@ -56,6 +56,8 @@ services:
     entrypoint: ["python"]
     env_file:
       - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
     volumes:
       - ".:/workspace"
       - "/var/run/docker.sock:/var/run/docker.sock"
@@ -105,6 +107,8 @@ services:
     entrypoint: ["python"]
     env_file:
       - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
     volumes:
       - ".:/workspace"
       - "/var/run/docker.sock:/var/run/docker.sock"
@@ -141,6 +145,7 @@ services:
     env_file:
       - .env
     environment:
+      PYTHONUNBUFFERED: "1"
       TRADE_SETTINGS_ROOT: /workspace
       PUBLIC_BASE_PATH: /trade-settings
     volumes:

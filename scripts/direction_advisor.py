@@ -427,7 +427,7 @@ def run_once(args: argparse.Namespace) -> dict:
         payload = apply_llm_confirmation(payload, review)
     write_json(Path(args.output), payload)
     append_jsonl(Path(args.ledger), payload)
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), flush=True)
     return payload
 
 
