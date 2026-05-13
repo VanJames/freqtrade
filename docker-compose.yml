@@ -89,6 +89,42 @@ services:
       - --apply
       - --restart-bot
 
+  direction-advisor:
+    image: freqtrade-local-freqai
+    build:
+      context: .
+      dockerfile: "./docker/Dockerfile.freqai"
+      args:
+        sourceimage: freqtradeorg/freqtrade
+        sourcetag: stable
+    profiles:
+      - optimizer
+    restart: unless-stopped
+    container_name: freqtrade-direction-advisor
+    user: ftuser
+    entrypoint: ["python"]
+    env_file:
+      - .env
+    volumes:
+      - ".:/workspace"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    working_dir: /workspace
+    command:
+      - /workspace/scripts/direction_advisor.py
+      - --backend
+      - local
+      - --config
+      - /workspace/user_data/config.json
+      - --strategy-path
+      - /workspace/user_data/strategies
+      - --backtest-days
+      - "8"
+      - --min-side-trades
+      - "3"
+      - --interval-minutes
+      - "30"
+      - --loop
+
   trade-settings:
     image: freqtrade-local-freqai
     build:

@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""
+Continuously evaluate strategy + direction performance and publish an advisory JSON.
+
+This script is deliberately advisory-only. It does not place orders and does not
+modify the active Freqtrade config. It answers: which reviewed strategy, side
+(long/short), and recent market prices look strongest under rolling backtests.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from freqtrade.data.btanalysis.bt_fileutils import load_backtest_stats
+
+from scripts import auto_optimize, build_market_snapshot
+
+
+USER_DATA = ROOT / "user_data"
+STRATEGY_DIR = USER_DATA / "strategies"
+AUTOOPT_DIR = USER_DATA / "autoopt"
+DEFAULT_OUTPUT = AUTOOPT_DIR / "direction_advisor.json"
+DEFAULT_LEDGER = AUTOOPT_DIR / "direction_advisor.jsonl"
+
+
+@dataclass
+class DirectionMetrics:
+    strategy: str
+    side: str
+    trades: int
+    wins: int
+    losses: int
+    winrate: float
+    profit_total_pct: float
+    profit_total_abs: float
+    score: float
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate best strategy side recommendation.")
+    parser.add_argument("--backend", choices=["compose", "local"], default="compose")
+    parser.add_argument("--config", default=str(USER_DATA / "config.json"))
+    parser.add_argument("--strategy-path", default=str(STRATEGY_DIR))
+    parser.add_argument(
+        "--strategies",
+        nargs="+",
+        default=["SampleStrategy", "SampleStrategyLongOnly", "SampleStrategyShortOnly"],
+    )
+    parser.add_argument("--backtest-days", type=int, default=8)
+    parser.add_argument("--min-side-trades", type=int, default=3)
+    parser.add_argument("--min-side-profit-pct", type=float, default=0.0)
+    parser.add_argument("--snapshot-limit", type=int, default=220)
+    parser.add_argument("--freqaimodel", default="LightGBMRegressor")
+    parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    parser.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--interval-minutes", type=float, default=30.0)
+    return parser.parse_args()
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def latest_prices(config_path: Path, limit: int) -> dict[str, Any]:
+    config = build_market_snapshot.load_config(str(config_path))
+    exchange = config.get("exchange", {}).get("name", "")
+    datadir = build_market_snapshot.default_datadir(str(config_path), exchange)
+    snapshot = build_market_snapshot.build_snapshot(config, limit=limit, datadir=datadir)
+    prices: dict[str, Any] = {}
+    for item in snapshot.get("per_pair", []):
+        if not isinstance(item, dict):
+            continue
+        pair = item.get("pair")
+        timeframe = item.get("timeframe")
+        if timeframe != config.get("timeframe", "5m") or not pair:
+            continue
+        prices[str(pair)] = {
+            "last_close": item.get("last_close", 0.0),
+            "return_pct": item.get("return_pct", 0.0),
+            "atr_pct": item.get("atr_pct", 0.0),
+            "volume_ratio": item.get("volume_ratio", 0.0),
+        }
+    return {
+        "generated_at": snapshot.get("generated_at"),
+        "exchange": snapshot.get("exchange"),
+        "timeframe": config.get("timeframe", "5m"),
+        "prices": prices,
+        "summary": snapshot.get("summary", {}),
+    }
+
+
+def side_from_tag(key: Any) -> str | None:
+    text = str(key).lower()
+    if "long" in text:
+        return "long"
+    if "short" in text:
+        return "short"
+    return None
+
+
+def extract_direction_metrics(strategy: str, stats: dict) -> list[DirectionMetrics]:
+    strategy_stats = stats["strategy"][strategy]
+    buckets = {
+        "long": {"trades": 0, "wins": 0, "losses": 0, "profit_total": 0.0, "profit_abs": 0.0},
+        "short": {"trades": 0, "wins": 0, "losses": 0, "profit_total": 0.0, "profit_abs": 0.0},
+    }
+    for row in strategy_stats.get("results_per_enter_tag", []) or []:
+        if not isinstance(row, dict) or row.get("key") == "TOTAL":
+            continue
+        side = side_from_tag(row.get("key"))
+        if side not in buckets:
+            continue
+        bucket = buckets[side]
+        bucket["trades"] += _as_int(row.get("trades"))
+        bucket["wins"] += _as_int(row.get("wins"))
+        bucket["losses"] += _as_int(row.get("losses"))
+        bucket["profit_total"] += _as_float(row.get("profit_total"))
+        bucket["profit_abs"] += _as_float(row.get("profit_total_abs"))
+
+    results: list[DirectionMetrics] = []
+    overall_drawdown_pct = _as_float(strategy_stats.get("max_drawdown_account")) * 100.0
+    for side, bucket in buckets.items():
+        trades = int(bucket["trades"])
+        wins = int(bucket["wins"])
+        losses = int(bucket["losses"])
+        profit_pct = round(float(bucket["profit_total"]) * 100.0, 4)
+        winrate = wins / trades if trades else 0.0
+        score = round(profit_pct - overall_drawdown_pct * 0.35 + winrate * 0.25, 4)
+        results.append(
+            DirectionMetrics(
+                strategy=strategy,
+                side=side,
+                trades=trades,
+                wins=wins,
+                losses=losses,
+                winrate=round(winrate, 4),
+                profit_total_pct=profit_pct,
+                profit_total_abs=round(float(bucket["profit_abs"]), 8),
+                score=score,
+            )
+        )
+    return results
+
+
+def run_strategy_backtest(
+    *,
+    strategy: str,
+    strategy_path: Path,
+    config: Path,
+    timerange: str,
+    run_dir: Path,
+    freqaimodel: str,
+    backend: str,
+) -> dict:
+    auto_optimize.backtest(
+        strategy=strategy,
+        strategy_path=strategy_path,
+        config=config,
+        timerange=timerange,
+        backtest_dir=run_dir,
+        freqaimodel=freqaimodel,
+        logfile=run_dir / "backtest.log",
+        backend=backend,
+    )
+    return load_backtest_stats(run_dir)
+
+
+def choose_recommendation(
+    metrics: list[DirectionMetrics], min_trades: int, min_profit_pct: float
+) -> tuple[str, DirectionMetrics | None, str]:
+    viable = [
+        item
+        for item in metrics
+        if item.trades >= min_trades and item.profit_total_pct > min_profit_pct
+    ]
+    if not viable:
+        return "hold", None, "No strategy side passed positive-profit and trade-count gates."
+    best = max(viable, key=lambda item: (item.score, item.profit_total_pct, item.trades))
+    return best.side, best, "Best side passed positive-profit and trade-count gates."
+
+
+def write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def append_jsonl(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
+
+
+def run_once(args: argparse.Namespace) -> dict:
+    config = Path(args.config).resolve()
+    strategy_path = Path(args.strategy_path).resolve()
+    train_timerange, _ = auto_optimize.build_walk_forward_timeranges(args.backtest_days, 0)
+    run_id = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    run_dir = AUTOOPT_DIR / "direction-advisor" / run_id
+
+    all_metrics: list[DirectionMetrics] = []
+    for strategy in dict.fromkeys(args.strategies):
+        if not (strategy_path / f"{strategy}.py").is_file():
+            continue
+        stats = run_strategy_backtest(
+            strategy=strategy,
+            strategy_path=strategy_path,
+            config=config,
+            timerange=train_timerange,
+            run_dir=run_dir / strategy,
+            freqaimodel=args.freqaimodel,
+            backend=args.backend,
+        )
+        all_metrics.extend(extract_direction_metrics(strategy, stats))
+
+    action, best, reason = choose_recommendation(
+        all_metrics,
+        min_trades=args.min_side_trades,
+        min_profit_pct=args.min_side_profit_pct,
+    )
+    market = latest_prices(config, args.snapshot_limit)
+    payload = {
+        "record_type": "direction_advisor",
+        "run_id": run_id,
+        "created_at": datetime.now(UTC).isoformat(),
+        "timerange": train_timerange,
+        "action": action,
+        "recommended_strategy": best.strategy if best else None,
+        "recommended_side": best.side if best else "hold",
+        "reason": reason,
+        "best": asdict(best) if best else None,
+        "metrics": [asdict(item) for item in sorted(all_metrics, key=lambda x: x.score, reverse=True)],
+        "market": market,
+        "usage_note": (
+            "Advisory only. Trade only when live strategy entry signal agrees with recommended_side."
+        ),
+    }
+    write_json(Path(args.output), payload)
+    append_jsonl(Path(args.ledger), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return payload
+
+
+def main() -> int:
+    args = parse_args()
+    while True:
+        run_once(args)
+        if not args.loop:
+            return 0
+        time.sleep(max(args.interval_minutes, 1.0) * 60.0)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
