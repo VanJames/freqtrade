@@ -113,12 +113,32 @@ def test_choose_recommendation_selects_best_positive_side():
 
 def test_apply_llm_confirmation_blocks_disagreement():
     payload = {"action": "long", "reason": "stats passed"}
-    review = {"enabled": True, "action": "short"}
+    review = {"enabled": True, "action": "short", "confidence": 0.8}
 
     result = direction_advisor.apply_llm_confirmation(payload, review)
 
     assert result["final_action"] == "hold"
     assert "disagreed" in result["final_reason"]
+
+
+def test_apply_llm_confirmation_ignores_low_confidence_hold():
+    payload = {"action": "short", "reason": "stats passed"}
+    review = {"enabled": True, "action": "hold", "confidence": 0.56}
+
+    result = direction_advisor.apply_llm_confirmation(payload, review)
+
+    assert result["final_action"] == "short"
+    assert "high-confidence veto" in result["final_reason"]
+
+
+def test_apply_llm_confirmation_blocks_high_confidence_hold():
+    payload = {"action": "short", "reason": "stats passed"}
+    review = {"enabled": True, "action": "hold", "confidence": 0.85}
+
+    result = direction_advisor.apply_llm_confirmation(payload, review)
+
+    assert result["final_action"] == "hold"
+    assert "high confidence" in result["final_reason"]
 
 
 def test_apply_llm_confirmation_cannot_override_hold():

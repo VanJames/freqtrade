@@ -39,6 +39,8 @@ VALID_PARAMETER_BIAS = {
     "entry": {"stricter", "normal", "looser"},
     "exit": {"faster", "normal", "slower"},
 }
+LLM_OPPOSITE_VETO_CONFIDENCE = 0.65
+LLM_HOLD_VETO_CONFIDENCE = 0.80
 
 
 @dataclass
@@ -287,6 +289,7 @@ def normalize_llm_review(review: dict) -> dict:
 def apply_llm_confirmation(payload: dict, review: dict) -> dict:
     statistical_action = payload.get("action", "hold")
     llm_action = str(review.get("action", "")).lower()
+    confidence = _as_float(review.get("confidence"), 0.0)
     if not review.get("enabled"):
         payload["final_action"] = statistical_action
         payload["final_reason"] = payload.get("reason", "")
@@ -295,12 +298,26 @@ def apply_llm_confirmation(payload: dict, review: dict) -> dict:
         payload["final_action"] = "hold"
         payload["final_reason"] = "Statistical gate is hold; LLM is not allowed to override it."
         return payload
-    if llm_action in {"long", "short", "hold"} and llm_action != statistical_action:
+    if llm_action == "hold" and confidence >= LLM_HOLD_VETO_CONFIDENCE:
         payload["final_action"] = "hold"
-        payload["final_reason"] = f"LLM disagreed with statistical action {statistical_action}."
+        payload["final_reason"] = (
+            f"LLM requested hold with high confidence {confidence:.2f}; statistical action "
+            f"{statistical_action} was vetoed."
+        )
+        return payload
+    if (
+        llm_action in {"long", "short"}
+        and llm_action != statistical_action
+        and confidence >= LLM_OPPOSITE_VETO_CONFIDENCE
+    ):
+        payload["final_action"] = "hold"
+        payload["final_reason"] = (
+            f"LLM disagreed with statistical action {statistical_action} "
+            f"with confidence {confidence:.2f}."
+        )
         return payload
     payload["final_action"] = statistical_action
-    payload["final_reason"] = "Statistical gate passed and LLM did not disagree."
+    payload["final_reason"] = "Statistical gate passed; LLM did not provide a high-confidence veto."
     return payload
 
 
