@@ -64,7 +64,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--strategies",
         nargs="+",
-        default=["SampleStrategy", "SampleStrategyLongOnly", "SampleStrategyShortOnly"],
+        default=[
+            "SampleStrategy",
+            "SampleStrategyActive",
+            "SampleStrategyLongOnly",
+            "SampleStrategyShortOnly",
+        ],
     )
     parser.add_argument("--candidate-registry", default=str(DEFAULT_CANDIDATE_REGISTRY))
     parser.add_argument("--backtest-days", type=int, default=2)

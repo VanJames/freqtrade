@@ -70,7 +70,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--strategies",
         nargs="+",
-        default=["SampleStrategy", "SampleStrategyLongOnly", "SampleStrategyShortOnly"],
+        default=[
+            "SampleStrategy",
+            "SampleStrategyActive",
+            "SampleStrategyLongOnly",
+            "SampleStrategyShortOnly",
+        ],
     )
     parser.add_argument("--windows", nargs="+", type=int, default=DEFAULT_WINDOWS)
     parser.add_argument("--min-trades", type=int, default=1)
