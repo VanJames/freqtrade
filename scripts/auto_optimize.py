@@ -147,7 +147,9 @@ def build_timerange(start: datetime, end: datetime) -> str:
 
 def build_walk_forward_timeranges(backtest_days: int, confirm_days: int) -> tuple[str, str]:
     today = datetime.now(UTC).date()
-    end = datetime.combine(today - timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+    # Freqtrade timerange end dates are exclusive. Ending at today's midnight
+    # includes the latest fully closed UTC day while avoiding the partial day.
+    end = datetime.combine(today, datetime.min.time(), tzinfo=UTC)
     confirm_days = max(confirm_days, 0)
     if confirm_days == 0:
         start = end - timedelta(days=backtest_days)
@@ -155,7 +157,7 @@ def build_walk_forward_timeranges(backtest_days: int, confirm_days: int) -> tupl
         return timerange, timerange
 
     confirm_start = end - timedelta(days=confirm_days)
-    train_end = confirm_start - timedelta(days=1)
+    train_end = confirm_start
     train_start = train_end - timedelta(days=backtest_days)
     return build_timerange(train_start, train_end), build_timerange(confirm_start, end)
 

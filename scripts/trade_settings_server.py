@@ -232,6 +232,21 @@ def _page(message: str = "") -> str:
     entries_disabled = bool(state.get("live_trading_disabled", False)) or env.get(
         "LIVE_TRADING_DISABLED", ""
     ).lower() in {"1", "true", "yes", "on"}
+    direction_gate_enabled = bool(state.get("direction_advisor_gate_enabled", False)) or env.get(
+        "DIRECTION_ADVISOR_GATE_ENABLED", ""
+    ).lower() in {"1", "true", "yes", "on"}
+    direction_gate_max_age = str(
+        state.get(
+            "direction_advisor_gate_max_age_minutes",
+            env.get("DIRECTION_ADVISOR_GATE_MAX_AGE_MINUTES", "90"),
+        )
+    )
+    direction_gate_stale_policy = str(
+        state.get(
+            "direction_advisor_gate_stale_policy",
+            env.get("DIRECTION_ADVISOR_GATE_STALE_POLICY", "normal"),
+        )
+    ).lower()
     login_status = _hotcoin_login_status(env)
     with _qr_lock:
         qr = dict(_qr_state)
@@ -255,6 +270,9 @@ def _page(message: str = "") -> str:
     checked_dry = "checked" if dry_run else ""
     checked_live = "checked" if not dry_run else ""
     checked_disabled = "checked" if entries_disabled else ""
+    checked_direction_gate = "checked" if direction_gate_enabled else ""
+    selected_stale_normal = "selected" if direction_gate_stale_policy != "hold" else ""
+    selected_stale_hold = "selected" if direction_gate_stale_policy == "hold" else ""
     mode_label = "模拟盘 dry_run=true" if dry_run else "真实盘 dry_run=false"
 
     return f"""<!doctype html>
@@ -313,6 +331,16 @@ def _page(message: str = "") -> str:
         <h2>全局风控</h2>
         <label><input type="checkbox" name="live_trading_disabled" value="true" {checked_disabled} style="width:auto"> 暂停新开仓</label>
         <p class="muted">开启后策略会继续计算和记录诊断，但不会产生新的多/空入场信号；适合接口异常、连续亏损或人工接管时使用。</p>
+        <h2>AI 方向门控</h2>
+        <label><input type="checkbox" name="direction_advisor_gate_enabled" value="true" {checked_direction_gate} style="width:auto"> 使用方向顾问限制开仓方向</label>
+        <p class="muted">开启后策略读取 <code>user_data/autoopt/direction_advisor.json</code>：long 只开多，short 只开空，hold 不新开仓。</p>
+        <label>方向建议最大有效分钟数</label>
+        <input name="direction_advisor_gate_max_age_minutes" value="{html.escape(direction_gate_max_age)}" placeholder="例如 90" />
+        <label>方向建议过期后的处理</label>
+        <select name="direction_advisor_gate_stale_policy">
+          <option value="normal" {selected_stale_normal}>恢复策略原始信号</option>
+          <option value="hold" {selected_stale_hold}>禁止新开仓</option>
+        </select>
         <label>Hotcoin 下单数量</label>
         <input name="hotcoin_amount" value="{html.escape(amount)}" placeholder="例如 1" />
         <label>订单类型</label>
@@ -491,18 +519,29 @@ async def save_settings(
     freqtrade_mode = form.get("freqtrade_mode", "dry_run")
     live_confirm = form.get("live_confirm")
     live_trading_disabled = form.get("live_trading_disabled") == "true"
+    direction_advisor_gate_enabled = form.get("direction_advisor_gate_enabled") == "true"
+    direction_advisor_gate_stale_policy = form.get("direction_advisor_gate_stale_policy", "normal")
+    direction_advisor_gate_max_age_raw = form.get("direction_advisor_gate_max_age_minutes", "90")
     if exchange not in {"freqtrade", "hotcoin"}:
         raise HTTPException(status_code=400, detail="Invalid exchange.")
     if hotcoin_order_type not in {"market", "limit"}:
         raise HTTPException(status_code=400, detail="Invalid order type.")
     if freqtrade_mode not in {"dry_run", "live"}:
         raise HTTPException(status_code=400, detail="Invalid Freqtrade mode.")
+    if direction_advisor_gate_stale_policy not in {"normal", "hold"}:
+        raise HTTPException(status_code=400, detail="Invalid direction advisor stale policy.")
     if freqtrade_mode == "live" and live_confirm != "true":
         raise HTTPException(status_code=400, detail="切换真实盘必须勾选确认。")
     try:
         amount = float(hotcoin_amount)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Hotcoin amount must be numeric.") from exc
+    try:
+        direction_advisor_gate_max_age = float(direction_advisor_gate_max_age_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Direction advisor max age must be numeric.") from exc
+    if direction_advisor_gate_max_age < 1:
+        raise HTTPException(status_code=400, detail="Direction advisor max age must be >= 1 minute.")
     _write_freqtrade_dry_run(freqtrade_mode != "live")
     _write_state(
         {
@@ -512,6 +551,10 @@ async def save_settings(
             "hotcoin_order_type": hotcoin_order_type,
             "hotcoin_mode": "web",
             "live_trading_disabled": live_trading_disabled,
+            "direction_advisor_gate_enabled": direction_advisor_gate_enabled,
+            "direction_advisor_gate_max_age_minutes": direction_advisor_gate_max_age,
+            "direction_advisor_gate_stale_policy": direction_advisor_gate_stale_policy,
+            "direction_advisor_path": "/freqtrade/user_data/autoopt/direction_advisor.json",
             "hotcoin_session_path": "/freqtrade/user_data/hotcoin_session.json",
             "hotcoin_adapter_path": "/freqtrade/scripts/hotcoin_adapter.py",
             "updated_at": int(time.time()),

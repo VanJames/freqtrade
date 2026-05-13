@@ -2,8 +2,19 @@ import json
 import logging
 import sys
 import types
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
+
+_STUBBED_MODULES = [
+    "talib",
+    "talib.abstract",
+    "technical",
+    "technical.qtpylib",
+    "freqtrade.enums",
+    "freqtrade.strategy",
+]
+_PREVIOUS_MODULES = {name: sys.modules.get(name) for name in _STUBBED_MODULES}
 
 talib_module = types.ModuleType("talib")
 talib_abstract = types.ModuleType("talib.abstract")
@@ -46,6 +57,12 @@ sys.modules.setdefault("freqtrade.strategy", freqtrade_strategy)
 
 from user_data.strategies.SampleStrategy import SampleStrategy
 
+for _module_name, _previous_module in _PREVIOUS_MODULES.items():
+    if _previous_module is None:
+        sys.modules.pop(_module_name, None)
+    else:
+        sys.modules[_module_name] = _previous_module
+
 
 class ImmediateThread:
     def __init__(self, target, args=(), daemon=None):
@@ -61,6 +78,7 @@ def _strategy():
     strategy.config = {"runmode": "dry_run"}
     strategy._signal_email_cache = set()
     strategy._email_warned = False
+    strategy._direction_gate_warned = False
     return strategy
 
 
@@ -83,6 +101,101 @@ def test_new_entries_disabled_reads_env(monkeypatch, tmp_path):
     monkeypatch.setenv("LIVE_TRADING_DISABLED", "true")
 
     assert _strategy()._new_entries_disabled() is True
+
+
+def test_direction_advisor_gate_allows_only_recommended_long(monkeypatch, tmp_path):
+    advisor_path = tmp_path / "direction_advisor.json"
+    advisor_path.write_text(
+        json.dumps(
+            {
+                "created_at": datetime.now(UTC).isoformat(),
+                "final_action": "long",
+            }
+        )
+    )
+    settings_path = tmp_path / "trade_execution.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "direction_advisor_gate_enabled": True,
+                "direction_advisor_path": str(advisor_path),
+            }
+        )
+    )
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+    strategy = _strategy()
+    series = pd.Series([True, True])
+
+    long_trend, long_range, short_trend, short_range = strategy._apply_direction_advisor_gate(
+        series.copy(), series.copy(), series.copy(), series.copy()
+    )
+
+    assert long_trend.tolist() == [True, True]
+    assert long_range.tolist() == [True, True]
+    assert short_trend.tolist() == [False, False]
+    assert short_range.tolist() == [False, False]
+
+
+def test_direction_advisor_gate_hold_blocks_new_entries(monkeypatch, tmp_path):
+    advisor_path = tmp_path / "direction_advisor.json"
+    advisor_path.write_text(
+        json.dumps(
+            {
+                "created_at": datetime.now(UTC).isoformat(),
+                "final_action": "hold",
+            }
+        )
+    )
+    settings_path = tmp_path / "trade_execution.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "direction_advisor_gate_enabled": True,
+                "direction_advisor_path": str(advisor_path),
+            }
+        )
+    )
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+    strategy = _strategy()
+    series = pd.Series([True, True])
+
+    gated = strategy._apply_direction_advisor_gate(
+        series.copy(), series.copy(), series.copy(), series.copy()
+    )
+
+    assert all(not item.any() for item in gated)
+
+
+def test_direction_advisor_gate_stale_normal_policy_keeps_signals(monkeypatch, tmp_path):
+    advisor_path = tmp_path / "direction_advisor.json"
+    advisor_path.write_text(
+        json.dumps(
+            {
+                "created_at": (datetime.now(UTC) - timedelta(hours=3)).isoformat(),
+                "final_action": "hold",
+            }
+        )
+    )
+    settings_path = tmp_path / "trade_execution.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "direction_advisor_gate_enabled": True,
+                "direction_advisor_path": str(advisor_path),
+                "direction_advisor_gate_max_age_minutes": 30,
+                "direction_advisor_gate_stale_policy": "normal",
+            }
+        )
+    )
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+    strategy = _strategy()
+    series = pd.Series([True, False])
+
+    gated = strategy._apply_direction_advisor_gate(
+        series.copy(), series.copy(), series.copy(), series.copy()
+    )
+
+    assert all(item.tolist() == [True, False] for item in gated)
 
 
 def test_hotcoin_bridge_generates_dry_run_command(monkeypatch, tmp_path):

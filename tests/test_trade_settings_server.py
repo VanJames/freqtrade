@@ -62,6 +62,9 @@ def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
             "hotcoin_order_type": "market",
             "freqtrade_mode": "dry_run",
             "live_trading_disabled": "true",
+            "direction_advisor_gate_enabled": "true",
+            "direction_advisor_gate_max_age_minutes": "75",
+            "direction_advisor_gate_stale_policy": "hold",
         },
         auth=("admin", "secret"),
         follow_redirects=False,
@@ -72,6 +75,10 @@ def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
     assert state["hotcoin_signal_bridge_enabled"] is True
     assert state["hotcoin_signal_execute"] is False
     assert state["live_trading_disabled"] is True
+    assert state["direction_advisor_gate_enabled"] is True
+    assert state["direction_advisor_gate_max_age_minutes"] == 75.0
+    assert state["direction_advisor_gate_stale_policy"] == "hold"
+    assert state["direction_advisor_path"] == "/freqtrade/user_data/autoopt/direction_advisor.json"
     assert state["hotcoin_order_amount"] == 3.0
     assert state["hotcoin_session_path"] == "/freqtrade/user_data/hotcoin_session.json"
     assert json.loads(server.CONFIG_PATH.read_text())["dry_run"] is True

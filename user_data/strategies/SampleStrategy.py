@@ -6,7 +6,7 @@ import smtplib
 import ssl
 import threading
 from email.message import EmailMessage
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -149,6 +149,7 @@ class SampleStrategy(IStrategy):
         self._email_warned = False
         self._freqai_warned = False
         self._trading_disabled_warned = False
+        self._direction_gate_warned = False
 
     def _freqai_enabled(self) -> bool:
         return self.config.get("freqai", {}).get("enabled", False)
@@ -630,6 +631,13 @@ class SampleStrategy(IStrategy):
                 logger.warning("New entries are disabled by trade execution settings.")
                 self._trading_disabled_warned = True
 
+        trend_long_entry, long_range, trend_short_entry, short_range = self._apply_direction_advisor_gate(
+            trend_long_entry,
+            long_range,
+            trend_short_entry,
+            short_range,
+        )
+
         dataframe.loc[trend_long_entry, ["enter_long", "enter_tag"]] = (1, "trend_long")
         dataframe.loc[long_range, ["enter_long", "enter_tag"]] = (1, "meanrev_long")
         dataframe.loc[trend_short_entry, ["enter_short", "enter_tag"]] = (1, "trend_short")
@@ -978,6 +986,109 @@ class SampleStrategy(IStrategy):
             return True
         settings = self._load_trade_execution_settings()
         return bool(settings.get("live_trading_disabled", False))
+
+    @staticmethod
+    def _truthy(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _direction_gate_config(self) -> dict:
+        settings = self._load_trade_execution_settings()
+        enabled = self._truthy(os.getenv("DIRECTION_ADVISOR_GATE_ENABLED")) or self._truthy(
+            settings.get("direction_advisor_gate_enabled", False)
+        )
+        try:
+            max_age_minutes = float(
+                os.getenv(
+                    "DIRECTION_ADVISOR_GATE_MAX_AGE_MINUTES",
+                    settings.get("direction_advisor_gate_max_age_minutes", 90),
+                )
+            )
+        except (TypeError, ValueError):
+            max_age_minutes = 90.0
+        stale_policy = str(
+            os.getenv(
+                "DIRECTION_ADVISOR_GATE_STALE_POLICY",
+                settings.get("direction_advisor_gate_stale_policy", "normal"),
+            )
+        ).strip().lower()
+        if stale_policy not in {"normal", "hold"}:
+            stale_policy = "normal"
+        return {
+            "enabled": enabled,
+            "path": str(
+                os.getenv(
+                    "DIRECTION_ADVISOR_PATH",
+                    settings.get(
+                        "direction_advisor_path",
+                        "/freqtrade/user_data/autoopt/direction_advisor.json",
+                    ),
+                )
+            ),
+            "max_age_minutes": max(max_age_minutes, 1.0),
+            "stale_policy": stale_policy,
+        }
+
+    def _load_direction_advisor_action(self) -> tuple[str, str]:
+        gate = self._direction_gate_config()
+        if not gate["enabled"]:
+            return "normal", "disabled"
+        try:
+            with open(gate["path"], "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except FileNotFoundError:
+            return gate["stale_policy"], "missing"
+        except Exception as exc:
+            logger.warning("Failed to load direction advisor from %s: %s", gate["path"], exc)
+            return gate["stale_policy"], "invalid"
+
+        created_at = payload.get("created_at")
+        try:
+            created = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=UTC)
+            age_seconds = (datetime.now(UTC) - created.astimezone(UTC)).total_seconds()
+        except Exception:
+            return gate["stale_policy"], "invalid_created_at"
+        if age_seconds > gate["max_age_minutes"] * 60:
+            return gate["stale_policy"], "stale"
+
+        action = str(payload.get("final_action") or payload.get("action") or "hold").strip().lower()
+        if action not in {"long", "short", "hold"}:
+            return "hold", "invalid_action"
+        return action, "fresh"
+
+    def _apply_direction_advisor_gate(
+        self,
+        trend_long_entry: pd.Series,
+        long_range: pd.Series,
+        trend_short_entry: pd.Series,
+        short_range: pd.Series,
+    ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+        action, reason = self._load_direction_advisor_action()
+        if action == "normal":
+            return trend_long_entry, long_range, trend_short_entry, short_range
+
+        false_series = pd.Series(False, index=trend_long_entry.index)
+        if action == "long":
+            trend_short_entry = false_series
+            short_range = false_series
+        elif action == "short":
+            trend_long_entry = false_series
+            long_range = false_series
+        else:
+            trend_long_entry = false_series
+            long_range = false_series
+            trend_short_entry = false_series
+            short_range = false_series
+
+        if not getattr(self, "_direction_gate_warned", False):
+            logger.info("Direction advisor gate applied: action=%s reason=%s", action, reason)
+            self._direction_gate_warned = True
+        return trend_long_entry, long_range, trend_short_entry, short_range
 
     def _run_hotcoin_bridge(
         self,
