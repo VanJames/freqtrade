@@ -129,3 +129,37 @@ def test_apply_llm_confirmation_cannot_override_hold():
 
     assert result["final_action"] == "hold"
     assert "not allowed" in result["final_reason"]
+
+
+def test_normalize_llm_review_clamps_to_schema():
+    result = direction_advisor.normalize_llm_review(
+        {
+            "action": "buy",
+            "confidence": 2,
+            "reason": "x",
+            "parameter_bias": {"risk": "moon", "entry": "looser", "exit": "faster"},
+            "warnings": "careful",
+        }
+    )
+
+    assert result["enabled"] is True
+    assert result["action"] == "hold"
+    assert result["confidence"] == 1.0
+    assert result["parameter_bias"] == {"risk": "normal", "entry": "looser", "exit": "faster"}
+    assert result["warnings"] == ["careful"]
+
+
+def test_build_feedback_summary_groups_historical_recommendations():
+    summary = direction_advisor.build_feedback_summary(
+        [
+            {"run_id": "r1", "final_action": "short", "best": {"profit_total_pct": 0.4}},
+            {"run_id": "r2", "final_action": "short", "best": {"profit_total_pct": -0.1}},
+            {"run_id": "r3", "final_action": "long", "best": {"profit_total_pct": 0.2}},
+        ]
+    )
+
+    assert summary["sample_size"] == 3
+    assert summary["by_action"]["short"]["count"] == 2
+    assert summary["by_action"]["short"]["positive_rate"] == 0.5
+    assert summary["by_action"]["short"]["avg_profit_total_pct"] == 0.15
+    assert summary["last_run_id"] == "r3"

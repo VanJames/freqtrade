@@ -29,6 +29,7 @@ STATE_PATH = ROOT / "user_data" / "trade_execution.json"
 SESSION_PATH = ROOT / "user_data" / "hotcoin_session.json"
 SIGNAL_DIAGNOSTICS_PATH = ROOT / "user_data" / "signals" / "signal_diagnostics.jsonl"
 RESEARCH_LEDGER_PATH = ROOT / "user_data" / "autoopt" / "research_ledger.jsonl"
+EXECUTION_LEDGER_PATH = ROOT / "user_data" / "execution_ledger.jsonl"
 PUBLIC_BASE_PATH = os.getenv("PUBLIC_BASE_PATH", "").rstrip("/")
 
 security = HTTPBasic()
@@ -229,6 +230,18 @@ def _page(message: str = "") -> str:
     execute = str(state.get("hotcoin_signal_execute", env.get("HOTCOIN_SIGNAL_EXECUTE", "false"))).lower()
     amount = str(state.get("hotcoin_order_amount", env.get("HOTCOIN_ORDER_AMOUNT", "0")))
     order_type = str(state.get("hotcoin_order_type", env.get("HOTCOIN_ORDER_TYPE", "market")))
+    hotcoin_cooldown = str(
+        state.get("hotcoin_order_cooldown_minutes", env.get("HOTCOIN_ORDER_COOLDOWN_MINUTES", "30"))
+    )
+    hotcoin_max_failures = str(
+        state.get("max_consecutive_hotcoin_failures", env.get("MAX_CONSECUTIVE_HOTCOIN_FAILURES", "3"))
+    )
+    checked_auto_disable = "checked" if bool(
+        state.get("auto_disable_on_hotcoin_failures", True)
+    ) else ""
+    checked_verify_after_order = "checked" if bool(
+        state.get("hotcoin_verify_after_order", True)
+    ) else ""
     entries_disabled = bool(state.get("live_trading_disabled", False)) or env.get(
         "LIVE_TRADING_DISABLED", ""
     ).lower() in {"1", "true", "yes", "on"}
@@ -311,6 +324,7 @@ def _page(message: str = "") -> str:
   <div class="links">
     <a class="button secondary" href="{PUBLIC_BASE_PATH}/signals">信号诊断</a>
     <a class="button secondary" href="{PUBLIC_BASE_PATH}/research">优化审计</a>
+    <a class="button secondary" href="{PUBLIC_BASE_PATH}/executions">执行账本</a>
   </div>
   {f'<div class="msg">{html.escape(message)}</div>' if message else ''}
   <div class="grid">
@@ -348,6 +362,12 @@ def _page(message: str = "") -> str:
           <option value="market" {selected_market}>市价</option>
           <option value="limit" {selected_limit}>限价</option>
         </select>
+        <label>Hotcoin 同币种同方向冷却分钟数</label>
+        <input name="hotcoin_order_cooldown_minutes" value="{html.escape(hotcoin_cooldown)}" placeholder="例如 30" />
+        <label>Hotcoin 连续失败熔断次数</label>
+        <input name="max_consecutive_hotcoin_failures" value="{html.escape(hotcoin_max_failures)}" placeholder="例如 3" />
+        <label><input type="checkbox" name="auto_disable_on_hotcoin_failures" value="true" {checked_auto_disable} style="width:auto"> Hotcoin 连续失败后自动暂停新开仓</label>
+        <label><input type="checkbox" name="hotcoin_verify_after_order" value="true" {checked_verify_after_order} style="width:auto"> 下单成功后查询 Hotcoin 仓位并写入执行账本</label>
         <label><input type="checkbox" name="hotcoin_execute" value="true" {checked_execute} style="width:auto"> 允许 Hotcoin 真实下单</label>
         <p class="muted">当前桥接：{html.escape(bridge_enabled)}；真实执行：{html.escape(execute)}。关闭真实执行时只会 dry-run 写日志。</p>
         <button type="submit">保存设置</button>
@@ -516,6 +536,10 @@ async def save_settings(
     hotcoin_amount = form.get("hotcoin_amount", "0")
     hotcoin_order_type = form.get("hotcoin_order_type", "market")
     hotcoin_execute = form.get("hotcoin_execute")
+    hotcoin_order_cooldown_raw = form.get("hotcoin_order_cooldown_minutes", "30")
+    max_hotcoin_failures_raw = form.get("max_consecutive_hotcoin_failures", "3")
+    auto_disable_on_hotcoin_failures = form.get("auto_disable_on_hotcoin_failures") == "true"
+    hotcoin_verify_after_order = form.get("hotcoin_verify_after_order") == "true"
     freqtrade_mode = form.get("freqtrade_mode", "dry_run")
     live_confirm = form.get("live_confirm")
     live_trading_disabled = form.get("live_trading_disabled") == "true"
@@ -537,6 +561,13 @@ async def save_settings(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Hotcoin amount must be numeric.") from exc
     try:
+        hotcoin_order_cooldown = float(hotcoin_order_cooldown_raw)
+        max_consecutive_hotcoin_failures = int(max_hotcoin_failures_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Hotcoin risk settings must be numeric.") from exc
+    if hotcoin_order_cooldown < 0 or max_consecutive_hotcoin_failures < 0:
+        raise HTTPException(status_code=400, detail="Hotcoin risk settings must be >= 0.")
+    try:
         direction_advisor_gate_max_age = float(direction_advisor_gate_max_age_raw)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Direction advisor max age must be numeric.") from exc
@@ -549,12 +580,17 @@ async def save_settings(
             "hotcoin_signal_execute": hotcoin_execute == "true",
             "hotcoin_order_amount": amount,
             "hotcoin_order_type": hotcoin_order_type,
+            "hotcoin_order_cooldown_minutes": hotcoin_order_cooldown,
+            "max_consecutive_hotcoin_failures": max_consecutive_hotcoin_failures,
+            "auto_disable_on_hotcoin_failures": auto_disable_on_hotcoin_failures,
+            "hotcoin_verify_after_order": hotcoin_verify_after_order,
             "hotcoin_mode": "web",
             "live_trading_disabled": live_trading_disabled,
             "direction_advisor_gate_enabled": direction_advisor_gate_enabled,
             "direction_advisor_gate_max_age_minutes": direction_advisor_gate_max_age,
             "direction_advisor_gate_stale_policy": direction_advisor_gate_stale_policy,
             "direction_advisor_path": "/freqtrade/user_data/autoopt/direction_advisor.json",
+            "execution_ledger_path": "/freqtrade/user_data/execution_ledger.jsonl",
             "hotcoin_session_path": "/freqtrade/user_data/hotcoin_session.json",
             "hotcoin_adapter_path": "/freqtrade/scripts/hotcoin_adapter.py",
             "updated_at": int(time.time()),
@@ -603,6 +639,37 @@ def _audit_page(title: str, description: str, records: list[dict[str, Any]]) -> 
 </main>
 </body>
 </html>"""
+
+
+def _execution_summary(records: list[dict[str, Any]]) -> str:
+    counts: dict[str, int] = {}
+    latest_fuse = ""
+    for record in records:
+        status_value = str(record.get("status", "unknown"))
+        counts[status_value] = counts.get(status_value, 0) + 1
+        reason = str(record.get("risk_fuse_reason") or record.get("reason") or "")
+        if "Hotcoin bridge failed" in reason:
+            latest_fuse = reason
+    parts = [
+        f"{html.escape(status)}: {count}"
+        for status, count in sorted(counts.items())
+    ]
+    if latest_fuse:
+        parts.append(f"最近熔断：{html.escape(latest_fuse)}")
+    return "；".join(parts) if parts else "暂无执行记录"
+
+
+def _execution_page(records: list[dict[str, Any]]) -> str:
+    page = _audit_page(
+        "执行账本",
+        "最近 100 条 Hotcoin 信号提交、跳过、成功、失败、仓位快照和熔断记录。",
+        records,
+    )
+    return page.replace(
+        "<table><tbody>",
+        f"<p class=\"muted\">摘要：{_execution_summary(records)}</p><table><tbody>",
+        1,
+    )
 
 
 @app.post("/hotcoin/qr/start")
@@ -674,6 +741,11 @@ def research_ledger(_: Annotated[str, Depends(_auth)]) -> str:
         "最近 100 次自动优化、AI advisor 建议和参数晋级记录。",
         _read_jsonl_tail(RESEARCH_LEDGER_PATH),
     )
+
+
+@app.get("/executions", response_class=HTMLResponse)
+def execution_ledger(_: Annotated[str, Depends(_auth)]) -> str:
+    return _execution_page(_read_jsonl_tail(EXECUTION_LEDGER_PATH))
 
 
 @app.get("/landing", response_class=HTMLResponse)

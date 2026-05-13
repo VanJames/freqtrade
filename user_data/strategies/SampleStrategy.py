@@ -1,4 +1,5 @@
 import logging
+import hashlib
 import json
 import os
 import subprocess
@@ -923,6 +924,24 @@ class SampleStrategy(IStrategy):
         }
 
         close = float(last["close"])
+        signal_id = self._hotcoin_signal_id(pair, side, candle_time, close)
+        duplicate_reason = self._hotcoin_duplicate_reason(bridge_settings, signal_id, pair, side)
+        if duplicate_reason:
+            self._append_execution_ledger(
+                bridge_settings,
+                {
+                    "record_type": "hotcoin_execution",
+                    "status": "skipped",
+                    "reason": duplicate_reason,
+                    "signal_id": signal_id,
+                    "pair": pair,
+                    "side": side,
+                    "candle_time": candle_time,
+                    "execute": execute,
+                },
+            )
+            logger.info("Hotcoin signal skipped for %s %s %s: %s", pair, side, candle_time, duplicate_reason)
+            return
         atr = float(last.get("atr", close * 0.02) or close * 0.02)
         stop_mult = float(
             bridge_settings.get("hotcoin_atr_stop_mult", os.getenv("HOTCOIN_ATR_STOP_MULT", str(self.atr_stop_mult.value)))
@@ -962,9 +981,28 @@ class SampleStrategy(IStrategy):
         if execute:
             command.append("--yes")
 
+        self._append_execution_ledger(
+            bridge_settings,
+            {
+                "record_type": "hotcoin_execution",
+                "status": "submitted",
+                "signal_id": signal_id,
+                "pair": pair,
+                "side": side,
+                "candle_time": candle_time,
+                "symbol": symbol,
+                "order_side": order_side,
+                "order_type": order_type,
+                "amount": amount,
+                "price": close,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "execute": execute,
+            },
+        )
         threading.Thread(
             target=self._run_hotcoin_bridge,
-            args=(command, pair, side, candle_time, execute, bridge_settings),
+            args=(command, pair, side, candle_time, execute, bridge_settings, signal_id),
             daemon=True,
         ).start()
 
@@ -1098,6 +1136,7 @@ class SampleStrategy(IStrategy):
         candle_time: str,
         execute: bool,
         bridge_settings: dict,
+        signal_id: str,
     ) -> None:
         try:
             env = os.environ.copy()
@@ -1107,14 +1146,43 @@ class SampleStrategy(IStrategy):
                 env["HOTCOIN_MODE"] = str(bridge_settings["hotcoin_mode"])
             result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=env)
             if result.returncode != 0:
+                error = result.stderr.strip() or result.stdout.strip()
+                self._append_execution_ledger(
+                    bridge_settings,
+                    {
+                        "record_type": "hotcoin_execution",
+                        "status": "failed",
+                        "signal_id": signal_id,
+                        "pair": pair,
+                        "side": side,
+                        "candle_time": candle_time,
+                        "execute": execute,
+                        "error": error,
+                    },
+                )
+                self._maybe_disable_entries_after_hotcoin_failures(bridge_settings)
                 logger.warning(
                     "Hotcoin bridge failed for %s %s %s: %s",
                     pair,
                     side,
                     candle_time,
-                    result.stderr.strip() or result.stdout.strip(),
+                    error,
                 )
                 return
+            self._append_execution_ledger(
+                bridge_settings,
+                {
+                    "record_type": "hotcoin_execution",
+                    "status": "succeeded",
+                    "signal_id": signal_id,
+                    "pair": pair,
+                    "side": side,
+                    "candle_time": candle_time,
+                    "execute": execute,
+                    "stdout": result.stdout.strip()[:2000],
+                },
+            )
+            self._verify_hotcoin_position(command, bridge_settings, signal_id, pair, side, candle_time)
             logger.info(
                 "Hotcoin bridge %s for %s %s %s: %s",
                 "executed" if execute else "dry-run",
@@ -1124,7 +1192,228 @@ class SampleStrategy(IStrategy):
                 result.stdout.strip()[:1000],
             )
         except Exception as exc:
+            self._append_execution_ledger(
+                bridge_settings,
+                {
+                    "record_type": "hotcoin_execution",
+                    "status": "failed",
+                    "signal_id": signal_id,
+                    "pair": pair,
+                    "side": side,
+                    "candle_time": candle_time,
+                    "execute": execute,
+                    "error": str(exc),
+                },
+            )
+            self._maybe_disable_entries_after_hotcoin_failures(bridge_settings)
             logger.warning("Hotcoin bridge exception for %s %s: %s", pair, side, exc)
+
+    @staticmethod
+    def _command_value(command: list[str], key: str, default: str = "") -> str:
+        try:
+            return command[command.index(key) + 1]
+        except (ValueError, IndexError):
+            return default
+
+    def _verify_hotcoin_position(
+        self,
+        command: list[str],
+        bridge_settings: dict,
+        signal_id: str,
+        pair: str,
+        side: str,
+        candle_time: str,
+    ) -> None:
+        enabled = self._truthy(
+            bridge_settings.get(
+                "hotcoin_verify_after_order",
+                os.getenv("HOTCOIN_VERIFY_AFTER_ORDER", "true"),
+            )
+        )
+        if not enabled:
+            return
+        script = command[1] if len(command) > 1 else str(
+            bridge_settings.get("hotcoin_adapter_path", "/freqtrade/scripts/hotcoin_adapter.py")
+        )
+        mode = self._command_value(command, "--mode", str(bridge_settings.get("hotcoin_mode", "web")))
+        symbol = self._command_value(command, "--symbol", pair.split(":")[0])
+        verify_command = ["python", script, "positions", "--mode", mode, "--symbol", symbol]
+        try:
+            env = os.environ.copy()
+            if "hotcoin_session_path" in bridge_settings:
+                env["HOTCOIN_SESSION_PATH"] = str(bridge_settings["hotcoin_session_path"])
+            if "hotcoin_mode" in bridge_settings:
+                env["HOTCOIN_MODE"] = str(bridge_settings["hotcoin_mode"])
+            result = subprocess.run(verify_command, capture_output=True, text=True, timeout=30, env=env)
+            if result.returncode == 0:
+                self._append_execution_ledger(
+                    bridge_settings,
+                    {
+                        "record_type": "hotcoin_execution",
+                        "status": "position_snapshot",
+                        "signal_id": signal_id,
+                        "pair": pair,
+                        "side": side,
+                        "candle_time": candle_time,
+                        "stdout": result.stdout.strip()[:4000],
+                    },
+                )
+                return
+            self._append_execution_ledger(
+                bridge_settings,
+                {
+                    "record_type": "hotcoin_execution",
+                    "status": "position_check_failed",
+                    "signal_id": signal_id,
+                    "pair": pair,
+                    "side": side,
+                    "candle_time": candle_time,
+                    "error": result.stderr.strip() or result.stdout.strip(),
+                },
+            )
+        except Exception as exc:
+            self._append_execution_ledger(
+                bridge_settings,
+                {
+                    "record_type": "hotcoin_execution",
+                    "status": "position_check_failed",
+                    "signal_id": signal_id,
+                    "pair": pair,
+                    "side": side,
+                    "candle_time": candle_time,
+                    "error": str(exc),
+                },
+            )
+
+    def _hotcoin_signal_id(self, pair: str, side: str, candle_time: str, close: float) -> str:
+        raw = f"{pair}|{side}|{candle_time}|{close:.8f}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+    def _execution_ledger_path(self, settings: dict) -> Path:
+        return Path(
+            str(
+                settings.get(
+                    "execution_ledger_path",
+                    os.getenv("EXECUTION_LEDGER_PATH", "/freqtrade/user_data/execution_ledger.jsonl"),
+                )
+            )
+        )
+
+    def _append_execution_ledger(self, settings: dict, payload: dict) -> None:
+        path = self._execution_ledger_path(settings)
+        record = {"created_at": datetime.now(UTC).isoformat(), **payload}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n")
+        except Exception as exc:
+            logger.warning("Failed to append execution ledger %s: %s", path, exc)
+
+    def _read_execution_ledger(self, settings: dict, limit: int = 300) -> list[dict]:
+        path = self._execution_ledger_path(settings)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
+        except FileNotFoundError:
+            return []
+        except Exception as exc:
+            logger.warning("Failed to read execution ledger %s: %s", path, exc)
+            return []
+        records = []
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                records.append(item)
+        return records
+
+    def _hotcoin_duplicate_reason(self, settings: dict, signal_id: str, pair: str, side: str) -> str:
+        records = self._read_execution_ledger(settings)
+        active_statuses = {"submitted", "succeeded"}
+        for record in reversed(records):
+            if record.get("signal_id") == signal_id and record.get("status") in active_statuses:
+                return "duplicate_signal_id"
+
+        try:
+            cooldown_minutes = float(
+                settings.get(
+                    "hotcoin_order_cooldown_minutes",
+                    os.getenv("HOTCOIN_ORDER_COOLDOWN_MINUTES", "30"),
+                )
+            )
+        except (TypeError, ValueError):
+            cooldown_minutes = 30.0
+        if cooldown_minutes <= 0:
+            return ""
+        now = datetime.now(UTC)
+        for record in reversed(records):
+            if record.get("pair") != pair or record.get("side") != side:
+                continue
+            if record.get("status") not in active_statuses:
+                continue
+            try:
+                created = datetime.fromisoformat(str(record.get("created_at")).replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=UTC)
+            except Exception:
+                continue
+            if (now - created.astimezone(UTC)).total_seconds() < cooldown_minutes * 60:
+                return "pair_side_cooldown"
+        return ""
+
+    def _maybe_disable_entries_after_hotcoin_failures(self, settings: dict) -> None:
+        auto_disable = self._truthy(
+            settings.get(
+                "auto_disable_on_hotcoin_failures",
+                os.getenv("AUTO_DISABLE_ON_HOTCOIN_FAILURES", "true"),
+            )
+        )
+        if not auto_disable:
+            return
+        try:
+            max_failures = int(
+                settings.get(
+                    "max_consecutive_hotcoin_failures",
+                    os.getenv("MAX_CONSECUTIVE_HOTCOIN_FAILURES", "3"),
+                )
+            )
+        except (TypeError, ValueError):
+            max_failures = 3
+        if max_failures <= 0:
+            return
+        consecutive = 0
+        for record in reversed(self._read_execution_ledger(settings, limit=100)):
+            status = record.get("status")
+            if status == "failed":
+                consecutive += 1
+                continue
+            if status in {"submitted", "succeeded"}:
+                break
+        if consecutive < max_failures:
+            return
+        self._merge_trade_execution_settings(
+            {
+                "live_trading_disabled": True,
+                "risk_fuse_reason": f"Hotcoin bridge failed {consecutive} consecutive times",
+                "risk_fuse_updated_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        logger.warning("New entries disabled after %s consecutive Hotcoin failures.", consecutive)
+
+    def _merge_trade_execution_settings(self, updates: dict) -> None:
+        path = Path(os.getenv("TRADE_EXECUTION_SETTINGS_PATH", "/freqtrade/user_data/trade_execution.json"))
+        try:
+            current = {}
+            if path.is_file():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    current = loaded
+            current.update(updates)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(current, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
+        except Exception as exc:
+            logger.warning("Failed to update trade execution settings %s: %s", path, exc)
 
     def _send_email_async(self, subject: str, body: str) -> None:
         host = os.getenv("FT_EMAIL_HOST", "smtp.qq.com")

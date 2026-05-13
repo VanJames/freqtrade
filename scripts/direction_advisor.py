@@ -32,6 +32,12 @@ STRATEGY_DIR = USER_DATA / "strategies"
 AUTOOPT_DIR = USER_DATA / "autoopt"
 DEFAULT_OUTPUT = AUTOOPT_DIR / "direction_advisor.json"
 DEFAULT_LEDGER = AUTOOPT_DIR / "direction_advisor.jsonl"
+VALID_ACTIONS = {"long", "short", "hold"}
+VALID_PARAMETER_BIAS = {
+    "risk": {"reduce", "normal", "increase"},
+    "entry": {"stricter", "normal", "looser"},
+    "exit": {"faster", "normal", "slower"},
+}
 
 
 @dataclass
@@ -245,8 +251,35 @@ def llm_review(payload: dict, *, model: str, base_url: str, timeout: int) -> dic
     result = openai_market_advisor.normalize_payload(response)
     if not isinstance(result, dict):
         result = {"raw_output": result}
-    result["enabled"] = True
-    return result
+    return normalize_llm_review(result)
+
+
+def normalize_llm_review(review: dict) -> dict:
+    action = str(review.get("action", "hold")).strip().lower()
+    if action not in VALID_ACTIONS:
+        action = "hold"
+    try:
+        confidence = float(review.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    parameter_bias = review.get("parameter_bias", {})
+    if not isinstance(parameter_bias, dict):
+        parameter_bias = {}
+    normalized_bias = {}
+    for key, allowed in VALID_PARAMETER_BIAS.items():
+        value = str(parameter_bias.get(key, "normal")).strip().lower()
+        normalized_bias[key] = value if value in allowed else "normal"
+    warnings = review.get("warnings", [])
+    if not isinstance(warnings, list):
+        warnings = [str(warnings)]
+    return {
+        "enabled": True,
+        "action": action,
+        "confidence": max(0.0, min(confidence, 1.0)),
+        "reason": str(review.get("reason", ""))[:500],
+        "parameter_bias": normalized_bias,
+        "warnings": [str(item)[:200] for item in warnings[:5]],
+    }
 
 
 def apply_llm_confirmation(payload: dict, review: dict) -> dict:
@@ -280,6 +313,51 @@ def append_jsonl(path: Path, payload: dict) -> None:
         handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
 
 
+def load_jsonl_tail(path: Path, limit: int = 100) -> list[dict]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
+    except FileNotFoundError:
+        return []
+    records = []
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            records.append(item)
+    return records
+
+
+def build_feedback_summary(records: list[dict]) -> dict[str, Any]:
+    buckets = {
+        "long": {"count": 0, "positive": 0, "profit_total_pct": 0.0},
+        "short": {"count": 0, "positive": 0, "profit_total_pct": 0.0},
+        "hold": {"count": 0, "positive": 0, "profit_total_pct": 0.0},
+    }
+    for record in records:
+        action = str(record.get("final_action") or record.get("action") or "hold").lower()
+        if action not in buckets:
+            action = "hold"
+        best = record.get("best") or {}
+        profit = _as_float(best.get("profit_total_pct"))
+        buckets[action]["count"] += 1
+        buckets[action]["profit_total_pct"] += profit
+        if profit > 0:
+            buckets[action]["positive"] += 1
+    for item in buckets.values():
+        count = item["count"]
+        item["positive_rate"] = round(item["positive"] / count, 4) if count else 0.0
+        item["avg_profit_total_pct"] = round(item["profit_total_pct"] / count, 4) if count else 0.0
+        item["profit_total_pct"] = round(item["profit_total_pct"], 4)
+    return {
+        "sample_size": len(records),
+        "by_action": buckets,
+        "last_action": str(records[-1].get("final_action", "")) if records else "",
+        "last_run_id": str(records[-1].get("run_id", "")) if records else "",
+    }
+
+
 def run_once(args: argparse.Namespace) -> dict:
     config = Path(args.config).resolve()
     strategy_path = Path(args.strategy_path).resolve()
@@ -308,6 +386,7 @@ def run_once(args: argparse.Namespace) -> dict:
         min_profit_pct=args.min_side_profit_pct,
     )
     market = latest_prices(config, args.snapshot_limit)
+    feedback_summary = build_feedback_summary(load_jsonl_tail(Path(args.ledger), limit=100))
     payload = {
         "record_type": "direction_advisor",
         "run_id": run_id,
@@ -321,6 +400,7 @@ def run_once(args: argparse.Namespace) -> dict:
         "best": asdict(best) if best else None,
         "metrics": [asdict(item) for item in sorted(all_metrics, key=lambda x: x.score, reverse=True)],
         "market": market,
+        "feedback_summary": feedback_summary,
         "usage_note": (
             "Advisory only. Trade only when live strategy entry signal agrees with recommended_side."
         ),

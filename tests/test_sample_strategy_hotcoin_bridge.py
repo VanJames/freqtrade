@@ -200,6 +200,7 @@ def test_direction_advisor_gate_stale_normal_policy_keeps_signals(monkeypatch, t
 
 def test_hotcoin_bridge_generates_dry_run_command(monkeypatch, tmp_path):
     settings_path = tmp_path / "trade_execution.json"
+    ledger_path = tmp_path / "execution_ledger.jsonl"
     settings_path.write_text(
         json.dumps(
             {
@@ -212,6 +213,8 @@ def test_hotcoin_bridge_generates_dry_run_command(monkeypatch, tmp_path):
                 "hotcoin_session_path": "/freqtrade/user_data/hotcoin_session.json",
                 "hotcoin_atr_stop_mult": 2,
                 "hotcoin_reward_risk_mult": 1.5,
+                "execution_ledger_path": str(ledger_path),
+                "hotcoin_order_cooldown_minutes": 0,
             }
         )
     )
@@ -231,7 +234,7 @@ def test_hotcoin_bridge_generates_dry_run_command(monkeypatch, tmp_path):
 
         class Result:
             returncode = 0
-            stdout = '{"dry_run": true}'
+            stdout = '{"data": []}' if "positions" in command else '{"dry_run": true}'
             stderr = ""
 
         return Result()
@@ -242,19 +245,26 @@ def test_hotcoin_bridge_generates_dry_run_command(monkeypatch, tmp_path):
 
     strategy._dispatch_hotcoin_signal("BTC/USDT:USDT", "long", last, "2026-05-12T08:00:00")
 
-    assert len(calls) == 1
-    command = calls[0]["command"]
+    order_calls = [call for call in calls if "order" in call["command"]]
+    position_calls = [call for call in calls if "positions" in call["command"]]
+    assert len(order_calls) == 1
+    assert len(position_calls) == 1
+    command = order_calls[0]["command"]
     assert command[:4] == ["python", "/freqtrade/scripts/hotcoin_adapter.py", "order", "--mode"]
     assert "--yes" not in command
     assert command[command.index("--side") + 1] == "open_long"
     assert command[command.index("--amount") + 1] == "2"
     assert command[command.index("--stop-loss") + 1] == "90.00000000"
     assert command[command.index("--take-profit") + 1] == "115.00000000"
-    assert calls[0]["env"]["HOTCOIN_SESSION_PATH"] == "/freqtrade/user_data/hotcoin_session.json"
+    assert order_calls[0]["env"]["HOTCOIN_SESSION_PATH"] == "/freqtrade/user_data/hotcoin_session.json"
+    records = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    assert [record["status"] for record in records] == ["submitted", "succeeded", "position_snapshot"]
+    assert records[0]["signal_id"] == records[1]["signal_id"]
 
 
 def test_hotcoin_bridge_adds_yes_when_execute_enabled(monkeypatch, tmp_path):
     settings_path = tmp_path / "trade_execution.json"
+    ledger_path = tmp_path / "execution_ledger.jsonl"
     settings_path.write_text(
         json.dumps(
             {
@@ -264,6 +274,8 @@ def test_hotcoin_bridge_adds_yes_when_execute_enabled(monkeypatch, tmp_path):
                 "hotcoin_order_type": "limit",
                 "hotcoin_mode": "web",
                 "hotcoin_adapter_path": "/adapter.py",
+                "execution_ledger_path": str(ledger_path),
+                "hotcoin_order_cooldown_minutes": 0,
             }
         )
     )
@@ -277,7 +289,7 @@ def test_hotcoin_bridge_adds_yes_when_execute_enabled(monkeypatch, tmp_path):
 
         class Result:
             returncode = 0
-            stdout = "{}"
+            stdout = '{"data": []}' if "positions" in command else "{}"
             stderr = ""
 
         return Result()
@@ -288,10 +300,96 @@ def test_hotcoin_bridge_adds_yes_when_execute_enabled(monkeypatch, tmp_path):
 
     strategy._dispatch_hotcoin_signal("ETH/USDT:USDT", "short", last, "2026-05-12T08:00:00")
 
-    command = calls[0]
+    command = next(call for call in calls if "order" in call)
     assert command[command.index("--side") + 1] == "open_short"
     assert command[command.index("--price") + 1] == "100.00000000"
     assert "--yes" in command
+
+
+def test_hotcoin_bridge_skips_duplicate_signal(monkeypatch, tmp_path):
+    settings_path = tmp_path / "trade_execution.json"
+    ledger_path = tmp_path / "execution_ledger.jsonl"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hotcoin_signal_bridge_enabled": True,
+                "hotcoin_signal_execute": False,
+                "hotcoin_order_amount": 1,
+                "hotcoin_order_type": "market",
+                "hotcoin_adapter_path": "/adapter.py",
+                "execution_ledger_path": str(ledger_path),
+                "hotcoin_order_cooldown_minutes": 0,
+            }
+        )
+    )
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+    monkeypatch.setattr("user_data.strategies.SampleStrategy.threading.Thread", ImmediateThread)
+
+    calls = []
+
+    def fake_run(command, capture_output, text, timeout, env):
+        calls.append(command)
+
+        class Result:
+            returncode = 0
+            stdout = '{"data": []}' if "positions" in command else "{}"
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("user_data.strategies.SampleStrategy.subprocess.run", fake_run)
+    strategy = _strategy()
+    last = pd.Series({"close": 100.0, "atr": 5.0})
+
+    strategy._dispatch_hotcoin_signal("BTC/USDT:USDT", "long", last, "2026-05-12T08:00:00")
+    strategy._dispatch_hotcoin_signal("BTC/USDT:USDT", "long", last, "2026-05-12T08:00:00")
+
+    records = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    order_calls = [call for call in calls if "order" in call]
+    assert len(order_calls) == 1
+    assert records[-1]["status"] == "skipped"
+    assert records[-1]["reason"] == "duplicate_signal_id"
+
+
+def test_hotcoin_failures_trip_risk_fuse(monkeypatch, tmp_path):
+    settings_path = tmp_path / "trade_execution.json"
+    ledger_path = tmp_path / "execution_ledger.jsonl"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hotcoin_signal_bridge_enabled": True,
+                "hotcoin_signal_execute": True,
+                "hotcoin_order_amount": 1,
+                "hotcoin_order_type": "market",
+                "hotcoin_adapter_path": "/adapter.py",
+                "execution_ledger_path": str(ledger_path),
+                "hotcoin_order_cooldown_minutes": 0,
+                "max_consecutive_hotcoin_failures": 1,
+            }
+        )
+    )
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+    monkeypatch.setattr("user_data.strategies.SampleStrategy.threading.Thread", ImmediateThread)
+
+    def fake_run(command, capture_output, text, timeout, env):
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "boom"
+
+        return Result()
+
+    monkeypatch.setattr("user_data.strategies.SampleStrategy.subprocess.run", fake_run)
+    strategy = _strategy()
+    strategy._dispatch_hotcoin_signal(
+        "BTC/USDT:USDT", "long", pd.Series({"close": 100.0, "atr": 5.0}), "2026-05-12T08:00:00"
+    )
+
+    state = json.loads(settings_path.read_text())
+    records = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    assert records[-1]["status"] == "failed"
+    assert state["live_trading_disabled"] is True
+    assert "Hotcoin bridge failed" in state["risk_fuse_reason"]
 
 
 def test_hotcoin_bridge_disabled_does_not_spawn(monkeypatch, tmp_path):

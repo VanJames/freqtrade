@@ -24,6 +24,7 @@ def _setup_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(
         server, "RESEARCH_LEDGER_PATH", tmp_path / "user_data" / "autoopt" / "research_ledger.jsonl"
     )
+    monkeypatch.setattr(server, "EXECUTION_LEDGER_PATH", tmp_path / "user_data" / "execution_ledger.jsonl")
     monkeypatch.setattr(server, "PUBLIC_BASE_PATH", "")
     return env_path
 
@@ -65,6 +66,10 @@ def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
             "direction_advisor_gate_enabled": "true",
             "direction_advisor_gate_max_age_minutes": "75",
             "direction_advisor_gate_stale_policy": "hold",
+            "hotcoin_order_cooldown_minutes": "20",
+            "max_consecutive_hotcoin_failures": "2",
+            "auto_disable_on_hotcoin_failures": "true",
+            "hotcoin_verify_after_order": "true",
         },
         auth=("admin", "secret"),
         follow_redirects=False,
@@ -80,6 +85,11 @@ def test_save_settings_writes_state_without_restart(monkeypatch, tmp_path):
     assert state["direction_advisor_gate_stale_policy"] == "hold"
     assert state["direction_advisor_path"] == "/freqtrade/user_data/autoopt/direction_advisor.json"
     assert state["hotcoin_order_amount"] == 3.0
+    assert state["hotcoin_order_cooldown_minutes"] == 20.0
+    assert state["max_consecutive_hotcoin_failures"] == 2
+    assert state["auto_disable_on_hotcoin_failures"] is True
+    assert state["hotcoin_verify_after_order"] is True
+    assert state["execution_ledger_path"] == "/freqtrade/user_data/execution_ledger.jsonl"
     assert state["hotcoin_session_path"] == "/freqtrade/user_data/hotcoin_session.json"
     assert json.loads(server.CONFIG_PATH.read_text())["dry_run"] is True
 
@@ -94,10 +104,15 @@ def test_audit_pages_render_jsonl_tail(monkeypatch, tmp_path):
     server.RESEARCH_LEDGER_PATH.write_text(
         json.dumps({"run_id": "20260513-010000", "promoted": False}) + "\n"
     )
+    server.EXECUTION_LEDGER_PATH.write_text(
+        json.dumps({"signal_id": "sig1", "status": "succeeded"}) + "\n"
+        + json.dumps({"signal_id": "sig1", "status": "position_snapshot"}) + "\n"
+    )
     client = TestClient(server.app)
 
     signals = client.get("/signals", auth=("admin", "secret"))
     research = client.get("/research", auth=("admin", "secret"))
+    executions = client.get("/executions", auth=("admin", "secret"))
 
     assert signals.status_code == 200
     assert "信号诊断" in signals.text
@@ -105,6 +120,10 @@ def test_audit_pages_render_jsonl_tail(monkeypatch, tmp_path):
     assert research.status_code == 200
     assert "优化审计" in research.text
     assert "20260513-010000" in research.text
+    assert executions.status_code == 200
+    assert "执行账本" in executions.text
+    assert "sig1" in executions.text
+    assert "position_snapshot: 1" in executions.text
 
 
 def test_save_settings_redirects_with_public_base_path(monkeypatch, tmp_path):
