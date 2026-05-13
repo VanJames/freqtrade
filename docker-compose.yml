@@ -132,6 +132,49 @@ services:
       - "30"
       - --loop
 
+  strategy-researcher:
+    image: freqtrade-local-freqai
+    build:
+      context: .
+      dockerfile: "./docker/Dockerfile.freqai"
+      args:
+        sourceimage: freqtradeorg/freqtrade
+        sourcetag: stable
+    profiles:
+      - optimizer
+    restart: unless-stopped
+    container_name: freqtrade-strategy-researcher
+    user: ftuser
+    entrypoint: ["python"]
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ".:/workspace"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    working_dir: /workspace
+    command:
+      - /workspace/scripts/strategy_researcher.py
+      - --backend
+      - local
+      - --config
+      - /workspace/user_data/config.json
+      - --strategy-path
+      - /workspace/user_data/strategies
+      - --windows
+      - "1"
+      - "2"
+      - "7"
+      - --min-trades
+      - "1"
+      - --use-llm-advisor
+      - --advisor-model
+      - deepseek-chat
+      - --interval-minutes
+      - "360"
+      - --loop
+
   trade-settings:
     image: freqtrade-local-freqai
     build:

@@ -32,6 +32,7 @@ STRATEGY_DIR = USER_DATA / "strategies"
 AUTOOPT_DIR = USER_DATA / "autoopt"
 DEFAULT_OUTPUT = AUTOOPT_DIR / "direction_advisor.json"
 DEFAULT_LEDGER = AUTOOPT_DIR / "direction_advisor.jsonl"
+DEFAULT_CANDIDATE_REGISTRY = AUTOOPT_DIR / "strategy_registry.json"
 VALID_ACTIONS = {"long", "short", "hold"}
 VALID_PARAMETER_BIAS = {
     "risk": {"reduce", "normal", "increase"},
@@ -63,6 +64,7 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=["SampleStrategy", "SampleStrategyLongOnly", "SampleStrategyShortOnly"],
     )
+    parser.add_argument("--candidate-registry", default=str(DEFAULT_CANDIDATE_REGISTRY))
     parser.add_argument("--backtest-days", type=int, default=2)
     parser.add_argument("--min-side-trades", type=int, default=1)
     parser.add_argument("--min-side-profit-pct", type=float, default=0.0)
@@ -329,6 +331,18 @@ def load_jsonl_tail(path: Path, limit: int = 100) -> list[dict]:
     return records
 
 
+def load_registry_strategies(path: Path, fallback: list[str]) -> list[str]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return fallback
+    candidates = payload.get("strategy_candidates", [])
+    if not isinstance(candidates, list):
+        return fallback
+    names = [str(item) for item in candidates if str(item).strip()]
+    return list(dict.fromkeys([*fallback, *names]))
+
+
 def build_feedback_summary(records: list[dict]) -> dict[str, Any]:
     buckets = {
         "long": {"count": 0, "positive": 0, "profit_total_pct": 0.0},
@@ -364,10 +378,11 @@ def run_once(args: argparse.Namespace) -> dict:
     train_timerange, _ = auto_optimize.build_walk_forward_timeranges(args.backtest_days, 0)
     run_id = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     run_dir = AUTOOPT_DIR / "direction-advisor" / run_id
+    strategies = load_registry_strategies(Path(args.candidate_registry), list(args.strategies))
 
     all_metrics: list[DirectionMetrics] = []
     errors: list[dict[str, str]] = []
-    for strategy in dict.fromkeys(args.strategies):
+    for strategy in dict.fromkeys(strategies):
         if not (strategy_path / f"{strategy}.py").is_file():
             errors.append({"strategy": strategy, "error": "strategy file not found"})
             continue
@@ -407,6 +422,8 @@ def run_once(args: argparse.Namespace) -> dict:
         "best": asdict(best) if best else None,
         "metrics": [asdict(item) for item in sorted(all_metrics, key=lambda x: x.score, reverse=True)],
         "errors": errors,
+        "candidate_registry": str(Path(args.candidate_registry)),
+        "evaluated_strategies": list(dict.fromkeys(strategies)),
         "market": market,
         "feedback_summary": feedback_summary,
         "usage_note": (

@@ -197,6 +197,7 @@ def test_run_once_holds_when_all_strategy_backtests_fail(monkeypatch, tmp_path):
             "snapshot_limit": 10,
             "ledger": str(ledger),
             "output": str(output),
+            "candidate_registry": str(tmp_path / "missing_registry.json"),
             "use_llm_advisor": False,
         },
     )()
@@ -207,3 +208,24 @@ def test_run_once_holds_when_all_strategy_backtests_fail(monkeypatch, tmp_path):
     assert payload["recommended_side"] == "hold"
     assert payload["errors"][0]["strategy"] == "SampleStrategy"
     assert "All strategy backtests failed" in payload["reason"]
+
+
+def test_load_registry_strategies_extends_fallback(tmp_path):
+    registry = tmp_path / "strategy_registry.json"
+    registry.write_text(
+        '{"strategy_candidates": ["SampleStrategyShortOnly", "SampleStrategy"]}'
+    )
+
+    assert direction_advisor.load_registry_strategies(registry, ["SampleStrategy"]) == [
+        "SampleStrategy",
+        "SampleStrategyShortOnly",
+    ]
+
+
+def test_load_registry_strategies_uses_fallback_on_bad_file(tmp_path):
+    registry = tmp_path / "strategy_registry.json"
+    registry.write_text("{bad")
+
+    assert direction_advisor.load_registry_strategies(registry, ["SampleStrategy"]) == [
+        "SampleStrategy"
+    ]
