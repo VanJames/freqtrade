@@ -632,3 +632,10 @@ def test_recent_signal_keeps_trigger_alive_for_window():
     recent = SampleStrategy._recent_signal(series, 3)
 
     assert list(recent) == [False, True, True, True, False]
+
+
+def test_last_bool_treats_nan_as_false():
+    assert SampleStrategy._last_bool(pd.Series([float("nan")])) is False
+    assert SampleStrategy._last_bool(pd.Series([None])) is False
+    assert SampleStrategy._last_bool(pd.Series([0])) is False
+    assert SampleStrategy._last_bool(pd.Series([1])) is True

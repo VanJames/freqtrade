@@ -193,7 +193,12 @@ class SampleStrategy(IStrategy):
     def _last_bool(series: pd.Series) -> bool:
         if series.empty:
             return False
-        return bool(series.iloc[-1])
+        value = series.iloc[-1]
+        if pd.isna(value):
+            return False
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y"}
+        return bool(value)
 
     @staticmethod
     def _recent_signal(series: pd.Series, window: int) -> pd.Series:
