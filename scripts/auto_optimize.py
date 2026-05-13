@@ -38,6 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 USER_DATA = ROOT / "user_data"
 STRATEGY_DIR = USER_DATA / "strategies"
 AUTOOPT_DIR = USER_DATA / "autoopt"
+RESEARCH_LEDGER_PATH = AUTOOPT_DIR / "research_ledger.jsonl"
 FTUSER_SITE_PACKAGES = next(Path("/home/ftuser/.local/lib").glob("python*/site-packages"), None)
 
 
@@ -417,6 +418,37 @@ def write_summary(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True))
 
 
+def append_jsonl(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
+
+
+def build_research_ledger_record(summary: dict) -> dict:
+    return {
+        "record_type": "autoopt_run",
+        "created_at": datetime.now(UTC).isoformat(),
+        "run_id": summary.get("run_id"),
+        "strategy": summary.get("strategy"),
+        "market_profile": summary.get("market_profile"),
+        "advisor_profile": summary.get("advisor_profile"),
+        "advisor_confidence": summary.get("advisor_confidence"),
+        "advisor_reason": summary.get("advisor_reason"),
+        "applied_overrides": summary.get("applied_overrides", {}),
+        "train_timerange": summary.get("train_timerange"),
+        "confirm_timerange": summary.get("confirm_timerange"),
+        "baseline": summary.get("baseline"),
+        "candidate": summary.get("candidate"),
+        "fallback_candidate": summary.get("fallback_candidate"),
+        "confirmation": summary.get("confirmation"),
+        "final_confirmation": summary.get("final_confirmation"),
+        "would_promote": summary.get("would_promote", False),
+        "promoted": summary.get("promoted", False),
+        "reason": summary.get("reason", ""),
+        "active_parameter_file": summary.get("active_parameter_file"),
+    }
+
+
 def send_email(subject: str, body: str) -> bool:
     host = os.getenv("FT_EMAIL_HOST", "smtp.qq.com")
     port = int(os.getenv("FT_EMAIL_PORT", "465"))
@@ -594,6 +626,7 @@ def better_than(
 
 def finalize_run(run_dir: Path, summary: dict, *, email_subject_prefix: str) -> None:
     write_summary(run_dir / "summary.json", summary)
+    append_jsonl(RESEARCH_LEDGER_PATH, build_research_ledger_record(summary))
     try:
         subject = f"{email_subject_prefix} {summary.get('strategy')} {summary.get('run_id')}"
         send_email(subject, build_email_summary(summary))

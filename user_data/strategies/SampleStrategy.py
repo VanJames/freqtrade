@@ -7,6 +7,7 @@ import ssl
 import threading
 from email.message import EmailMessage
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -20,6 +21,10 @@ from freqtrade.strategy import DecimalParameter, IStrategy, IntParameter, Trade,
 
 
 logger = logging.getLogger(__name__)
+
+SIGNAL_DIAGNOSTICS_PATH = Path(
+    os.getenv("SIGNAL_DIAGNOSTICS_PATH", "/freqtrade/user_data/signals/signal_diagnostics.jsonl")
+)
 
 
 class SampleStrategy(IStrategy):
@@ -336,6 +341,17 @@ class SampleStrategy(IStrategy):
         else:
             future_return = None
             do_predict = "n/a"
+        do_predict_value = str(do_predict)
+
+        long_blockers_limited = long_blockers[:8] or ["waiting_trigger"]
+        short_blockers_limited = short_blockers[:8] or ["waiting_trigger"]
+        regime = (
+            "high"
+            if bool(last.get("regime_high_vol", False))
+            else "low"
+            if bool(last.get("regime_low_vol", False))
+            else "balanced"
+        )
 
         logger.info(
             "Signal diagnostics %s time=%s close=%.8f rsi=%.2f adx=%.2f "
@@ -349,22 +365,47 @@ class SampleStrategy(IStrategy):
             adx,
             volume_ratio,
             volatility_ratio,
-            (
-                "high"
-                if bool(last.get("regime_high_vol", False))
-                else "low"
-                if bool(last.get("regime_low_vol", False))
-                else "balanced"
-            ),
+            regime,
             bool(last.get("trend_up_1h", False)),
             bool(last.get("trend_down_1h", False)),
             bool(last.get("trend_up_15m", False)),
             bool(last.get("trend_down_15m", False)),
-            do_predict,
+            do_predict_value,
             f"{future_return:.4f}" if future_return is not None else "n/a",
-            long_blockers[:8] or ["waiting_trigger"],
-            short_blockers[:8] or ["waiting_trigger"],
+            long_blockers_limited,
+            short_blockers_limited,
         )
+        self._append_signal_diagnostic(
+            {
+                "record_type": "signal_diagnostics",
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "pair": metadata.get("pair", "unknown"),
+                "time": candle_time,
+                "close": close,
+                "rsi": rsi,
+                "adx": adx,
+                "volume_ratio": volume_ratio,
+                "volatility_ratio": volatility_ratio,
+                "regime": regime,
+                "trend_up_1h": bool(last.get("trend_up_1h", False)),
+                "trend_down_1h": bool(last.get("trend_down_1h", False)),
+                "trend_up_15m": bool(last.get("trend_up_15m", False)),
+                "trend_down_15m": bool(last.get("trend_down_15m", False)),
+                "freqai_do_predict": do_predict_value,
+                "freqai_future_return": future_return,
+                "long_blockers": long_blockers_limited,
+                "short_blockers": short_blockers_limited,
+            }
+        )
+
+    def _append_signal_diagnostic(self, payload: dict) -> None:
+        try:
+            path = Path(os.getenv("SIGNAL_DIAGNOSTICS_PATH", str(SIGNAL_DIAGNOSTICS_PATH)))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
+        except Exception as exc:  # pragma: no cover - diagnostics must not affect trading
+            logger.debug("Failed to write signal diagnostics record: %s", exc)
 
     @informative("1h")
     def populate_indicators_1h(self, dataframe: DataFrame, metadata: dict) -> DataFrame:

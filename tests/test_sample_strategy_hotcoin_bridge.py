@@ -233,6 +233,61 @@ def test_entry_diagnostics_logs_blockers(caplog):
     assert "volume_ratio 0.75<=1.05" in caplog.text
 
 
+def test_entry_diagnostics_writes_jsonl(monkeypatch, tmp_path):
+    output = tmp_path / "signals" / "signal_diagnostics.jsonl"
+    monkeypatch.setenv("SIGNAL_DIAGNOSTICS_PATH", str(output))
+    strategy = _strategy()
+    dataframe = pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp("2026-05-12T08:00:00Z"),
+                "close": 100.0,
+                "ema20": 101.0,
+                "ema50": 102.0,
+                "ema200": 103.0,
+                "rsi": 48.0,
+                "adx": 15.0,
+                "macd": -0.2,
+                "macdsignal": 0.1,
+                "macdhist": -0.3,
+                "volume_ratio": 0.75,
+                "volatility_ratio": 0.9,
+                "atr_pct": 0.01,
+                "trend_context_long": False,
+                "trend_down_1h": False,
+                "trend_down_15m": False,
+                "trend_up_1h": False,
+                "trend_up_15m": False,
+                "range_market_1h": False,
+                "regime_high_vol": False,
+                "regime_low_vol": False,
+                "regime_balanced": True,
+            }
+        ]
+    )
+    false_series = pd.Series([False])
+
+    strategy._log_entry_diagnostics(
+        dataframe,
+        {"pair": "BTC/USDT:USDT"},
+        pd.Series([22.0]),
+        pd.Series([1.2]),
+        pd.Series([34.0]),
+        pd.Series([66.0]),
+        false_series,
+        false_series,
+        false_series,
+        false_series,
+        false_series,
+        false_series,
+    )
+
+    record = json.loads(output.read_text().splitlines()[0])
+    assert record["record_type"] == "signal_diagnostics"
+    assert record["pair"] == "BTC/USDT:USDT"
+    assert "no_long_trend_context" in record["long_blockers"]
+
+
 def test_emit_signal_email_ignores_non_entry(monkeypatch):
     strategy = _strategy()
     calls = []
