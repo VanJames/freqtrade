@@ -109,3 +109,23 @@ def test_choose_recommendation_selects_best_positive_side():
 
     assert action == "short"
     assert best.strategy == "B"
+
+
+def test_apply_llm_confirmation_blocks_disagreement():
+    payload = {"action": "long", "reason": "stats passed"}
+    review = {"enabled": True, "action": "short"}
+
+    result = direction_advisor.apply_llm_confirmation(payload, review)
+
+    assert result["final_action"] == "hold"
+    assert "disagreed" in result["final_reason"]
+
+
+def test_apply_llm_confirmation_cannot_override_hold():
+    payload = {"action": "hold", "reason": "stats failed"}
+    review = {"enabled": True, "action": "long"}
+
+    result = direction_advisor.apply_llm_confirmation(payload, review)
+
+    assert result["final_action"] == "hold"
+    assert "not allowed" in result["final_reason"]

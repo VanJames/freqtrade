@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 
 from freqtrade.data.btanalysis.bt_fileutils import load_backtest_stats
 
-from scripts import auto_optimize, build_market_snapshot
+from scripts import auto_optimize, build_market_snapshot, openai_market_advisor
 
 
 USER_DATA = ROOT / "user_data"
@@ -57,11 +57,15 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=["SampleStrategy", "SampleStrategyLongOnly", "SampleStrategyShortOnly"],
     )
-    parser.add_argument("--backtest-days", type=int, default=8)
-    parser.add_argument("--min-side-trades", type=int, default=3)
+    parser.add_argument("--backtest-days", type=int, default=2)
+    parser.add_argument("--min-side-trades", type=int, default=1)
     parser.add_argument("--min-side-profit-pct", type=float, default=0.0)
     parser.add_argument("--snapshot-limit", type=int, default=220)
     parser.add_argument("--freqaimodel", default="LightGBMRegressor")
+    parser.add_argument("--use-llm-advisor", action="store_true")
+    parser.add_argument("--advisor-model", default="deepseek-chat")
+    parser.add_argument("--advisor-base-url", default="")
+    parser.add_argument("--advisor-timeout", type=int, default=60)
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     parser.add_argument("--loop", action="store_true")
@@ -201,6 +205,70 @@ def choose_recommendation(
     return best.side, best, "Best side passed positive-profit and trade-count gates."
 
 
+def build_llm_prompt(payload: dict) -> str:
+    compact = {
+        "task": "Review short-term crypto futures direction advisor output.",
+        "constraints": [
+            "Return strict JSON only.",
+            "Do not invent trades or ignore backtest gates.",
+            "If statistical action is hold, do not force a trade.",
+            "Focus on 1-2 day short-term execution.",
+        ],
+        "schema": {
+            "action": "long|short|hold",
+            "confidence": "0..1",
+            "reason": "short reason",
+            "parameter_bias": {
+                "risk": "reduce|normal|increase",
+                "entry": "stricter|normal|looser",
+                "exit": "faster|normal|slower",
+            },
+            "warnings": ["short strings"],
+        },
+        "advisor_payload": payload,
+    }
+    return json.dumps(compact, ensure_ascii=False)
+
+
+def llm_review(payload: dict, *, model: str, base_url: str, timeout: int) -> dict:
+    api_key = openai_market_advisor.os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return {"enabled": False, "error": "OPENAI_API_KEY is not set."}
+    prompt = build_llm_prompt(payload)
+    response = openai_market_advisor.call_openai(
+        base_url=openai_market_advisor.infer_base_url(model, base_url),
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+        timeout=timeout,
+    )
+    result = openai_market_advisor.normalize_payload(response)
+    if not isinstance(result, dict):
+        result = {"raw_output": result}
+    result["enabled"] = True
+    return result
+
+
+def apply_llm_confirmation(payload: dict, review: dict) -> dict:
+    statistical_action = payload.get("action", "hold")
+    llm_action = str(review.get("action", "")).lower()
+    if not review.get("enabled"):
+        payload["final_action"] = statistical_action
+        payload["final_reason"] = payload.get("reason", "")
+        return payload
+    if statistical_action == "hold":
+        payload["final_action"] = "hold"
+        payload["final_reason"] = "Statistical gate is hold; LLM is not allowed to override it."
+        return payload
+    if llm_action in {"long", "short", "hold"} and llm_action != statistical_action:
+        payload["final_action"] = "hold"
+        payload["final_reason"] = f"LLM disagreed with statistical action {statistical_action}."
+        return payload
+    payload["final_action"] = statistical_action
+    payload["final_reason"] = "Statistical gate passed and LLM did not disagree."
+    return payload
+
+
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
@@ -246,6 +314,7 @@ def run_once(args: argparse.Namespace) -> dict:
         "created_at": datetime.now(UTC).isoformat(),
         "timerange": train_timerange,
         "action": action,
+        "final_action": action,
         "recommended_strategy": best.strategy if best else None,
         "recommended_side": best.side if best else "hold",
         "reason": reason,
@@ -256,6 +325,18 @@ def run_once(args: argparse.Namespace) -> dict:
             "Advisory only. Trade only when live strategy entry signal agrees with recommended_side."
         ),
     }
+    if args.use_llm_advisor:
+        try:
+            review = llm_review(
+                payload,
+                model=args.advisor_model,
+                base_url=args.advisor_base_url,
+                timeout=args.advisor_timeout,
+            )
+        except Exception as exc:
+            review = {"enabled": True, "error": str(exc)}
+        payload["llm_advisor"] = review
+        payload = apply_llm_confirmation(payload, review)
     write_json(Path(args.output), payload)
     append_jsonl(Path(args.ledger), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
