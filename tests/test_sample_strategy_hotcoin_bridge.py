@@ -103,6 +103,25 @@ def test_new_entries_disabled_reads_env(monkeypatch, tmp_path):
     assert _strategy()._new_entries_disabled() is True
 
 
+def test_live_or_dry_run_accepts_string_and_enum_like_values():
+    strategy = _strategy()
+    strategy.config = {"runmode": "dry_run"}
+    assert strategy._is_live_or_dry_run() is True
+
+    strategy.config = {"runmode": "RunMode.LIVE"}
+    assert strategy._is_live_or_dry_run() is True
+
+    class EnumLike:
+        value = "live"
+        name = "LIVE"
+
+    strategy.config = {"runmode": EnumLike()}
+    assert strategy._is_live_or_dry_run() is True
+
+    strategy.config = {"runmode": "backtest"}
+    assert strategy._is_live_or_dry_run() is False
+
+
 def test_direction_advisor_gate_allows_only_recommended_long(monkeypatch, tmp_path):
     advisor_path = tmp_path / "direction_advisor.json"
     advisor_path.write_text(

@@ -209,6 +209,15 @@ class SampleStrategy(IStrategy):
             return default
         return value
 
+    def _is_live_or_dry_run(self) -> bool:
+        runmode = self.config.get("runmode")
+        if runmode in (RunMode.DRY_RUN, RunMode.LIVE):
+            return True
+        value = getattr(runmode, "value", runmode)
+        name = getattr(runmode, "name", "")
+        text_values = {str(value).lower(), str(name).lower(), str(runmode).lower()}
+        return bool(text_values & {"dry_run", "dry-run", "live", "runmode.dry_run", "runmode.live"})
+
     def _log_entry_diagnostics(
         self,
         dataframe: DataFrame,
@@ -224,7 +233,7 @@ class SampleStrategy(IStrategy):
         short_trigger: pd.Series,
         short_range: pd.Series,
     ) -> None:
-        if self.config.get("runmode") not in (RunMode.DRY_RUN, RunMode.LIVE):
+        if not self._is_live_or_dry_run():
             return
         if dataframe.empty:
             return
@@ -698,7 +707,7 @@ class SampleStrategy(IStrategy):
         side: str,
         **kwargs,
     ) -> float:
-        if self.config.get("runmode") not in (RunMode.DRY_RUN, RunMode.LIVE):
+        if not self._is_live_or_dry_run():
             return proposed_stake
 
         if not self.dp:
@@ -746,7 +755,7 @@ class SampleStrategy(IStrategy):
         after_fill: bool,
         **kwargs,
     ) -> float | None:
-        if self.config.get("runmode") not in (RunMode.DRY_RUN, RunMode.LIVE):
+        if not self._is_live_or_dry_run():
             return None
         if current_profit <= 0:
             return None
@@ -802,7 +811,7 @@ class SampleStrategy(IStrategy):
         current_time: datetime,
         **kwargs,
     ) -> bool:
-        if self.config.get("runmode") not in (RunMode.DRY_RUN, RunMode.LIVE):
+        if not self._is_live_or_dry_run():
             return True
         side = "short" if trade.is_short else "long"
         cache_key = f"{pair}:trade_exit:{getattr(trade, 'id', '')}:{exit_reason}:{current_time.isoformat()}"
@@ -834,7 +843,7 @@ class SampleStrategy(IStrategy):
                 side,
             )
             return
-        if self.config.get("runmode") not in (RunMode.DRY_RUN, RunMode.LIVE):
+        if not self._is_live_or_dry_run():
             return
         if dataframe.empty:
             return
