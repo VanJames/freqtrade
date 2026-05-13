@@ -107,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--advisor-snapshot-limit", type=int, default=220)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--restart-bot", action="store_true")
-    parser.add_argument("--strategy", default="SampleStrategy")
+    parser.add_argument("--strategy", default="auto")
     parser.add_argument("--config", default=str(ROOT / "user_data" / "config.json"))
     parser.add_argument("--strategy-path", default=str(ROOT / "user_data" / "strategies"))
     parser.add_argument("--backtest-days", type=int, default=60)
@@ -212,6 +212,17 @@ def write_advisor_record(profile: str, payload: dict | None, *, enabled: bool) -
     return record
 
 
+def resolve_strategy(strategy: str, config: str) -> str:
+    if strategy != "auto":
+        return strategy
+    try:
+        payload = json.loads(Path(config).read_text())
+    except Exception:
+        return "SampleStrategy"
+    active = payload.get("strategy")
+    return str(active) if active else "SampleStrategy"
+
+
 def run_once(args: argparse.Namespace) -> int:
     effective = copy.copy(args)
     profile = "balanced"
@@ -243,11 +254,12 @@ def run_once(args: argparse.Namespace) -> int:
         setattr(effective, "market_profile", profile)
         advisor_payload = write_advisor_record(profile, None, enabled=False)
 
+    strategy = resolve_strategy(args.strategy, args.config)
     cmd = [
         sys.executable,
         str(SCRIPT),
         "--strategy",
-        args.strategy,
+        strategy,
         "--config",
         args.config,
         "--strategy-path",

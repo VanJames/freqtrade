@@ -39,7 +39,6 @@ services:
       --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
       --config /freqtrade/user_data/config.json
       --freqaimodel LightGBMRegressor
-      --strategy SampleStrategy
 
   optimizer:
     image: freqtrade-local-freqai
@@ -66,7 +65,7 @@ services:
       - --backend
       - local
       - --strategy
-      - SampleStrategy
+      - auto
       - --config
       - /workspace/user_data/config.json
       - --strategy-path
