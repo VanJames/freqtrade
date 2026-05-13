@@ -151,6 +151,36 @@ def test_apply_llm_confirmation_cannot_override_hold():
     assert "not allowed" in result["final_reason"]
 
 
+def test_apply_kronos_confirmation_confirms_matching_action():
+    payload = {"action": "short", "final_action": "short"}
+    forecast = {"summary": {"market_bias": "short", "avg_confidence": 0.7}}
+
+    result = direction_advisor.apply_kronos_confirmation(payload, forecast)
+
+    assert result["final_action"] == "short"
+    assert result["kronos_confirmation"]["effect"] == "confirmed"
+
+
+def test_apply_kronos_confirmation_keeps_low_confidence_opposition():
+    payload = {"action": "short", "final_action": "short"}
+    forecast = {"summary": {"market_bias": "long", "avg_confidence": 0.6}}
+
+    result = direction_advisor.apply_kronos_confirmation(payload, forecast)
+
+    assert result["final_action"] == "short"
+    assert result["kronos_confirmation"]["effect"] == "weakened"
+
+
+def test_apply_kronos_confirmation_vetoes_strong_opposition():
+    payload = {"action": "short", "final_action": "short"}
+    forecast = {"summary": {"market_bias": "long", "avg_confidence": 0.8}}
+
+    result = direction_advisor.apply_kronos_confirmation(payload, forecast)
+
+    assert result["final_action"] == "hold"
+    assert result["kronos_confirmation"]["effect"] == "vetoed"
+
+
 def test_normalize_llm_review_clamps_to_schema():
     result = direction_advisor.normalize_llm_review(
         {
@@ -218,6 +248,8 @@ def test_run_once_holds_when_all_strategy_backtests_fail(monkeypatch, tmp_path):
             "ledger": str(ledger),
             "output": str(output),
             "candidate_registry": str(tmp_path / "missing_registry.json"),
+            "kronos_forecast": str(tmp_path / "missing_kronos.json"),
+            "disable_kronos_confirmation": False,
             "use_llm_advisor": False,
         },
     )()

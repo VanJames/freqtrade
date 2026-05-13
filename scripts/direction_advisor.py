@@ -33,6 +33,7 @@ AUTOOPT_DIR = USER_DATA / "autoopt"
 DEFAULT_OUTPUT = AUTOOPT_DIR / "direction_advisor.json"
 DEFAULT_LEDGER = AUTOOPT_DIR / "direction_advisor.jsonl"
 DEFAULT_CANDIDATE_REGISTRY = AUTOOPT_DIR / "strategy_registry.json"
+DEFAULT_KRONOS_FORECAST = AUTOOPT_DIR / "kronos_forecast.json"
 VALID_ACTIONS = {"long", "short", "hold"}
 VALID_PARAMETER_BIAS = {
     "risk": {"reduce", "normal", "increase"},
@@ -41,6 +42,8 @@ VALID_PARAMETER_BIAS = {
 }
 LLM_OPPOSITE_VETO_CONFIDENCE = 0.65
 LLM_HOLD_VETO_CONFIDENCE = 0.80
+KRONOS_CONFIRM_CONFIDENCE = 0.55
+KRONOS_STRONG_OPPOSE_CONFIDENCE = 0.75
 
 
 @dataclass
@@ -72,6 +75,8 @@ def parse_args() -> argparse.Namespace:
         ],
     )
     parser.add_argument("--candidate-registry", default=str(DEFAULT_CANDIDATE_REGISTRY))
+    parser.add_argument("--kronos-forecast", default=str(DEFAULT_KRONOS_FORECAST))
+    parser.add_argument("--disable-kronos-confirmation", action="store_true")
     parser.add_argument("--backtest-days", type=int, default=2)
     parser.add_argument("--min-side-trades", type=int, default=1)
     parser.add_argument("--min-side-profit-pct", type=float, default=0.0)
@@ -365,6 +370,67 @@ def load_registry_strategies(path: Path, fallback: list[str]) -> list[str]:
     return list(dict.fromkeys([*fallback, *names]))
 
 
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def apply_kronos_confirmation(payload: dict, forecast: dict[str, Any]) -> dict:
+    if not forecast:
+        payload["kronos_confirmation"] = {"enabled": False, "reason": "forecast_missing"}
+        return payload
+    action = str(payload.get("final_action") or payload.get("action") or "hold").lower()
+    summary = forecast.get("summary", {}) if isinstance(forecast.get("summary"), dict) else {}
+    market_bias = str(summary.get("market_bias", "hold")).lower()
+    confidence = _as_float(summary.get("avg_confidence"), 0.0)
+    confirmation = {
+        "enabled": True,
+        "forecast_created_at": forecast.get("created_at"),
+        "market_bias": market_bias if market_bias in VALID_ACTIONS else "hold",
+        "confidence": confidence,
+        "effect": "none",
+        "reason": "kronos_neutral_or_missing_bias",
+    }
+    if action == "hold":
+        confirmation["reason"] = "statistical_action_hold"
+        payload["kronos_confirmation"] = confirmation
+        return payload
+    if market_bias == action and confidence >= KRONOS_CONFIRM_CONFIDENCE:
+        confirmation["effect"] = "confirmed"
+        confirmation["reason"] = "kronos_confirmed_statistical_action"
+        payload["kronos_confirmation"] = confirmation
+        return payload
+    if (
+        market_bias in {"long", "short"}
+        and market_bias != action
+        and confidence >= KRONOS_STRONG_OPPOSE_CONFIDENCE
+    ):
+        payload["final_action"] = "hold"
+        payload["final_reason"] = (
+            f"Kronos strongly opposed statistical action {action} with "
+            f"{market_bias} confidence {confidence:.2f}."
+        )
+        confirmation["effect"] = "vetoed"
+        confirmation["reason"] = "kronos_strong_opposition"
+        payload["kronos_confirmation"] = confirmation
+        return payload
+    if market_bias in {"long", "short"} and market_bias != action:
+        confirmation["effect"] = "weakened"
+        confirmation["reason"] = "kronos_low_confidence_opposition"
+        if "llm_advisor" not in payload:
+            payload["final_reason"] = (
+                payload.get("final_reason")
+                or "Statistical gate passed; Kronos disagreement was below veto threshold."
+            )
+        payload["kronos_confirmation"] = confirmation
+        return payload
+    payload["kronos_confirmation"] = confirmation
+    return payload
+
+
 def build_feedback_summary(records: list[dict]) -> dict[str, Any]:
     buckets = {
         "long": {"count": 0, "positive": 0, "profit_total_pct": 0.0},
@@ -452,6 +518,8 @@ def run_once(args: argparse.Namespace) -> dict:
             "Advisory only. Trade only when live strategy entry signal agrees with recommended_side."
         ),
     }
+    if not args.disable_kronos_confirmation:
+        payload = apply_kronos_confirmation(payload, load_json(Path(args.kronos_forecast)))
     if args.use_llm_advisor:
         try:
             review = llm_review(

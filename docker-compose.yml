@@ -175,6 +175,43 @@ services:
       - "360"
       - --loop
 
+  kronos-advisor:
+    image: freqtrade-local-freqai
+    build:
+      context: .
+      dockerfile: "./docker/Dockerfile.freqai"
+      args:
+        sourceimage: freqtradeorg/freqtrade
+        sourcetag: stable
+    profiles:
+      - optimizer
+    restart: unless-stopped
+    container_name: freqtrade-kronos-advisor
+    user: ftuser
+    entrypoint: ["python"]
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ".:/workspace"
+    working_dir: /workspace
+    command:
+      - /workspace/scripts/kronos_advisor.py
+      - --config
+      - /workspace/user_data/config.json
+      - --output
+      - /workspace/user_data/autoopt/kronos_forecast.json
+      - --ledger
+      - /workspace/user_data/autoopt/kronos_forecast.jsonl
+      - --lookback
+      - "400"
+      - --pred-len
+      - "24"
+      - --interval-minutes
+      - "30"
+      - --loop
+
   trade-settings:
     image: freqtrade-local-freqai
     build:
