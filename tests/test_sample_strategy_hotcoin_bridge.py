@@ -406,6 +406,28 @@ def test_hotcoin_bridge_disabled_does_not_spawn(monkeypatch, tmp_path):
     )
 
 
+def test_confirm_trade_exit_does_not_email_during_backtests(monkeypatch):
+    strategy = _strategy()
+    strategy.config = {"runmode": "backtest"}
+
+    def fail_send(*args, **kwargs):
+        raise AssertionError("Backtest exits must not send emails")
+
+    monkeypatch.setattr(strategy, "_send_email_async", fail_send)
+    trade = type("Trade", (), {"is_short": True, "id": 1})()
+
+    assert strategy.confirm_trade_exit(
+        "SOL/USDT:USDT",
+        trade,
+        "limit",
+        4.15,
+        79.32,
+        "GTC",
+        "short_exit",
+        datetime(2026, 4, 7, 11, tzinfo=UTC),
+    ) is True
+
+
 def test_entry_diagnostics_logs_blockers(caplog):
     strategy = _strategy()
     dataframe = pd.DataFrame(

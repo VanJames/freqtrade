@@ -802,6 +802,8 @@ class SampleStrategy(IStrategy):
         current_time: datetime,
         **kwargs,
     ) -> bool:
+        if self.config.get("runmode") not in (RunMode.DRY_RUN, RunMode.LIVE):
+            return True
         side = "short" if trade.is_short else "long"
         cache_key = f"{pair}:trade_exit:{getattr(trade, 'id', '')}:{exit_reason}:{current_time.isoformat()}"
         if cache_key not in self._signal_email_cache:
