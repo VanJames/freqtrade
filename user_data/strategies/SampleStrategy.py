@@ -234,15 +234,19 @@ class SampleStrategy(IStrategy):
         short_range: pd.Series,
     ) -> None:
         if not self._is_live_or_dry_run():
+            logger.info(
+                "Signal diagnostics skipped for %s: runmode=%s",
+                metadata.get("pair", "unknown"),
+                self.config.get("runmode"),
+            )
             return
         if dataframe.empty:
-            return
-        if self._last_bool(dataframe.get("enter_long", pd.Series(dtype=float))) or self._last_bool(
-            dataframe.get("enter_short", pd.Series(dtype=float))
-        ):
+            logger.info("Signal diagnostics skipped for %s: empty dataframe", metadata.get("pair", "unknown"))
             return
 
         last = dataframe.iloc[-1]
+        has_enter_long = self._last_bool(dataframe.get("enter_long", pd.Series(dtype=float)))
+        has_enter_short = self._last_bool(dataframe.get("enter_short", pd.Series(dtype=float)))
         candle_time = last.get("date")
         if hasattr(candle_time, "isoformat"):
             candle_time = candle_time.isoformat()
@@ -405,6 +409,8 @@ class SampleStrategy(IStrategy):
                 "trend_down_15m": bool(last.get("trend_down_15m", False)),
                 "freqai_do_predict": do_predict_value,
                 "freqai_future_return": future_return,
+                "enter_long": has_enter_long,
+                "enter_short": has_enter_short,
                 "long_blockers": long_blockers_limited,
                 "short_blockers": short_blockers_limited,
             }

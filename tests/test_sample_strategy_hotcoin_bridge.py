@@ -425,6 +425,58 @@ def test_hotcoin_bridge_disabled_does_not_spawn(monkeypatch, tmp_path):
     )
 
 
+def test_log_entry_diagnostics_writes_record_even_with_entry(monkeypatch, tmp_path):
+    diagnostics_path = tmp_path / "signals" / "signal_diagnostics.jsonl"
+    monkeypatch.setenv("SIGNAL_DIAGNOSTICS_PATH", str(diagnostics_path))
+    strategy = _strategy()
+    strategy._signal_diagnostic_cache = set()
+    frame = pd.DataFrame(
+        [
+            {
+                "date": datetime(2026, 5, 13, tzinfo=UTC),
+                "close": 100.0,
+                "ema20": 101.0,
+                "ema50": 102.0,
+                "ema200": 103.0,
+                "rsi": 40.0,
+                "adx": 25.0,
+                "macd": -1.0,
+                "macdsignal": 0.0,
+                "macdhist": -1.0,
+                "volume_ratio": 2.0,
+                "volatility_ratio": 1.0,
+                "atr_pct": 0.01,
+                "trend_down_1h": True,
+                "trend_down_15m": True,
+                "trend_up_1h": False,
+                "trend_up_15m": False,
+                "enter_short": 1,
+                "enter_long": 0,
+            }
+        ]
+    )
+    thresholds = pd.Series([20.0])
+
+    strategy._log_entry_diagnostics(
+        frame,
+        {"pair": "BTC/USDT:USDT"},
+        thresholds,
+        pd.Series([1.0]),
+        thresholds,
+        thresholds,
+        pd.Series([False]),
+        pd.Series([False]),
+        pd.Series([False]),
+        pd.Series([True]),
+        pd.Series([True]),
+        pd.Series([False]),
+    )
+
+    record = json.loads(diagnostics_path.read_text().splitlines()[0])
+    assert record["pair"] == "BTC/USDT:USDT"
+    assert record["enter_short"] is True
+
+
 def test_confirm_trade_exit_does_not_email_during_backtests(monkeypatch):
     strategy = _strategy()
     strategy.config = {"runmode": "backtest"}
