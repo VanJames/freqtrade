@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from scripts import health_check
@@ -52,6 +53,17 @@ def test_check_formal_pool_warns_when_missing(tmp_path):
 
     assert result.status == "warn"
     assert "missing" in result.summary
+
+
+def test_check_signal_diagnostics_freshness_warns_when_stale(tmp_path):
+    path = tmp_path / "signal_diagnostics.jsonl"
+    stale = (datetime.now(UTC) - timedelta(hours=4)).isoformat()
+    path.write_text(json.dumps({"created_at": stale, "time": stale}) + "\n")
+
+    result = health_check.check_signal_diagnostics_freshness(path, limit=10, stale_minutes=90)
+
+    assert result.status == "warn"
+    assert result.details["age_minutes"] > 90
 
 
 def test_check_trade_db_reads_latest_closed_trade(tmp_path):
@@ -139,3 +151,16 @@ def test_check_core_logs_reports_researcher_errors(monkeypatch):
     assert results[1].name == "strategy_researcher_logs"
     assert results[1].status == "warn"
     assert "FileNotFoundError" in "\n".join(results[1].details["recent_errors"])
+
+
+def test_check_strategy_alignment_only_flags_hold_when_hold_policy_blocks():
+    result = health_check.check_strategy_alignment(
+        {"strategy": "Runner2x"},
+        {"direction_advisor_hold_policy": "normal"},
+        {"recommended_strategy": "Runner2x"},
+        {"recommended_strategy": "Runner2x", "final_action": "hold"},
+        {"allowed_strategies": ["Runner2x"]},
+    )
+
+    assert result.status == "ok"
+    assert "direction advisor currently blocks new entries with hold" not in result.details["warnings"]

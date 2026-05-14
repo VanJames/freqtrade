@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-age-minutes", type=float, default=180.0)
     parser.add_argument("--signal-limit", type=int, default=100)
     parser.add_argument("--log-tail", type=int, default=200)
+    parser.add_argument("--signal-stale-minutes", type=float, default=90.0)
     parser.add_argument("--containers", nargs="*", default=DEFAULT_CONTAINERS)
     parser.add_argument("--skip-docker", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -282,6 +283,32 @@ def check_signal_diagnostics(path: Path, limit: int) -> CheckResult:
     return CheckResult("signal_diagnostics", status, summary, details)
 
 
+def check_signal_diagnostics_freshness(path: Path, limit: int, stale_minutes: float) -> CheckResult:
+    records = read_jsonl_tail(path, limit)
+    if not records:
+        return CheckResult(
+            "signal_diagnostics_freshness",
+            "warn",
+            "no diagnostics available",
+            {"path": str(path), "latest_time": None, "age_minutes": None},
+        )
+    latest_time = iso_to_dt(str(records[-1].get("created_at") or records[-1].get("time") or ""))
+    age = None
+    status = "ok"
+    if latest_time is not None:
+        age = round((utc_now() - latest_time).total_seconds() / 60.0, 2)
+        if age > stale_minutes:
+            status = "warn"
+    else:
+        status = "warn"
+    return CheckResult(
+        "signal_diagnostics_freshness",
+        status,
+        f"latest diagnostics age={age}m",
+        {"path": str(path), "latest_time": latest_time.isoformat() if latest_time else None, "age_minutes": age},
+    )
+
+
 def check_trade_db(path: Path) -> CheckResult:
     if not path.exists():
         return CheckResult("trade_db", "warn", "tradesv3.sqlite missing", {"path": str(path)})
@@ -361,6 +388,16 @@ def docker_logs_tail(name: str, lines: int) -> list[str]:
     return [line for line in output.splitlines() if line.strip()]
 
 
+def docker_exec_output(container: str, command: str) -> tuple[int, str]:
+    proc = subprocess.run(
+        ["docker", "exec", container, "sh", "-lc", command],
+        capture_output=True,
+        text=True,
+    )
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return proc.returncode, output
+
+
 def check_docker(containers: list[str]) -> CheckResult:
     states = [docker_container_state(name) for name in containers]
     missing = [item["name"] for item in states if item["status"] == "missing"]
@@ -396,6 +433,24 @@ def summarize_entry_pressure(signal_analysis: dict[str, Any], direction_payload:
     if isinstance(direction_payload, dict) and direction_payload.get("final_action") == "hold":
         reasons.append("direction advisor is currently hold")
     return reasons[:6]
+
+
+def check_container_strategy_code(freqtrade_container: str) -> CheckResult:
+    checks = {
+        "has_hold_policy": "grep -n 'direction_advisor_hold_policy' /freqtrade/user_data/strategies/SampleStrategy.py",
+        "has_hold_advisory": "grep -n 'hold_advisory' /freqtrade/user_data/strategies/SampleStrategy.py",
+    }
+    details: dict[str, Any] = {"container": freqtrade_container}
+    missing: list[str] = []
+    for key, command in checks.items():
+        code, output = docker_exec_output(freqtrade_container, command)
+        details[key] = {"exit_code": code, "output": output}
+        if code != 0:
+            missing.append(key)
+    status = "ok" if not missing else "warn"
+    summary = "container strategy code includes latest gate logic" if not missing else "container strategy code looks outdated"
+    details["missing_markers"] = missing
+    return CheckResult("container_strategy_code", status, summary, details)
 
 
 def check_core_logs(
@@ -451,6 +506,7 @@ def check_core_logs(
                 },
             )
         )
+        results.append(check_container_strategy_code(freqtrade_container))
 
     researcher_lines = docker_logs_tail(researcher_container, lines)
     if researcher_lines:
@@ -476,6 +532,7 @@ def check_core_logs(
 
 def check_strategy_alignment(
     config_payload: dict[str, Any] | None,
+    trade_settings_payload: dict[str, Any] | None,
     pair_selection_payload: dict[str, Any] | None,
     direction_payload: dict[str, Any] | None,
     formal_pool_payload: dict[str, Any] | None,
@@ -485,8 +542,11 @@ def check_strategy_alignment(
     direction_strategy = None
     final_action = None
     allowed_strategies: list[str] = []
+    hold_policy = "normal"
     if isinstance(config_payload, dict):
         config_strategy = config_payload.get("strategy")
+    if isinstance(trade_settings_payload, dict):
+        hold_policy = str(trade_settings_payload.get("direction_advisor_hold_policy", "normal")).strip().lower() or "normal"
     if isinstance(pair_selection_payload, dict):
         pair_strategy = pair_selection_payload.get("recommended_strategy")
     if isinstance(direction_payload, dict):
@@ -502,7 +562,7 @@ def check_strategy_alignment(
         warnings.append("configured strategy differs from pair selection recommendation")
     if config_strategy and direction_strategy and config_strategy != direction_strategy:
         warnings.append("configured strategy differs from direction advisor recommendation")
-    if final_action == "hold":
+    if final_action == "hold" and hold_policy == "hold":
         warnings.append("direction advisor currently blocks new entries with hold")
 
     status = "ok" if not warnings else "warn"
@@ -512,6 +572,7 @@ def check_strategy_alignment(
         "pair_selection_strategy": pair_strategy,
         "direction_strategy": direction_strategy,
         "direction_final_action": final_action,
+        "direction_hold_policy": hold_policy,
         "formal_pool_allowed_strategies": allowed_strategies,
         "warnings": warnings,
     }
@@ -533,9 +594,13 @@ def build_results(args: argparse.Namespace) -> list[CheckResult]:
     pair_selection_result = check_pair_selection(pair_selection_path, args.max_age_minutes)
     direction_result = check_direction_advisor(direction_path, args.max_age_minutes)
     signal_result = check_signal_diagnostics(signal_path, args.signal_limit)
+    signal_freshness_result = check_signal_diagnostics_freshness(
+        signal_path, args.signal_limit, args.signal_stale_minutes
+    )
     trade_db_result = check_trade_db(trade_db_path)
 
     config_payload = read_json(config_path)
+    trade_settings_payload = read_json(trade_settings_path)
     pair_selection_payload = read_json(pair_selection_path)
     direction_payload = read_json(direction_path)
     formal_pool_payload = read_json(formal_pool_path)
@@ -549,9 +614,11 @@ def build_results(args: argparse.Namespace) -> list[CheckResult]:
         pair_selection_result,
         direction_result,
         signal_result,
+        signal_freshness_result,
         trade_db_result,
         check_strategy_alignment(
             config_payload if isinstance(config_payload, dict) else None,
+            trade_settings_payload if isinstance(trade_settings_payload, dict) else None,
             pair_selection_payload if isinstance(pair_selection_payload, dict) else None,
             direction_payload if isinstance(direction_payload, dict) else None,
             formal_pool_payload if isinstance(formal_pool_payload, dict) else None,
