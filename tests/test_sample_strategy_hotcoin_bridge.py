@@ -182,6 +182,37 @@ def test_direction_advisor_gate_hold_blocks_new_entries(monkeypatch, tmp_path):
         series.copy(), series.copy(), series.copy(), series.copy()
     )
 
+    assert all(item.tolist() == [True, True] for item in gated)
+
+
+def test_direction_advisor_gate_hold_can_still_block_when_configured(monkeypatch, tmp_path):
+    advisor_path = tmp_path / "direction_advisor.json"
+    advisor_path.write_text(
+        json.dumps(
+            {
+                "created_at": datetime.now(UTC).isoformat(),
+                "final_action": "hold",
+            }
+        )
+    )
+    settings_path = tmp_path / "trade_execution.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "direction_advisor_gate_enabled": True,
+                "direction_advisor_path": str(advisor_path),
+                "direction_advisor_hold_policy": "hold",
+            }
+        )
+    )
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+    strategy = _strategy()
+    series = pd.Series([True, True])
+
+    gated = strategy._apply_direction_advisor_gate(
+        series.copy(), series.copy(), series.copy(), series.copy()
+    )
+
     assert all(not item.any() for item in gated)
 
 

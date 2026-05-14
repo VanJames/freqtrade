@@ -534,26 +534,26 @@ class SampleStrategy(IStrategy):
         dataframe["trend_up_1h"] = (
             (dataframe["close_1h"] > dataframe["ema20_1h"]) &
             (dataframe["ema20_1h"] > dataframe["ema50_1h"]) &
-            (dataframe["rsi_1h"] > 50) &
-            (dataframe["adx_1h"] > 18)
+            (dataframe["rsi_1h"] > 48) &
+            (dataframe["adx_1h"] > 16)
         )
         dataframe["trend_down_1h"] = (
             (dataframe["close_1h"] < dataframe["ema20_1h"]) &
             (dataframe["ema20_1h"] < dataframe["ema50_1h"]) &
-            (dataframe["rsi_1h"] < 50) &
-            (dataframe["adx_1h"] > 18)
+            (dataframe["rsi_1h"] < 52) &
+            (dataframe["adx_1h"] > 16)
         )
         dataframe["trend_up_15m"] = (
             (dataframe["close_15m"] > dataframe["ema20_15m"]) &
             (dataframe["ema20_15m"] > dataframe["ema50_15m"]) &
-            (dataframe["rsi_15m"] > 52) &
-            (dataframe["adx_15m"] > 16)
+            (dataframe["rsi_15m"] > 50) &
+            (dataframe["adx_15m"] > 14)
         )
         dataframe["trend_down_15m"] = (
             (dataframe["close_15m"] < dataframe["ema20_15m"]) &
             (dataframe["ema20_15m"] < dataframe["ema50_15m"]) &
-            (dataframe["rsi_15m"] < 48) &
-            (dataframe["adx_15m"] > 16)
+            (dataframe["rsi_15m"] < 50) &
+            (dataframe["adx_15m"] > 14)
         )
         dataframe["trend_context_long"] = dataframe["trend_up_1h"] | dataframe["trend_up_15m"]
         dataframe["trend_context_short"] = dataframe["trend_down_1h"] | dataframe["trend_down_15m"]
@@ -587,14 +587,20 @@ class SampleStrategy(IStrategy):
             dataframe["trend_context_long"]
             & (dataframe["close"] > dataframe["ema20"])
             & (dataframe["ema20"] > dataframe["ema50"])
-            & (dataframe["ema50"] > dataframe["ema200"])
-            & (dataframe["adx"] > adx_threshold)
             & (
-                (dataframe["trend_up_15m"] & (dataframe["volume_ratio"] > 0.95))
-                | (dataframe["volume_ratio"] > (volume_threshold - 0.15))
+                (dataframe["ema50"] > dataframe["ema200"])
+                | (dataframe["trend_up_15m"] & (dataframe["close"] > dataframe["ema50"]))
             )
-            & (dataframe["rsi"] > 52)
-            & (dataframe["macdhist"] > 0)
+            & (dataframe["adx"] > (adx_threshold - 2.0))
+            & (
+                (dataframe["trend_up_15m"] & (dataframe["volume_ratio"] > 0.85))
+                | (dataframe["volume_ratio"] > (volume_threshold - 0.30))
+            )
+            & (dataframe["rsi"] > 48)
+            & (
+                (dataframe["macdhist"] > 0)
+                | ((dataframe["macdhist"] > -0.02) & (dataframe["macdhist"] > dataframe["macdhist"].shift(1)))
+            )
         )
         long_trigger = (
             qtpylib.crossed_above(dataframe["rsi"], long_rsi_threshold)
@@ -612,17 +618,26 @@ class SampleStrategy(IStrategy):
             & self._freqai_long_ok(dataframe)
         )
 
-        short_alignment = dataframe["trend_down_1h"] & dataframe["trend_down_15m"]
+        short_alignment = dataframe["trend_context_short"]
         short_trend = (
             short_alignment
             & (dataframe["close"] < dataframe["ema20"])
-            & (dataframe["ema20"] < dataframe["ema50"])
-            & (dataframe["ema50"] < dataframe["ema200"])
-            & (dataframe["adx"] > (adx_threshold + 1.0))
-            & (dataframe["volume_ratio"] > (volume_threshold + 0.05))
-            & (dataframe["rsi"] < 45)
-            & (dataframe["macd"] < dataframe["macdsignal"])
-            & (dataframe["macdhist"] < 0)
+            & (
+                (dataframe["ema20"] < dataframe["ema50"])
+                | ((dataframe["trend_down_15m"] | dataframe["trend_down_1h"]) & (dataframe["close"] < dataframe["ema50"]))
+            )
+            & (
+                (dataframe["ema50"] < dataframe["ema200"])
+                | ((dataframe["trend_down_15m"] | dataframe["trend_down_1h"]) & (dataframe["close"] < dataframe["ema200"]))
+            )
+            & (dataframe["adx"] > (adx_threshold - 2.0))
+            & (dataframe["volume_ratio"] > (volume_threshold - 0.20))
+            & (dataframe["rsi"] < 50)
+            & (dataframe["macd"] < (dataframe["macdsignal"] + 0.02))
+            & (
+                (dataframe["macdhist"] < 0)
+                | ((dataframe["macdhist"] < 0.02) & (dataframe["macdhist"] < dataframe["macdhist"].shift(1)))
+            )
         )
         short_trigger = (
             qtpylib.crossed_below(dataframe["rsi"], short_rsi_threshold)
@@ -1077,6 +1092,14 @@ class SampleStrategy(IStrategy):
         ).strip().lower()
         if stale_policy not in {"normal", "hold"}:
             stale_policy = "normal"
+        hold_policy = str(
+            os.getenv(
+                "DIRECTION_ADVISOR_HOLD_POLICY",
+                settings.get("direction_advisor_hold_policy", "normal"),
+            )
+        ).strip().lower()
+        if hold_policy not in {"normal", "hold"}:
+            hold_policy = "normal"
         return {
             "enabled": enabled,
             "path": str(
@@ -1090,6 +1113,7 @@ class SampleStrategy(IStrategy):
             ),
             "max_age_minutes": max(max_age_minutes, 1.0),
             "stale_policy": stale_policy,
+            "hold_policy": hold_policy,
         }
 
     def _load_direction_advisor_action(self) -> tuple[str, str]:
@@ -1119,6 +1143,8 @@ class SampleStrategy(IStrategy):
         action = str(payload.get("final_action") or payload.get("action") or "hold").strip().lower()
         if action not in {"long", "short", "hold"}:
             return "hold", "invalid_action"
+        if action == "hold":
+            return gate["hold_policy"], "hold_advisory"
         return action, "fresh"
 
     def _apply_direction_advisor_gate(
