@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 
 from freqtrade.data.btanalysis.bt_fileutils import load_backtest_stats
 
-from scripts import auto_optimize, build_market_snapshot, openai_market_advisor
+from scripts import auto_optimize, build_market_snapshot, openai_market_advisor, strategy_switcher
 
 
 USER_DATA = ROOT / "user_data"
@@ -82,6 +82,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-registry", default=str(DEFAULT_CANDIDATE_REGISTRY))
     parser.add_argument("--kronos-forecast", default=str(DEFAULT_KRONOS_FORECAST))
     parser.add_argument("--disable-kronos-confirmation", action="store_true")
+    parser.add_argument("--registry-pool-positive-window-days", nargs="+", type=int, default=[])
+    parser.add_argument("--registry-target-positive-window-days", nargs="+", type=int, default=[])
+    parser.add_argument("--min-registry-window-profit-pct", type=float, default=0.0)
     parser.add_argument("--backtest-days", type=int, default=2)
     parser.add_argument("--min-side-trades", type=int, default=1)
     parser.add_argument("--min-side-profit-pct", type=float, default=0.0)
@@ -336,6 +339,41 @@ def apply_llm_confirmation(payload: dict, review: dict) -> dict:
     return payload
 
 
+def apply_registry_safety_gate(
+    payload: dict,
+    registry: dict,
+    *,
+    pool_positive_days: set[int],
+    target_positive_days: set[int],
+    min_profit_pct: float,
+) -> dict:
+    pool_ok, pool_details = strategy_switcher.pool_positive_window_gate(
+        registry,
+        pool_positive_days,
+        min_profit_pct,
+    )
+    target = str(payload.get("recommended_strategy") or "")
+    target_ok, target_details = strategy_switcher.positive_window_gate(
+        registry,
+        target,
+        target_positive_days,
+        min_profit_pct,
+    )
+    payload["registry_safety_gate"] = {
+        "pool": pool_details,
+        "target": target_details,
+    }
+    if not pool_ok:
+        payload["final_action"] = "hold"
+        payload["final_reason"] = "Strategy pool failed required positive registry window gate."
+        return payload
+    if target and not target_ok:
+        payload["final_action"] = "hold"
+        payload["final_reason"] = "Recommended strategy failed required positive registry window gate."
+        return payload
+    return payload
+
+
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
@@ -471,7 +509,9 @@ def run_once(args: argparse.Namespace) -> dict:
     train_timerange, _ = auto_optimize.build_walk_forward_timeranges(args.backtest_days, 0)
     run_id = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     run_dir = AUTOOPT_DIR / "direction-advisor" / run_id
-    strategies = load_registry_strategies(Path(args.candidate_registry), list(args.strategies))
+    candidate_registry_path = Path(args.candidate_registry)
+    candidate_registry = load_json(candidate_registry_path)
+    strategies = load_registry_strategies(candidate_registry_path, list(args.strategies))
 
     all_metrics: list[DirectionMetrics] = []
     errors: list[dict[str, str]] = []
@@ -515,7 +555,7 @@ def run_once(args: argparse.Namespace) -> dict:
         "best": asdict(best) if best else None,
         "metrics": [asdict(item) for item in sorted(all_metrics, key=lambda x: x.score, reverse=True)],
         "errors": errors,
-        "candidate_registry": str(Path(args.candidate_registry)),
+        "candidate_registry": str(candidate_registry_path),
         "evaluated_strategies": list(dict.fromkeys(strategies)),
         "market": market,
         "feedback_summary": feedback_summary,
@@ -537,6 +577,13 @@ def run_once(args: argparse.Namespace) -> dict:
             review = {"enabled": True, "error": str(exc)}
         payload["llm_advisor"] = review
         payload = apply_llm_confirmation(payload, review)
+    payload = apply_registry_safety_gate(
+        payload,
+        candidate_registry,
+        pool_positive_days=set(args.registry_pool_positive_window_days),
+        target_positive_days=set(args.registry_target_positive_window_days),
+        min_profit_pct=args.min_registry_window_profit_pct,
+    )
     write_json(Path(args.output), payload)
     append_jsonl(Path(args.ledger), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), flush=True)

@@ -125,6 +125,12 @@ services:
       - "2"
       - --min-side-trades
       - "1"
+      - --registry-pool-positive-window-days
+      - "30"
+      - --registry-target-positive-window-days
+      - "30"
+      - --min-registry-window-profit-pct
+      - "0.0"
       - --use-llm-advisor
       - --advisor-model
       - deepseek-chat
@@ -166,6 +172,7 @@ services:
       - "1"
       - "2"
       - "7"
+      - "30"
       - --min-trades
       - "1"
       - --use-llm-advisor
@@ -223,6 +230,12 @@ services:
       - "0.05"
       - --inactive-min-score
       - "-1.25"
+      - --require-positive-window-days
+      - "30"
+      - --pool-positive-window-days
+      - "30"
+      - --min-required-window-profit-pct
+      - "0.0"
       - --cooldown-minutes
       - "360"
       - --max-registry-age-minutes

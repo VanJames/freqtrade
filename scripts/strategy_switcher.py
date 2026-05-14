@@ -74,6 +74,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--inactive-min-profit-pct", type=float, default=0.05)
     parser.add_argument("--inactive-min-score", type=float, default=-1.25)
     parser.add_argument("--inactive-confirm-windows", nargs="+", type=int, default=[2, 7])
+    parser.add_argument("--require-positive-window-days", nargs="+", type=int, default=[])
+    parser.add_argument("--pool-positive-window-days", nargs="+", type=int, default=[])
+    parser.add_argument("--min-required-window-profit-pct", type=float, default=0.0)
     parser.add_argument("--max-registry-age-minutes", type=float, default=180.0)
     parser.add_argument("--cooldown-minutes", type=float, default=360.0)
     parser.add_argument("--allow-strategies", nargs="+", default=sorted(VALID_STRATEGIES))
@@ -133,6 +136,69 @@ def strategy_window_evaluations(registry: dict[str, Any], strategy: str) -> list
     ]
 
 
+def positive_window_gate(
+    registry: dict[str, Any],
+    strategy: str,
+    required_days: set[int],
+    min_profit_pct: float,
+) -> tuple[bool, dict[str, Any]]:
+    if not required_days:
+        return True, {"required_days": []}
+    rows = [
+        item
+        for item in strategy_window_evaluations(registry, strategy)
+        if int(item.get("window_days", 0)) in required_days
+    ]
+    seen_days = {int(item.get("window_days", 0)) for item in rows}
+    missing_days = sorted(required_days - seen_days)
+    failed = [
+        item
+        for item in rows
+        if not bool(item.get("passed"))
+        or int(item.get("trades", 0)) <= 0
+        or float(item.get("profit_total_pct", 0.0)) <= min_profit_pct
+    ]
+    return not failed, {
+        "required_days": sorted(required_days),
+        "missing_days": missing_days,
+        "checked": rows,
+        "failed": failed,
+        "min_profit_pct": min_profit_pct,
+        "missing_policy": "ignored",
+    }
+
+
+def pool_positive_window_gate(
+    registry: dict[str, Any],
+    required_days: set[int],
+    min_profit_pct: float,
+) -> tuple[bool, dict[str, Any]]:
+    if not required_days:
+        return True, {"required_days": []}
+    rows = [
+        item
+        for item in registry.get("window_evaluations", [])
+        if isinstance(item, dict) and int(item.get("window_days", 0)) in required_days
+    ]
+    seen_days = {int(item.get("window_days", 0)) for item in rows}
+    missing_days = sorted(required_days - seen_days)
+    positive = [
+        item
+        for item in rows
+        if bool(item.get("passed"))
+        and int(item.get("trades", 0)) > 0
+        and float(item.get("profit_total_pct", 0.0)) > min_profit_pct
+    ]
+    return bool(positive) or not rows, {
+        "required_days": sorted(required_days),
+        "missing_days": missing_days,
+        "positive_count": len(positive),
+        "checked_count": len(rows),
+        "min_profit_pct": min_profit_pct,
+        "missing_policy": "ignored",
+    }
+
+
 def current_strategy_is_inactive(
     registry: dict[str, Any],
     current: str,
@@ -155,6 +221,8 @@ def select_inactivity_fallback(
     inactive_min_profit_pct: float,
     inactive_min_score: float,
     inactive_confirm_windows: set[int],
+    required_positive_windows: set[int],
+    min_required_window_profit_pct: float,
 ) -> tuple[str, dict[str, Any]]:
     if not current_strategy_is_inactive(registry, current, inactive_window_days):
         return "", {"inactive": False}
@@ -174,6 +242,14 @@ def select_inactivity_fallback(
             continue
         if float(item.get("score", -999999.0)) < inactive_min_score:
             continue
+        required_ok, required_details = positive_window_gate(
+            registry,
+            strategy,
+            required_positive_windows,
+            min_required_window_profit_pct,
+        )
+        if not required_ok:
+            continue
 
         confirming = [
             row
@@ -191,7 +267,11 @@ def select_inactivity_fallback(
                 float(item.get("score", -999999.0)),
                 int(item.get("trades", 0)),
                 strategy,
-                {"strategy_score": item, "confirming_windows": confirming},
+                {
+                    "strategy_score": item,
+                    "confirming_windows": confirming,
+                    "required_positive_windows": required_details,
+                },
             )
         )
 
@@ -251,8 +331,11 @@ def should_switch(
     inactive_min_profit_pct: float = 0.05,
     inactive_min_score: float = -1.25,
     inactive_confirm_windows: set[int] | None = None,
-    max_registry_age_minutes: float,
-    cooldown_minutes: float,
+    required_positive_windows: set[int] | None = None,
+    pool_positive_windows: set[int] | None = None,
+    min_required_window_profit_pct: float = 0.0,
+    max_registry_age_minutes: float = 180.0,
+    cooldown_minutes: float = 360.0,
     now: datetime | None = None,
 ) -> SwitchDecision:
     now = now or datetime.now(UTC)
@@ -276,6 +359,15 @@ def should_switch(
     if open_trades or open_orders:
         return SwitchDecision(False, "open trades or orders exist", current, target, details)
 
+    pool_ok, pool_details = pool_positive_window_gate(
+        registry,
+        pool_positive_windows or set(),
+        min_required_window_profit_pct,
+    )
+    details["pool_positive_windows"] = pool_details
+    if not pool_ok:
+        return SwitchDecision(False, "strategy pool failed required positive window gate", current, target, details)
+
     last_switch_age = age_minutes(state.get("last_switch_at"), now)
     details["last_switch_age_minutes"] = last_switch_age
     if last_switch_age is not None and last_switch_age < cooldown_minutes:
@@ -296,6 +388,8 @@ def should_switch(
             inactive_min_profit_pct=inactive_min_profit_pct,
             inactive_min_score=inactive_min_score,
             inactive_confirm_windows=inactive_confirm_windows or {2, 7},
+            required_positive_windows=required_positive_windows or set(),
+            min_required_window_profit_pct=min_required_window_profit_pct,
         )
         details["inactivity_fallback"] = fallback_details
         if fallback_target:
@@ -316,6 +410,15 @@ def should_switch(
     details["target_score"] = target_score
     details["current_score"] = current_score
     details["switch_mode"] = switch_mode
+    required_ok, required_details = positive_window_gate(
+        registry,
+        target,
+        required_positive_windows or set(),
+        min_required_window_profit_pct,
+    )
+    details["target_required_positive_windows"] = required_details
+    if not required_ok:
+        return SwitchDecision(False, "target failed required positive window gate", current, target, details)
     if int(target_score.get("passed_windows", 0)) < min_passed_windows:
         return SwitchDecision(False, "target passed windows below threshold", current, target, details)
     if int(target_score.get("trades", 0)) < min_trades:
@@ -377,6 +480,9 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
         inactive_min_profit_pct=args.inactive_min_profit_pct,
         inactive_min_score=args.inactive_min_score,
         inactive_confirm_windows=set(args.inactive_confirm_windows),
+        required_positive_windows=set(args.require_positive_window_days),
+        pool_positive_windows=set(args.pool_positive_window_days),
+        min_required_window_profit_pct=args.min_required_window_profit_pct,
         max_registry_age_minutes=args.max_registry_age_minutes,
         cooldown_minutes=args.cooldown_minutes,
     )

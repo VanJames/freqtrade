@@ -215,6 +215,73 @@ def test_build_feedback_summary_groups_historical_recommendations():
     assert summary["last_run_id"] == "r3"
 
 
+def test_apply_registry_safety_gate_holds_when_pool_window_is_negative():
+    payload = {
+        "action": "short",
+        "final_action": "short",
+        "recommended_strategy": "SampleStrategy",
+    }
+    registry = {
+        "window_evaluations": [
+            {
+                "strategy": "SampleStrategy",
+                "window_days": 30,
+                "trades": 10,
+                "passed": False,
+                "profit_total_pct": -1.0,
+            }
+        ]
+    }
+
+    result = direction_advisor.apply_registry_safety_gate(
+        payload,
+        registry,
+        pool_positive_days={30},
+        target_positive_days=set(),
+        min_profit_pct=0.0,
+    )
+
+    assert result["final_action"] == "hold"
+    assert "pool failed" in result["final_reason"]
+
+
+def test_apply_registry_safety_gate_holds_when_target_window_is_negative():
+    payload = {
+        "action": "short",
+        "final_action": "short",
+        "recommended_strategy": "SampleStrategy",
+    }
+    registry = {
+        "window_evaluations": [
+            {
+                "strategy": "SampleStrategy",
+                "window_days": 30,
+                "trades": 10,
+                "passed": False,
+                "profit_total_pct": -1.0,
+            },
+            {
+                "strategy": "OtherStrategy",
+                "window_days": 30,
+                "trades": 10,
+                "passed": True,
+                "profit_total_pct": 1.0,
+            },
+        ]
+    }
+
+    result = direction_advisor.apply_registry_safety_gate(
+        payload,
+        registry,
+        pool_positive_days={30},
+        target_positive_days={30},
+        min_profit_pct=0.0,
+    )
+
+    assert result["final_action"] == "hold"
+    assert "Recommended strategy failed" in result["final_reason"]
+
+
 def test_run_once_holds_when_all_strategy_backtests_fail(monkeypatch, tmp_path):
     strategy_path = tmp_path / "strategies"
     strategy_path.mkdir()
@@ -250,6 +317,9 @@ def test_run_once_holds_when_all_strategy_backtests_fail(monkeypatch, tmp_path):
             "candidate_registry": str(tmp_path / "missing_registry.json"),
             "kronos_forecast": str(tmp_path / "missing_kronos.json"),
             "disable_kronos_confirmation": False,
+            "registry_pool_positive_window_days": [],
+            "registry_target_positive_window_days": [],
+            "min_registry_window_profit_pct": 0.0,
             "use_llm_advisor": False,
         },
     )()

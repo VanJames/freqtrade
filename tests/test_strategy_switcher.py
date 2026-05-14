@@ -195,6 +195,95 @@ def test_should_not_use_active_fallback_when_disabled():
     assert decision.reason == "already using recommended strategy"
 
 
+def test_should_not_switch_when_target_required_window_is_negative():
+    registry = registry_for()
+    registry["window_evaluations"] = [
+        {
+            "strategy": "SampleStrategyPullbackShort",
+            "window_days": 30,
+            "trades": 20,
+            "passed": False,
+            "profit_total_pct": -1.2,
+        }
+    ]
+
+    decision = strategy_switcher.should_switch(
+        {"strategy": "SampleStrategy"},
+        registry,
+        {},
+        allow_strategies={"SampleStrategy", "SampleStrategyPullbackShort"},
+        open_trades=0,
+        open_orders=0,
+        min_passed_windows=2,
+        min_trades=5,
+        min_score_margin=0.15,
+        required_positive_windows={30},
+        max_registry_age_minutes=180,
+        cooldown_minutes=360,
+    )
+
+    assert decision.should_switch is False
+    assert decision.reason == "target failed required positive window gate"
+
+
+def test_should_not_switch_when_pool_required_window_has_no_positive_strategy():
+    registry = registry_for()
+    registry["window_evaluations"] = [
+        {
+            "strategy": "SampleStrategy",
+            "window_days": 30,
+            "trades": 20,
+            "passed": False,
+            "profit_total_pct": -0.5,
+        },
+        {
+            "strategy": "SampleStrategyPullbackShort",
+            "window_days": 30,
+            "trades": 20,
+            "passed": False,
+            "profit_total_pct": -1.2,
+        },
+    ]
+
+    decision = strategy_switcher.should_switch(
+        {"strategy": "SampleStrategy"},
+        registry,
+        {},
+        allow_strategies={"SampleStrategy", "SampleStrategyPullbackShort"},
+        open_trades=0,
+        open_orders=0,
+        min_passed_windows=2,
+        min_trades=5,
+        min_score_margin=0.15,
+        pool_positive_windows={30},
+        max_registry_age_minutes=180,
+        cooldown_minutes=360,
+    )
+
+    assert decision.should_switch is False
+    assert decision.reason == "strategy pool failed required positive window gate"
+
+
+def test_required_positive_window_ignores_missing_windows_for_gradual_rollout():
+    decision = strategy_switcher.should_switch(
+        {"strategy": "SampleStrategy"},
+        registry_for(),
+        {},
+        allow_strategies={"SampleStrategy", "SampleStrategyPullbackShort"},
+        open_trades=0,
+        open_orders=0,
+        min_passed_windows=2,
+        min_trades=5,
+        min_score_margin=0.15,
+        required_positive_windows={30},
+        max_registry_age_minutes=180,
+        cooldown_minutes=360,
+    )
+
+    assert decision.should_switch is True
+    assert decision.details["target_required_positive_windows"]["missing_days"] == [30]
+
+
 def test_open_trade_order_counts_handles_missing_database(tmp_path):
     assert strategy_switcher.open_trade_order_counts(tmp_path / "missing.sqlite") == (0, 0)
 
