@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 SIGNAL_DIAGNOSTICS_PATH = Path(
     os.getenv("SIGNAL_DIAGNOSTICS_PATH", "/freqtrade/user_data/signals/signal_diagnostics.jsonl")
 )
+STRATEGY_RUNTIME_PROBE_PATH = Path(
+    os.getenv("STRATEGY_RUNTIME_PROBE_PATH", "/freqtrade/user_data/signals/strategy_runtime_probe.jsonl")
+)
 
 
 class SampleStrategy(IStrategy):
@@ -429,6 +432,15 @@ class SampleStrategy(IStrategy):
                 handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
         except Exception as exc:  # pragma: no cover - diagnostics must not affect trading
             logger.debug("Failed to write signal diagnostics record: %s", exc)
+
+    def _append_strategy_runtime_probe(self, payload: dict) -> None:
+        try:
+            path = Path(os.getenv("STRATEGY_RUNTIME_PROBE_PATH", str(STRATEGY_RUNTIME_PROBE_PATH)))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
+        except Exception as exc:  # pragma: no cover - diagnostics must not affect trading
+            logger.debug("Failed to write strategy runtime probe: %s", exc)
 
     def _append_custom_entry_diagnostics(
         self,

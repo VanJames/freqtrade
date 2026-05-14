@@ -686,7 +686,9 @@ def test_last_bool_treats_nan_as_false():
 
 def test_ai_strategy_writes_signal_diagnostics(monkeypatch, tmp_path):
     diagnostics_path = tmp_path / "signal_diagnostics.jsonl"
+    probe_path = tmp_path / "strategy_runtime_probe.jsonl"
     monkeypatch.setenv("SIGNAL_DIAGNOSTICS_PATH", str(diagnostics_path))
+    monkeypatch.setenv("STRATEGY_RUNTIME_PROBE_PATH", str(probe_path))
     monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(tmp_path / "missing.json"))
     strategy = _ai_strategy()
     dataframe = pd.DataFrame(
@@ -725,3 +727,6 @@ def test_ai_strategy_writes_signal_diagnostics(monkeypatch, tmp_path):
     assert payload["pair"] == "BTC/USDT:USDT"
     assert payload["record_type"] == "signal_diagnostics"
     assert "no_long_trend_context" in payload["long_blockers"]
+    probe_lines = [json.loads(line) for line in probe_path.read_text().splitlines()]
+    assert probe_lines[0]["stage"] == "populate_entry_trend_start"
+    assert probe_lines[-1]["stage"] == "populate_entry_trend_end"

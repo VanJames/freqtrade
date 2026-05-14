@@ -183,6 +183,22 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
         dataframe["enter_long"] = 0
         dataframe["enter_short"] = 0
 
+        if not dataframe.empty:
+            last = dataframe.iloc[-1]
+            candle_time = last.get("date")
+            if hasattr(candle_time, "isoformat"):
+                candle_time = candle_time.isoformat()
+            self._append_strategy_runtime_probe(
+                {
+                    "record_type": "strategy_runtime_probe",
+                    "created_at": pd.Timestamp.utcnow().isoformat(),
+                    "strategy": self.__class__.__name__,
+                    "pair": metadata.get("pair", "unknown"),
+                    "time": candle_time,
+                    "stage": "populate_entry_trend_start",
+                }
+            )
+
         side = self.ai_candidate["side"]
         archetype = self.ai_candidate["archetype"]
         adx_min = float(self.ai_candidate["adx_min"])
@@ -334,6 +350,23 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
                 volume_ok,
             ),
         )
+        if not dataframe.empty:
+            last = dataframe.iloc[-1]
+            candle_time = last.get("date")
+            if hasattr(candle_time, "isoformat"):
+                candle_time = candle_time.isoformat()
+            self._append_strategy_runtime_probe(
+                {
+                    "record_type": "strategy_runtime_probe",
+                    "created_at": pd.Timestamp.utcnow().isoformat(),
+                    "strategy": self.__class__.__name__,
+                    "pair": metadata.get("pair", "unknown"),
+                    "time": candle_time,
+                    "stage": "populate_entry_trend_end",
+                    "enter_long": self._last_bool(dataframe.get("enter_long", pd.Series(dtype=float))),
+                    "enter_short": self._last_bool(dataframe.get("enter_short", pd.Series(dtype=float))),
+                }
+            )
         self._emit_signal_email(dataframe, metadata, "entry", "long")
         self._emit_signal_email(dataframe, metadata, "entry", "short")
         return dataframe
