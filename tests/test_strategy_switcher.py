@@ -197,3 +197,8 @@ def test_should_not_use_active_fallback_when_disabled():
 
 def test_open_trade_order_counts_handles_missing_database(tmp_path):
     assert strategy_switcher.open_trade_order_counts(tmp_path / "missing.sqlite") == (0, 0)
+
+
+def test_valid_strategies_include_range_and_breakout():
+    assert "SampleStrategyRangeMeanReversion" in strategy_switcher.VALID_STRATEGIES
+    assert "SampleStrategyBreakoutMomentum" in strategy_switcher.VALID_STRATEGIES

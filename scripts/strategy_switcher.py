@@ -40,6 +40,8 @@ VALID_STRATEGIES = {
     "SampleStrategyScalp",
     "SampleStrategyPullbackShort",
     "SampleStrategyPullbackLong",
+    "SampleStrategyRangeMeanReversion",
+    "SampleStrategyBreakoutMomentum",
     "SampleStrategyLongOnly",
     "SampleStrategyShortOnly",
 }

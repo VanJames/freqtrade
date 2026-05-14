@@ -53,8 +53,10 @@ sys.modules.setdefault("freqtrade.strategy", freqtrade_strategy)
 
 from user_data.strategies.SampleStrategy import SampleStrategy
 from user_data.strategies.SampleStrategyActive import SampleStrategyActive
+from user_data.strategies.SampleStrategyBreakoutMomentum import SampleStrategyBreakoutMomentum
 from user_data.strategies.SampleStrategyPullbackLong import SampleStrategyPullbackLong
 from user_data.strategies.SampleStrategyPullbackShort import SampleStrategyPullbackShort
+from user_data.strategies.SampleStrategyRangeMeanReversion import SampleStrategyRangeMeanReversion
 from user_data.strategies.SampleStrategyScalp import SampleStrategyScalp
 
 for _module_name, _previous_module in _PREVIOUS_MODULES.items():
@@ -84,3 +86,10 @@ def test_pullback_variants_are_direction_specific():
     assert SampleStrategyPullbackLong.can_short is False
     assert SampleStrategyPullbackShort.minimal_roi["0"] < SampleStrategy.minimal_roi["0"]
     assert SampleStrategyPullbackLong.minimal_roi["0"] < SampleStrategy.minimal_roi["0"]
+
+
+def test_range_and_breakout_variants_support_both_sides():
+    assert SampleStrategyRangeMeanReversion.can_short is True
+    assert SampleStrategyBreakoutMomentum.can_short is True
+    assert SampleStrategyRangeMeanReversion.minimal_roi["0"] < SampleStrategy.minimal_roi["0"]
+    assert SampleStrategyBreakoutMomentum.minimal_roi["0"] < SampleStrategy.minimal_roi["0"]

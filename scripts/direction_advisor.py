@@ -73,6 +73,8 @@ def parse_args() -> argparse.Namespace:
             "SampleStrategyScalp",
             "SampleStrategyPullbackShort",
             "SampleStrategyPullbackLong",
+            "SampleStrategyRangeMeanReversion",
+            "SampleStrategyBreakoutMomentum",
             "SampleStrategyLongOnly",
             "SampleStrategyShortOnly",
         ],

@@ -119,6 +119,8 @@ def test_default_strategy_candidates_include_pullback_variants(monkeypatch):
 
     assert "SampleStrategyPullbackShort" in args.strategies
     assert "SampleStrategyPullbackLong" in args.strategies
+    assert "SampleStrategyRangeMeanReversion" in args.strategies
+    assert "SampleStrategyBreakoutMomentum" in args.strategies
 
 
 def test_execution_feedback_penalizes_losing_strategy():
