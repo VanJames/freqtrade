@@ -175,6 +175,54 @@ services:
       - "360"
       - --loop
 
+  strategy-switcher:
+    image: freqtrade-local-freqai
+    build:
+      context: .
+      dockerfile: "./docker/Dockerfile.freqai"
+      args:
+        sourceimage: freqtradeorg/freqtrade
+        sourcetag: stable
+    profiles:
+      - optimizer
+    restart: unless-stopped
+    container_name: freqtrade-strategy-switcher
+    user: ftuser
+    entrypoint: ["python"]
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ".:/workspace"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    working_dir: /workspace
+    command:
+      - /workspace/scripts/strategy_switcher.py
+      - --backend
+      - docker
+      - --container
+      - freqtrade
+      - --config
+      - /workspace/user_data/config.json
+      - --registry
+      - /workspace/user_data/autoopt/strategy_registry.json
+      - --db
+      - /workspace/user_data/tradesv3.sqlite
+      - --min-passed-windows
+      - "2"
+      - --min-trades
+      - "5"
+      - --min-score-margin
+      - "0.15"
+      - --cooldown-minutes
+      - "360"
+      - --max-registry-age-minutes
+      - "180"
+      - --interval-minutes
+      - "30"
+      - --loop
+
   kronos-advisor:
     image: freqtrade-local-freqai
     build:
