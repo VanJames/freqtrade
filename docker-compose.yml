@@ -215,6 +215,14 @@ services:
       - "5"
       - --min-score-margin
       - "0.15"
+      - --inactive-window-days
+      - "1"
+      - --inactive-min-trades
+      - "10"
+      - --inactive-min-profit-pct
+      - "0.05"
+      - --inactive-min-score
+      - "-1.25"
       - --cooldown-minutes
       - "360"
       - --max-registry-age-minutes
