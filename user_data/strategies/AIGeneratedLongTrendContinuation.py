@@ -22,7 +22,7 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
     trailing_stop_positive_offset = 0.016
     trailing_only_offset_is_reached = False
     ai_candidate = {
-    "adx_min": 20.0,
+    "adx_min": 16.0,
     "archetype": "trend",
     "bb_tolerance": 0.002,
     "class_name": "AIGeneratedLongTrendContinuation",
@@ -32,13 +32,13 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
     "risk_profile": "balanced",
     "roi_0": 0.026,
     "roi_30": 0.012,
-    "rsi_long_max": 48,
-    "rsi_short_min": 52,
+    "rsi_long_max": 54,
+    "rsi_short_min": 46,
     "side": "long",
     "stoploss": -0.05,
     "trailing_offset": 0.016,
     "trailing_positive": 0.008,
-    "volume_min": 0.8
+    "volume_min": 0.45
 }
 
     def _build_long_blockers(
@@ -207,42 +207,42 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
         rsi_short_min = float(self.ai_candidate["rsi_short_min"])
         bb_tolerance = float(self.ai_candidate["bb_tolerance"])
 
-        volume_ok = dataframe["volume_ratio"] > volume_min
+        volume_ok = dataframe["volume_ratio"] > max(volume_min, 0.35)
         long_context = dataframe["trend_up_1h"] | dataframe["trend_up_15m"]
         short_context = dataframe["trend_down_1h"] | dataframe["trend_down_15m"]
         trend_long = (
             long_context
-            & (dataframe["adx"] > adx_min)
-            & (dataframe["close"] > dataframe["ema20"])
-            & (dataframe["ema20"] > dataframe["ema50"])
-            & (dataframe["macdhist"] > 0)
-            & (dataframe["rsi"] < max(rsi_long_max, 52))
+            & (dataframe["adx"] > max(adx_min - 2, 10))
+            & (dataframe["close"] > dataframe["ema20"] * 0.998)
+            & (dataframe["ema20"] > dataframe["ema50"] * 0.998)
+            & (dataframe["macdhist"] > -0.015)
+            & (dataframe["rsi"] < max(rsi_long_max, 56))
             & volume_ok
         )
         trend_short = (
             short_context
-            & (dataframe["adx"] > adx_min)
-            & (dataframe["close"] < dataframe["ema20"])
-            & (dataframe["ema20"] < dataframe["ema50"])
-            & (dataframe["macdhist"] < 0)
-            & (dataframe["rsi"] > min(rsi_short_min, 48))
+            & (dataframe["adx"] > max(adx_min - 2, 10))
+            & (dataframe["close"] < dataframe["ema20"] * 1.002)
+            & (dataframe["ema20"] < dataframe["ema50"] * 1.002)
+            & (dataframe["macdhist"] < 0.015)
+            & (dataframe["rsi"] > min(rsi_short_min, 44))
             & volume_ok
         )
 
         pullback_long = (
             long_context
-            & (dataframe["adx"] > max(adx_min - 4, 8))
-            & (dataframe["low"] <= dataframe["ema20"] * (1 + bb_tolerance))
-            & (dataframe["close"] > dataframe["ema20"])
-            & (dataframe["rsi"] < rsi_long_max)
+            & (dataframe["adx"] > max(adx_min - 5, 8))
+            & (dataframe["low"] <= dataframe["ema20"] * (1 + bb_tolerance + 0.002))
+            & (dataframe["close"] > dataframe["ema20"] * 0.997)
+            & (dataframe["rsi"] < max(rsi_long_max, 58))
             & volume_ok
         )
         pullback_short = (
             short_context
-            & (dataframe["adx"] > max(adx_min - 4, 8))
-            & (dataframe["high"] >= dataframe["ema20"] * (1 - bb_tolerance))
-            & (dataframe["close"] < dataframe["ema20"])
-            & (dataframe["rsi"] > rsi_short_min)
+            & (dataframe["adx"] > max(adx_min - 5, 8))
+            & (dataframe["high"] >= dataframe["ema20"] * (1 - bb_tolerance - 0.002))
+            & (dataframe["close"] < dataframe["ema20"] * 1.003)
+            & (dataframe["rsi"] > min(rsi_short_min, 42))
             & volume_ok
         )
 
@@ -255,15 +255,15 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
         breakout_long = (
             long_context
             & volatility_expanding
-            & (dataframe["close"] > recent_high)
-            & (dataframe["rsi"] > 52)
+            & (dataframe["close"] > recent_high * 0.999)
+            & (dataframe["rsi"] > 50)
             & volume_ok
         )
         breakout_short = (
             short_context
             & volatility_expanding
-            & (dataframe["close"] < recent_low)
-            & (dataframe["rsi"] < 48)
+            & (dataframe["close"] < recent_low * 1.001)
+            & (dataframe["rsi"] < 50)
             & volume_ok
         )
 
@@ -272,14 +272,14 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
         )
         meanrev_long = (
             range_context
-            & (dataframe["close"] <= dataframe["bb_lowerband"] * (1 + bb_tolerance))
-            & (dataframe["rsi"] < rsi_long_max)
+            & (dataframe["close"] <= dataframe["bb_lowerband"] * (1 + bb_tolerance + 0.002))
+            & (dataframe["rsi"] < max(rsi_long_max, 58))
             & volume_ok
         )
         meanrev_short = (
             range_context
-            & (dataframe["close"] >= dataframe["bb_upperband"] * (1 - bb_tolerance))
-            & (dataframe["rsi"] > rsi_short_min)
+            & (dataframe["close"] >= dataframe["bb_upperband"] * (1 - bb_tolerance - 0.002))
+            & (dataframe["rsi"] > min(rsi_short_min, 42))
             & volume_ok
         )
 
@@ -365,6 +365,40 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
                     "stage": "populate_entry_trend_end",
                     "enter_long": self._last_bool(dataframe.get("enter_long", pd.Series(dtype=float))),
                     "enter_short": self._last_bool(dataframe.get("enter_short", pd.Series(dtype=float))),
+                    "long_blockers": self._build_long_blockers(
+                        dataframe,
+                        archetype,
+                        side,
+                        adx_min,
+                        volume_min,
+                        rsi_long_max,
+                        bb_tolerance,
+                        long_context,
+                        trend_long,
+                        pullback_long,
+                        breakout_long,
+                        meanrev_long,
+                        volatility_expanding,
+                        recent_high,
+                        volume_ok,
+                    )[:5],
+                    "short_blockers": self._build_short_blockers(
+                        dataframe,
+                        archetype,
+                        side,
+                        adx_min,
+                        volume_min,
+                        rsi_short_min,
+                        bb_tolerance,
+                        short_context,
+                        trend_short,
+                        pullback_short,
+                        breakout_short,
+                        meanrev_short,
+                        volatility_expanding,
+                        recent_low,
+                        volume_ok,
+                    )[:5],
                 }
             )
         self._emit_signal_email(dataframe, metadata, "entry", "long")

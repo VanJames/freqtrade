@@ -730,3 +730,5 @@ def test_ai_strategy_writes_signal_diagnostics(monkeypatch, tmp_path):
     probe_lines = [json.loads(line) for line in probe_path.read_text().splitlines()]
     assert probe_lines[0]["stage"] == "populate_entry_trend_start"
     assert probe_lines[-1]["stage"] == "populate_entry_trend_end"
+    assert "long_blockers" in probe_lines[-1]
+    assert "no_long_trend_context" in probe_lines[-1]["long_blockers"]
