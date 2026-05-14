@@ -398,6 +398,13 @@ def docker_exec_output(container: str, command: str) -> tuple[int, str]:
     return proc.returncode, output
 
 
+def file_line_count(path: Path) -> int | None:
+    try:
+        return len(path.read_text(encoding="utf-8").splitlines())
+    except (FileNotFoundError, OSError):
+        return None
+
+
 def check_docker(containers: list[str]) -> CheckResult:
     states = [docker_container_state(name) for name in containers]
     missing = [item["name"] for item in states if item["status"] == "missing"]
@@ -451,6 +458,63 @@ def check_container_strategy_code(freqtrade_container: str) -> CheckResult:
     summary = "container strategy code includes latest gate logic" if not missing else "container strategy code looks outdated"
     details["missing_markers"] = missing
     return CheckResult("container_strategy_code", status, summary, details)
+
+
+def check_signal_path_sync(freqtrade_container: str, host_path: Path) -> CheckResult:
+    host_age = minutes_old(host_path)
+    host_lines = file_line_count(host_path)
+    code, output = docker_exec_output(
+        freqtrade_container,
+        "python - <<'PY'\n"
+        "from pathlib import Path\n"
+        "p = Path('/freqtrade/user_data/signals/signal_diagnostics.jsonl')\n"
+        "if not p.exists():\n"
+        "    print('missing')\n"
+        "else:\n"
+        "    print(int(p.stat().st_mtime))\n"
+        "    print(sum(1 for _ in p.open('r', encoding='utf-8')))\n"
+        "PY",
+    )
+    container_exists = code == 0 and output and output.splitlines()[0] != "missing"
+    container_age = None
+    container_lines = None
+    if container_exists:
+        lines = output.splitlines()
+        try:
+            mtime = int(lines[0])
+            container_age = round((utc_now().timestamp() - mtime) / 60.0, 2)
+        except Exception:
+            container_age = None
+        try:
+            container_lines = int(lines[1])
+        except Exception:
+            container_lines = None
+    status = "ok"
+    warnings: list[str] = []
+    if not container_exists:
+        status = "warn"
+        warnings.append("container signal diagnostics file missing")
+    if host_age is not None and container_age is not None and abs(host_age - container_age) > 2:
+        status = "warn"
+        warnings.append("host/container diagnostics file age mismatch")
+    if host_lines is not None and container_lines is not None and host_lines != container_lines:
+        status = "warn"
+        warnings.append("host/container diagnostics line count mismatch")
+    summary = "signal diagnostics path looks in sync" if not warnings else "; ".join(warnings)
+    return CheckResult(
+        "signal_path_sync",
+        status,
+        summary,
+        {
+            "container": freqtrade_container,
+            "host_path": str(host_path),
+            "host_age_minutes": host_age,
+            "host_line_count": host_lines,
+            "container_age_minutes": container_age,
+            "container_line_count": container_lines,
+            "warnings": warnings,
+        },
+    )
 
 
 def check_core_logs(
@@ -635,6 +699,7 @@ def build_results(args: argparse.Namespace) -> list[CheckResult]:
                 lines=args.log_tail,
             )
         )
+        results.append(check_signal_path_sync("freqtrade", signal_path))
     return results
 
 

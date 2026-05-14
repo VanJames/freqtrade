@@ -37,6 +37,7 @@ def test_analyze_signal_diagnostics_counts_blockers():
 def test_check_strategy_alignment_warns_on_hold_and_mismatch():
     result = health_check.check_strategy_alignment(
         {"strategy": "Runner2x"},
+        {"direction_advisor_hold_policy": "hold"},
         {"recommended_strategy": "Selective"},
         {"recommended_strategy": "Selective", "final_action": "hold"},
         {"allowed_strategies": ["Selective"]},
@@ -164,3 +165,15 @@ def test_check_strategy_alignment_only_flags_hold_when_hold_policy_blocks():
 
     assert result.status == "ok"
     assert "direction advisor currently blocks new entries with hold" not in result.details["warnings"]
+
+
+def test_check_signal_path_sync_warns_on_mismatch(monkeypatch, tmp_path):
+    path = tmp_path / "signal_diagnostics.jsonl"
+    path.write_text('{"a":1}\n{"a":2}\n')
+
+    monkeypatch.setattr(health_check, "docker_exec_output", lambda *_args, **_kwargs: (0, "100\n1"))
+
+    result = health_check.check_signal_path_sync("freqtrade", path)
+
+    assert result.status == "warn"
+    assert "line count mismatch" in " ".join(result.details["warnings"])
