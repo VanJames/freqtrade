@@ -108,6 +108,7 @@ target/
 
 .env
 .venv
+uv.lock
 .idea
 .vscode
 
