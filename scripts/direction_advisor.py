@@ -71,6 +71,8 @@ def parse_args() -> argparse.Namespace:
             "SampleStrategy",
             "SampleStrategyActive",
             "SampleStrategyScalp",
+            "SampleStrategyPullbackShort",
+            "SampleStrategyPullbackLong",
             "SampleStrategyLongOnly",
             "SampleStrategyShortOnly",
         ],

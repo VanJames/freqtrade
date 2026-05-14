@@ -53,6 +53,8 @@ sys.modules.setdefault("freqtrade.strategy", freqtrade_strategy)
 
 from user_data.strategies.SampleStrategy import SampleStrategy
 from user_data.strategies.SampleStrategyActive import SampleStrategyActive
+from user_data.strategies.SampleStrategyPullbackLong import SampleStrategyPullbackLong
+from user_data.strategies.SampleStrategyPullbackShort import SampleStrategyPullbackShort
 from user_data.strategies.SampleStrategyScalp import SampleStrategyScalp
 
 for _module_name, _previous_module in _PREVIOUS_MODULES.items():
@@ -75,3 +77,10 @@ def test_scalp_variant_is_more_active_than_active_variant():
     assert SampleStrategyScalp.ai_edge_threshold.value < SampleStrategyActive.ai_edge_threshold.value
     assert SampleStrategyScalp.short_rsi_trigger.value < SampleStrategyActive.short_rsi_trigger.value
     assert SampleStrategyScalp.risk_per_trade.value < SampleStrategyActive.risk_per_trade.value
+
+
+def test_pullback_variants_are_direction_specific():
+    assert SampleStrategyPullbackShort.can_short is True
+    assert SampleStrategyPullbackLong.can_short is False
+    assert SampleStrategyPullbackShort.minimal_roi["0"] < SampleStrategy.minimal_roi["0"]
+    assert SampleStrategyPullbackLong.minimal_roi["0"] < SampleStrategy.minimal_roi["0"]

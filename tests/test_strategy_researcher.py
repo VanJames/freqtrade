@@ -113,6 +113,14 @@ def test_normalize_llm_config_clamps_values():
     assert result["parameter_bias"] == {"risk": "normal", "entry": "looser", "exit": "faster"}
 
 
+def test_default_strategy_candidates_include_pullback_variants(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["strategy_researcher.py"])
+    args = strategy_researcher.parse_args()
+
+    assert "SampleStrategyPullbackShort" in args.strategies
+    assert "SampleStrategyPullbackLong" in args.strategies
+
+
 def test_execution_feedback_penalizes_losing_strategy():
     feedback = strategy_researcher.build_execution_feedback(
         [

@@ -281,3 +281,11 @@ def test_load_registry_strategies_uses_fallback_on_bad_file(tmp_path):
     assert direction_advisor.load_registry_strategies(registry, ["SampleStrategy"]) == [
         "SampleStrategy"
     ]
+
+
+def test_default_strategy_candidates_include_pullback_variants(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["direction_advisor.py"])
+    args = direction_advisor.parse_args()
+
+    assert "SampleStrategyPullbackShort" in args.strategies
+    assert "SampleStrategyPullbackLong" in args.strategies
