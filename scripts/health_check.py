@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pair-selection", default=str(AUTOOPT_DIR / "pair_selection.json"))
     parser.add_argument("--direction-advisor", default=str(AUTOOPT_DIR / "direction_advisor.json"))
     parser.add_argument("--signal-diagnostics", default=str(USER_DATA / "signals" / "signal_diagnostics.jsonl"))
+    parser.add_argument("--strategy-runtime-probe", default=str(USER_DATA / "signals" / "strategy_runtime_probe.jsonl"))
     parser.add_argument("--trade-db", default=str(USER_DATA / "tradesv3.sqlite"))
     parser.add_argument("--max-age-minutes", type=float, default=180.0)
     parser.add_argument("--signal-limit", type=int, default=100)
@@ -309,6 +310,70 @@ def check_signal_diagnostics_freshness(path: Path, limit: int, stale_minutes: fl
     )
 
 
+def analyze_strategy_runtime_probe(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if not records:
+        return {
+            "count": 0,
+            "latest_strategy": None,
+            "latest_pair": None,
+            "latest_time": None,
+            "enter_long_true": 0,
+            "enter_short_true": 0,
+            "top_long_blockers": [],
+            "top_short_blockers": [],
+        }
+    end_records = [record for record in records if record.get("stage") == "populate_entry_trend_end"]
+    long_blockers: list[str] = []
+    short_blockers: list[str] = []
+    for record in end_records:
+        long_blockers.extend(str(item) for item in record.get("long_blockers", []) if item)
+        short_blockers.extend(str(item) for item in record.get("short_blockers", []) if item)
+    latest = end_records[-1] if end_records else records[-1]
+    return {
+        "count": len(records),
+        "latest_strategy": latest.get("strategy"),
+        "latest_pair": latest.get("pair"),
+        "latest_time": latest.get("time"),
+        "enter_long_true": sum(1 for record in end_records if record.get("enter_long") is True),
+        "enter_short_true": sum(1 for record in end_records if record.get("enter_short") is True),
+        "top_long_blockers": top_counts(long_blockers),
+        "top_short_blockers": top_counts(short_blockers),
+    }
+
+
+def check_strategy_runtime_probe(path: Path, limit: int, stale_minutes: float) -> CheckResult:
+    records = read_jsonl_tail(path, limit)
+    analysis = analyze_strategy_runtime_probe(records)
+    if not records:
+        return CheckResult(
+            "strategy_runtime_probe",
+            "warn",
+            "strategy_runtime_probe.jsonl missing or empty",
+            {"path": str(path), **analysis},
+        )
+    latest_time = iso_to_dt(str(records[-1].get("created_at") or records[-1].get("time") or ""))
+    age = None
+    status = "ok"
+    if latest_time is not None:
+        age = round((utc_now() - latest_time).total_seconds() / 60.0, 2)
+        if age > stale_minutes:
+            status = "warn"
+    else:
+        status = "warn"
+    if analysis["enter_long_true"] == 0 and analysis["enter_short_true"] == 0:
+        status = "warn"
+    summary = (
+        f"records={analysis['count']} long_true={analysis['enter_long_true']} "
+        f"short_true={analysis['enter_short_true']} age={age}m"
+    )
+    return CheckResult(
+        "strategy_runtime_probe",
+        status,
+        summary,
+        {"path": str(path), "age_minutes": age, **analysis},
+    )
+
+
 def check_trade_db(path: Path) -> CheckResult:
     if not path.exists():
         return CheckResult("trade_db", "warn", "tradesv3.sqlite missing", {"path": str(path)})
@@ -439,6 +504,19 @@ def summarize_entry_pressure(signal_analysis: dict[str, Any], direction_payload:
         reasons.append(f"short blocker: {blocker}")
     if isinstance(direction_payload, dict) and direction_payload.get("final_action") == "hold":
         reasons.append("direction advisor is currently hold")
+    return reasons[:6]
+
+
+def summarize_runtime_pressure(runtime_probe_analysis: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if runtime_probe_analysis.get("count", 0) == 0:
+        return ["runtime probe missing"]
+    if runtime_probe_analysis.get("enter_long_true", 0) == 0 and runtime_probe_analysis.get("enter_short_true", 0) == 0:
+        reasons.append("runtime probe shows no passing long/short entries")
+    for blocker, _count in runtime_probe_analysis.get("top_long_blockers", [])[:2]:
+        reasons.append(f"runtime long blocker: {blocker}")
+    for blocker, _count in runtime_probe_analysis.get("top_short_blockers", [])[:2]:
+        reasons.append(f"runtime short blocker: {blocker}")
     return reasons[:6]
 
 
@@ -650,6 +728,7 @@ def build_results(args: argparse.Namespace) -> list[CheckResult]:
     pair_selection_path = Path(args.pair_selection)
     direction_path = Path(args.direction_advisor)
     signal_path = Path(args.signal_diagnostics)
+    runtime_probe_path = Path(args.strategy_runtime_probe)
     trade_db_path = Path(args.trade_db)
 
     config_result = check_config(config_path)
@@ -661,6 +740,9 @@ def build_results(args: argparse.Namespace) -> list[CheckResult]:
     signal_freshness_result = check_signal_diagnostics_freshness(
         signal_path, args.signal_limit, args.signal_stale_minutes
     )
+    runtime_probe_result = check_strategy_runtime_probe(
+        runtime_probe_path, args.signal_limit, args.signal_stale_minutes
+    )
     trade_db_result = check_trade_db(trade_db_path)
 
     config_payload = read_json(config_path)
@@ -670,6 +752,8 @@ def build_results(args: argparse.Namespace) -> list[CheckResult]:
     formal_pool_payload = read_json(formal_pool_path)
     signal_records = read_jsonl_tail(signal_path, args.signal_limit)
     signal_analysis = analyze_signal_diagnostics(signal_records)
+    runtime_probe_records = read_jsonl_tail(runtime_probe_path, args.signal_limit)
+    runtime_probe_analysis = analyze_strategy_runtime_probe(runtime_probe_records)
 
     results = [
         config_result,
@@ -679,6 +763,7 @@ def build_results(args: argparse.Namespace) -> list[CheckResult]:
         direction_result,
         signal_result,
         signal_freshness_result,
+        runtime_probe_result,
         trade_db_result,
         check_strategy_alignment(
             config_payload if isinstance(config_payload, dict) else None,
@@ -700,6 +785,20 @@ def build_results(args: argparse.Namespace) -> list[CheckResult]:
             )
         )
         results.append(check_signal_path_sync("freqtrade", signal_path))
+        results.append(
+            CheckResult(
+                "runtime_probe_pressure",
+                "ok"
+                if runtime_probe_analysis.get("enter_long_true", 0) or runtime_probe_analysis.get("enter_short_true", 0)
+                else "warn",
+                "runtime probe summarized" if runtime_probe_analysis.get("count", 0) else "runtime probe missing",
+                {
+                    "path": str(runtime_probe_path),
+                    "pressure": summarize_runtime_pressure(runtime_probe_analysis),
+                    **runtime_probe_analysis,
+                },
+            )
+        )
     return results
 
 
