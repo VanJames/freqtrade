@@ -35,6 +35,7 @@ STRATEGY_DIR = USER_DATA / "strategies"
 AUTOOPT_DIR = USER_DATA / "autoopt"
 DEFAULT_OUTPUT = AUTOOPT_DIR / "hot_switch_backtest.json"
 DEFAULT_LEDGER = AUTOOPT_DIR / "hot_switch_backtest.jsonl"
+DEFAULT_PAIR_SELECTION = AUTOOPT_DIR / "pair_selection.json"
 DEFAULT_STRATEGIES = [
     "SampleStrategy",
     "SampleStrategyActive",
@@ -54,15 +55,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=str(USER_DATA / "config.json"))
     parser.add_argument("--strategy-path", default=str(STRATEGY_DIR))
     parser.add_argument("--strategies", nargs="+", default=DEFAULT_STRATEGIES)
+    parser.add_argument("--allow-strategies", nargs="+", default=[])
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--decision-windows", nargs="+", type=int, default=[1, 2, 7])
     parser.add_argument("--min-trades", type=int, default=1)
     parser.add_argument("--min-profit-pct", type=float, default=0.0)
+    parser.add_argument("--slippage-buffer-pct-per-trade", type=float, default=0.04)
+    parser.add_argument("--min-net-profit-pct", type=float, default=0.0)
+    parser.add_argument("--min-pass-rate", type=float, default=0.5)
     parser.add_argument("--freqaimodel", default="LightGBMRegressor")
     parser.add_argument("--start-strategy", default="")
+    parser.add_argument("--loss-fallback-from-strategy", default="")
+    parser.add_argument("--loss-fallback-to-strategy", default="")
+    parser.add_argument("--loss-fallback-lookback-trades", type=int, default=0)
+    parser.add_argument("--loss-fallback-loss-threshold", type=int, default=0)
+    parser.add_argument("--loss-recovery-from-strategy", default="")
+    parser.add_argument("--loss-recovery-to-strategy", default="")
+    parser.add_argument("--loss-recovery-lookback-trades", type=int, default=0)
+    parser.add_argument("--loss-recovery-win-threshold", type=int, default=0)
+    parser.add_argument("--loss-recovery-min-hold-days", type=float, default=0.0)
+    parser.add_argument("--loss-recovery-min-score-margin", type=float, default=0.0)
+    parser.add_argument("--trend-activation-from-strategy", default="")
+    parser.add_argument("--trend-activation-to-strategy", default="")
+    parser.add_argument("--trend-activation-required-side", default="")
+    parser.add_argument("--trend-activation-min-recommended-score", type=float, default=0.0)
+    parser.add_argument("--trend-activation-min-score-margin", type=float, default=0.0)
     parser.add_argument("--min-passed-windows", type=int, default=2)
     parser.add_argument("--switch-min-trades", type=int, default=5)
     parser.add_argument("--min-score-margin", type=float, default=0.15)
+    parser.add_argument("--disable-inactivity-fallback", action="store_true")
     parser.add_argument("--inactive-window-days", type=int, default=1)
     parser.add_argument("--inactive-min-trades", type=int, default=10)
     parser.add_argument("--inactive-min-profit-pct", type=float, default=0.05)
@@ -76,6 +97,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-dir", default=str(AUTOOPT_DIR / "hot-switch-backtester"))
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    parser.add_argument("--pair-selection", default=str(DEFAULT_PAIR_SELECTION))
     parser.add_argument(
         "--replay-from-full-backtests",
         action="store_true",
@@ -115,11 +137,57 @@ def safe_name(value: str) -> str:
     return value.replace("/", "_").replace(":", "_").replace("-", "_")
 
 
+def clone_json(payload: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(payload))
+
+
+def strategy_config_path(
+    *,
+    config_path: Path,
+    config_data: dict[str, Any],
+    pair_selection: dict[str, Any],
+    strategy: str,
+    config_dir: Path,
+) -> Path:
+    desired_pairs = strategy_switcher.desired_pair_whitelist(config_data, pair_selection, strategy)
+    current_pairs = strategy_switcher.current_pair_whitelist(config_data)
+    temp_config = clone_json(config_data)
+    needs_temp_config = False
+    if desired_pairs and desired_pairs != current_pairs:
+        exchange = temp_config.setdefault("exchange", {})
+        if isinstance(exchange, dict):
+            exchange["pair_whitelist"] = list(desired_pairs)
+            needs_temp_config = True
+    freqai = temp_config.get("freqai")
+    if isinstance(freqai, dict):
+        identifier = str(freqai.get("identifier") or "").strip()
+        strategy_identifier = f"{identifier}-{safe_name(strategy).lower()}" if identifier else safe_name(strategy).lower()
+        if strategy_identifier != identifier:
+            freqai["identifier"] = strategy_identifier
+            needs_temp_config = True
+        feature_parameters = freqai.get("feature_parameters")
+        if isinstance(feature_parameters, dict):
+            corr_pairs = feature_parameters.get("include_corr_pairlist")
+            if isinstance(corr_pairs, list):
+                filtered_corr = [str(item) for item in corr_pairs if str(item) in desired_pairs]
+                if filtered_corr and filtered_corr != corr_pairs:
+                    feature_parameters["include_corr_pairlist"] = filtered_corr
+                    needs_temp_config = True
+    if not needs_temp_config:
+        return config_path
+    config_dir.mkdir(parents=True, exist_ok=True)
+    output = config_dir / f"{safe_name(strategy)}.json"
+    output.write_text(json.dumps(temp_config, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return output
+
+
 def run_or_load_backtest(
     *,
     strategy: str,
     strategy_path: Path,
     config: Path,
+    config_data: dict[str, Any],
+    pair_selection: dict[str, Any],
     timerange: str,
     run_dir: Path,
     freqaimodel: str,
@@ -137,10 +205,17 @@ def run_or_load_backtest(
             return load_backtest_stats(result_files[-1])
         except Exception:
             pass
+    effective_config = strategy_config_path(
+        config_path=config,
+        config_data=config_data,
+        pair_selection=pair_selection,
+        strategy=strategy,
+        config_dir=run_dir.parent / "_configs",
+    )
     auto_optimize.backtest(
         strategy=strategy,
         strategy_path=strategy_path,
-        config=config,
+        config=effective_config,
         timerange=timerange,
         backtest_dir=run_dir,
         freqaimodel=freqaimodel,
@@ -159,6 +234,8 @@ def evaluate_strategy_window(
     decision_day: datetime,
     strategy_path: Path,
     config: Path,
+    config_data: dict[str, Any],
+    pair_selection: dict[str, Any],
     run_dir: Path,
     freqaimodel: str,
     backend: str,
@@ -171,6 +248,8 @@ def evaluate_strategy_window(
             strategy=strategy,
             strategy_path=strategy_path,
             config=config,
+            config_data=config_data,
+            pair_selection=pair_selection,
             timerange=timerange,
             run_dir=run_dir / safe_name(strategy) / f"decision_{ymd(decision_day)}_{window_days}d",
             freqaimodel=freqaimodel,
@@ -232,11 +311,16 @@ def build_daily_registry(
     decision_day: datetime,
     strategy_path: Path,
     config: Path,
+    config_data: dict[str, Any],
+    pair_selection: dict[str, Any],
     run_dir: Path,
     freqaimodel: str,
     backend: str,
     min_trades: int,
     min_profit_pct: float,
+    slippage_buffer_pct_per_trade: float,
+    min_net_profit_pct: float,
+    min_pass_rate: float,
 ) -> dict[str, Any]:
     strategy_scores: list[dict[str, Any]] = []
     window_records: list[dict[str, Any]] = []
@@ -248,6 +332,8 @@ def build_daily_registry(
                 decision_day=decision_day,
                 strategy_path=strategy_path,
                 config=config,
+                config_data=config_data,
+                pair_selection=pair_selection,
                 run_dir=run_dir,
                 freqaimodel=freqaimodel,
                 backend=backend,
@@ -257,7 +343,14 @@ def build_daily_registry(
             for window in dict.fromkeys(decision_windows)
         ]
         window_records.extend(asdict(item) for item in evaluations)
-        strategy_scores.append(strategy_researcher.aggregate_strategy_score(evaluations))
+        strategy_scores.append(
+            strategy_researcher.aggregate_strategy_score(
+                evaluations,
+                slippage_buffer_pct_per_trade=slippage_buffer_pct_per_trade,
+                min_net_profit_pct=min_net_profit_pct,
+                min_pass_rate=min_pass_rate,
+            )
+        )
 
     viable = [item for item in strategy_scores if int(item.get("passed_windows", 0)) > 0]
     best = max(viable, key=lambda item: (item["score"], item["passed_windows"])) if viable else None
@@ -283,6 +376,8 @@ def backtest_day(
     trade_day: datetime,
     strategy_path: Path,
     config: Path,
+    config_data: dict[str, Any],
+    pair_selection: dict[str, Any],
     run_dir: Path,
     freqaimodel: str,
     backend: str,
@@ -292,6 +387,8 @@ def backtest_day(
         strategy=strategy,
         strategy_path=strategy_path,
         config=config,
+        config_data=config_data,
+        pair_selection=pair_selection,
         timerange=timerange,
         run_dir=run_dir / safe_name(strategy) / f"trade_{timerange}",
         freqaimodel=freqaimodel,
@@ -300,6 +397,14 @@ def backtest_day(
     metrics = auto_optimize.extract_metrics(stats, strategy)
     side_metrics = direction_advisor.extract_direction_metrics(strategy, stats)
     best_side = max(side_metrics, key=lambda item: (item.profit_total_pct, item.trades))
+    trade_rows = [
+        normalize_trade_row(strategy, trade)
+        for trade in trades_in_range(
+            stats["strategy"][strategy],
+            trade_day,
+            trade_day + timedelta(days=1),
+        )
+    ]
     return {
         **asdict(metrics),
         "strategy": strategy,
@@ -308,6 +413,7 @@ def backtest_day(
         "side_profit_total_pct": best_side.profit_total_pct,
         "side_trades": best_side.trades,
         "score": round(metrics.profit_total_pct - metrics.max_drawdown_account * 100.0, 4),
+        "closed_trades": trade_rows,
     }
 
 
@@ -336,6 +442,47 @@ def parse_trade_dt(value: Any) -> datetime | None:
         return None
 
 
+def normalize_trade_row(strategy: str, trade: dict[str, Any]) -> dict[str, Any]:
+    profit_abs = round(float(trade.get("profit_abs") or 0.0), 8)
+    profit_ratio = float(trade.get("profit_ratio") or trade.get("close_profit") or 0.0)
+    return {
+        "strategy": strategy,
+        "close_date": trade.get("close_date"),
+        "close_profit": profit_ratio,
+        "close_profit_abs": profit_abs,
+        "exit_reason": trade.get("exit_reason"),
+        "pair": trade.get("pair"),
+        "is_loss": profit_abs < 0 or profit_ratio < 0,
+    }
+
+
+def recent_replay_trade_stats(
+    strategy: str,
+    strategy_stats: dict[str, Any],
+    end_day: datetime,
+    limit: int,
+) -> dict[str, Any]:
+    rows = [
+        normalize_trade_row(strategy, trade)
+        for trade in trades_in_range(strategy_stats, datetime(1970, 1, 1, tzinfo=UTC), end_day)
+    ]
+    return strategy_switcher.recent_trade_stats_from_rows(rows, strategy, limit)
+
+
+def recent_simulated_trade_stats(
+    daily_results: list[dict[str, Any]],
+    strategy: str,
+    limit: int,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for item in daily_results:
+        trade_result = item.get("trade_result", {})
+        for row in trade_result.get("closed_trades", []) or []:
+            if str(row.get("strategy") or strategy) == strategy:
+                rows.append(row)
+    return strategy_switcher.recent_trade_stats_from_rows(rows, strategy, limit)
+
+
 def side_from_trade(trade: dict[str, Any]) -> str:
     if bool(trade.get("is_short")):
         return "short"
@@ -354,6 +501,8 @@ def load_full_period_strategy_stats(
     end_day: datetime,
     strategy_path: Path,
     config: Path,
+    config_data: dict[str, Any],
+    pair_selection: dict[str, Any],
     run_dir: Path,
     freqaimodel: str,
     backend: str,
@@ -365,6 +514,8 @@ def load_full_period_strategy_stats(
             strategy=strategy,
             strategy_path=strategy_path,
             config=config,
+            config_data=config_data,
+            pair_selection=pair_selection,
             timerange=timerange,
             run_dir=run_dir / "full_period" / safe_name(strategy) / timerange,
             freqaimodel=freqaimodel,
@@ -489,6 +640,9 @@ def build_replay_daily_registry(
     decision_day: datetime,
     min_trades: int,
     min_profit_pct: float,
+    slippage_buffer_pct_per_trade: float,
+    min_net_profit_pct: float,
+    min_pass_rate: float,
 ) -> dict[str, Any]:
     strategy_scores = []
     window_records = []
@@ -505,7 +659,14 @@ def build_replay_daily_registry(
             for window in dict.fromkeys(decision_windows)
         ]
         window_records.extend(asdict(item) for item in evaluations)
-        strategy_scores.append(strategy_researcher.aggregate_strategy_score(evaluations))
+        strategy_scores.append(
+            strategy_researcher.aggregate_strategy_score(
+                evaluations,
+                slippage_buffer_pct_per_trade=slippage_buffer_pct_per_trade,
+                min_net_profit_pct=min_net_profit_pct,
+                min_pass_rate=min_pass_rate,
+            )
+        )
 
     viable = [item for item in strategy_scores if int(item.get("passed_windows", 0)) > 0]
     best = max(viable, key=lambda item: (item["score"], item["passed_windows"])) if viable else None
@@ -558,6 +719,7 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
     config_path = Path(args.config).resolve()
     strategy_path = Path(args.strategy_path).resolve()
     config = read_json(config_path, {})
+    pair_selection = read_json(Path(args.pair_selection).resolve(), {})
     strategies = list(dict.fromkeys(args.strategies))
     start_strategy = parse_start_strategy(config, args.start_strategy, strategies)
     run_id = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -571,12 +733,15 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
         end_day=end_day,
         strategy_path=strategy_path,
         config=config_path,
+        config_data=config,
+        pair_selection=pair_selection,
         run_dir=run_dir,
         freqaimodel=args.freqaimodel,
         backend=args.backend,
     )
 
     current_strategy = start_strategy
+    allow_strategies = set(args.allow_strategies or strategies)
     state: dict[str, Any] = {}
     switches = []
     daily_results = []
@@ -588,17 +753,21 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
             decision_day=trade_day,
             min_trades=args.min_trades,
             min_profit_pct=args.min_profit_pct,
+            slippage_buffer_pct_per_trade=args.slippage_buffer_pct_per_trade,
+            min_net_profit_pct=args.min_net_profit_pct,
+            min_pass_rate=args.min_pass_rate,
         )
         decision = strategy_switcher.should_switch(
             {"strategy": current_strategy},
             registry,
             state,
-            allow_strategies=set(strategies),
+            allow_strategies=allow_strategies,
             open_trades=0,
             open_orders=0,
             min_passed_windows=args.min_passed_windows,
             min_trades=args.switch_min_trades,
             min_score_margin=args.min_score_margin,
+            inactivity_fallback_enabled=not args.disable_inactivity_fallback,
             inactive_window_days=args.inactive_window_days,
             inactive_min_trades=args.inactive_min_trades,
             inactive_min_profit_pct=args.inactive_min_profit_pct,
@@ -610,6 +779,42 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
             max_registry_age_minutes=args.max_registry_age_minutes,
             cooldown_minutes=args.cooldown_minutes,
             now=trade_day.replace(tzinfo=UTC),
+        )
+        loss_fallback_stats = recent_replay_trade_stats(
+            args.loss_fallback_from_strategy,
+            strategy_stats.get(args.loss_fallback_from_strategy, {}),
+            trade_day,
+            args.loss_fallback_lookback_trades,
+        )
+        loss_recovery_stats = recent_replay_trade_stats(
+            args.loss_recovery_from_strategy,
+            strategy_stats.get(args.loss_recovery_from_strategy, {}),
+            trade_day,
+            args.loss_recovery_lookback_trades,
+        )
+        decision = strategy_switcher.maybe_apply_recent_trade_override(
+            decision,
+            current_strategy=current_strategy,
+            allow_strategies=allow_strategies,
+            allow_ai_generated=True,
+            cooldown_minutes=args.cooldown_minutes,
+            loss_fallback_from_strategy=args.loss_fallback_from_strategy,
+            loss_fallback_to_strategy=args.loss_fallback_to_strategy,
+            loss_fallback_lookback_trades=args.loss_fallback_lookback_trades,
+            loss_fallback_loss_threshold=args.loss_fallback_loss_threshold,
+            loss_fallback_stats=loss_fallback_stats,
+            loss_recovery_from_strategy=args.loss_recovery_from_strategy,
+            loss_recovery_to_strategy=args.loss_recovery_to_strategy,
+            loss_recovery_lookback_trades=args.loss_recovery_lookback_trades,
+            loss_recovery_win_threshold=args.loss_recovery_win_threshold,
+            loss_recovery_min_hold_days=args.loss_recovery_min_hold_days,
+            loss_recovery_min_score_margin=args.loss_recovery_min_score_margin,
+            trend_activation_from_strategy=args.trend_activation_from_strategy,
+            trend_activation_to_strategy=args.trend_activation_to_strategy,
+            trend_activation_required_side=args.trend_activation_required_side,
+            trend_activation_min_recommended_score=args.trend_activation_min_recommended_score,
+            trend_activation_min_score_margin=args.trend_activation_min_score_margin,
+            loss_recovery_stats=loss_recovery_stats,
         )
         if decision.should_switch:
             switches.append(
@@ -636,6 +841,8 @@ def run_replay(args: argparse.Namespace) -> dict[str, Any]:
                     "current_strategy": decision.current_strategy,
                     "target_strategy": decision.target_strategy,
                     "recommended": registry.get("recommended", {}),
+                    "loss_fallback_stats": loss_fallback_stats,
+                    "loss_recovery_stats": loss_recovery_stats,
                 },
                 "trade_result": replay_day_result(current_strategy, strategy_stats[current_strategy], trade_day),
             }
@@ -691,6 +898,8 @@ def fixed_strategy_baselines(
     trade_days: list[datetime],
     strategy_path: Path,
     config: Path,
+    config_data: dict[str, Any],
+    pair_selection: dict[str, Any],
     run_dir: Path,
     freqaimodel: str,
     backend: str,
@@ -706,6 +915,8 @@ def fixed_strategy_baselines(
                         trade_day=trade_day,
                         strategy_path=strategy_path,
                         config=config,
+                        config_data=config_data,
+                        pair_selection=pair_selection,
                         run_dir=run_dir / "fixed",
                         freqaimodel=freqaimodel,
                         backend=backend,
@@ -742,6 +953,7 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
     config_path = Path(args.config).resolve()
     strategy_path = Path(args.strategy_path).resolve()
     config = read_json(config_path, {})
+    pair_selection = read_json(Path(args.pair_selection).resolve(), {})
     strategies = list(dict.fromkeys(args.strategies))
     start_strategy = parse_start_strategy(config, args.start_strategy, strategies)
     run_id = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -750,6 +962,7 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
     trade_days = [end_day - timedelta(days=days) for days in range(args.days, 0, -1)]
 
     current_strategy = start_strategy
+    allow_strategies = set(args.allow_strategies or strategies)
     state: dict[str, Any] = {}
     switched_records: list[dict[str, Any]] = []
     daily_results: list[dict[str, Any]] = []
@@ -760,22 +973,28 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
             decision_day=trade_day,
             strategy_path=strategy_path,
             config=config_path,
+            config_data=config,
+            pair_selection=pair_selection,
             run_dir=run_dir / "decision",
             freqaimodel=args.freqaimodel,
             backend=args.backend,
             min_trades=args.min_trades,
             min_profit_pct=args.min_profit_pct,
+            slippage_buffer_pct_per_trade=args.slippage_buffer_pct_per_trade,
+            min_net_profit_pct=args.min_net_profit_pct,
+            min_pass_rate=args.min_pass_rate,
         )
         decision = strategy_switcher.should_switch(
             {"strategy": current_strategy},
             registry,
             state,
-            allow_strategies=set(strategies),
+            allow_strategies=allow_strategies,
             open_trades=0,
             open_orders=0,
             min_passed_windows=args.min_passed_windows,
             min_trades=args.switch_min_trades,
             min_score_margin=args.min_score_margin,
+            inactivity_fallback_enabled=not args.disable_inactivity_fallback,
             inactive_window_days=args.inactive_window_days,
             inactive_min_trades=args.inactive_min_trades,
             inactive_min_profit_pct=args.inactive_min_profit_pct,
@@ -787,6 +1006,40 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
             max_registry_age_minutes=args.max_registry_age_minutes,
             cooldown_minutes=args.cooldown_minutes,
             now=trade_day.replace(tzinfo=UTC),
+        )
+        loss_fallback_stats = recent_simulated_trade_stats(
+            daily_results,
+            args.loss_fallback_from_strategy,
+            args.loss_fallback_lookback_trades,
+        )
+        loss_recovery_stats = recent_simulated_trade_stats(
+            daily_results,
+            args.loss_recovery_from_strategy,
+            args.loss_recovery_lookback_trades,
+        )
+        decision = strategy_switcher.maybe_apply_recent_trade_override(
+            decision,
+            current_strategy=current_strategy,
+            allow_strategies=allow_strategies,
+            allow_ai_generated=True,
+            cooldown_minutes=args.cooldown_minutes,
+            loss_fallback_from_strategy=args.loss_fallback_from_strategy,
+            loss_fallback_to_strategy=args.loss_fallback_to_strategy,
+            loss_fallback_lookback_trades=args.loss_fallback_lookback_trades,
+            loss_fallback_loss_threshold=args.loss_fallback_loss_threshold,
+            loss_fallback_stats=loss_fallback_stats,
+            loss_recovery_from_strategy=args.loss_recovery_from_strategy,
+            loss_recovery_to_strategy=args.loss_recovery_to_strategy,
+            loss_recovery_lookback_trades=args.loss_recovery_lookback_trades,
+            loss_recovery_win_threshold=args.loss_recovery_win_threshold,
+            loss_recovery_min_hold_days=args.loss_recovery_min_hold_days,
+            loss_recovery_min_score_margin=args.loss_recovery_min_score_margin,
+            trend_activation_from_strategy=args.trend_activation_from_strategy,
+            trend_activation_to_strategy=args.trend_activation_to_strategy,
+            trend_activation_required_side=args.trend_activation_required_side,
+            trend_activation_min_recommended_score=args.trend_activation_min_recommended_score,
+            trend_activation_min_score_margin=args.trend_activation_min_score_margin,
+            loss_recovery_stats=loss_recovery_stats,
         )
         if decision.should_switch:
             switched_records.append(
@@ -811,6 +1064,8 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
                 trade_day=trade_day,
                 strategy_path=strategy_path,
                 config=config_path,
+                config_data=config,
+                pair_selection=pair_selection,
                 run_dir=run_dir / "hot_switch",
                 freqaimodel=args.freqaimodel,
                 backend=args.backend,
@@ -834,6 +1089,8 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
                     "current_strategy": decision.current_strategy,
                     "target_strategy": decision.target_strategy,
                     "recommended": registry.get("recommended", {}),
+                    "loss_fallback_stats": loss_fallback_stats,
+                    "loss_recovery_stats": loss_recovery_stats,
                 },
                 "trade_result": trade_result,
             }
@@ -844,6 +1101,8 @@ def run_once(args: argparse.Namespace) -> dict[str, Any]:
         trade_days=trade_days,
         strategy_path=strategy_path,
         config=config_path,
+        config_data=config,
+        pair_selection=pair_selection,
         run_dir=run_dir,
         freqaimodel=args.freqaimodel,
         backend=args.backend,

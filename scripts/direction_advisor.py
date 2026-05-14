@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -34,6 +35,7 @@ DEFAULT_OUTPUT = AUTOOPT_DIR / "direction_advisor.json"
 DEFAULT_LEDGER = AUTOOPT_DIR / "direction_advisor.jsonl"
 DEFAULT_CANDIDATE_REGISTRY = AUTOOPT_DIR / "strategy_registry.json"
 DEFAULT_KRONOS_FORECAST = AUTOOPT_DIR / "kronos_forecast.json"
+DEFAULT_TRADE_DB = USER_DATA / "tradesv3.sqlite"
 VALID_ACTIONS = {"long", "short", "hold"}
 VALID_PARAMETER_BIAS = {
     "risk": {"reduce", "normal", "increase"},
@@ -44,6 +46,9 @@ LLM_OPPOSITE_VETO_CONFIDENCE = 0.65
 LLM_HOLD_VETO_CONFIDENCE = 0.80
 KRONOS_CONFIRM_CONFIDENCE = 0.55
 KRONOS_STRONG_OPPOSE_CONFIDENCE = 0.75
+DEFAULT_REAL_TRADE_DIRECTION_MIN_SAMPLES = 3
+DEFAULT_REAL_TRADE_DIRECTION_STEP = 0.04
+DEFAULT_REAL_TRADE_DIRECTION_MAX_BONUS = 0.15
 
 
 @dataclass
@@ -96,6 +101,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--advisor-timeout", type=int, default=60)
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    parser.add_argument("--trade-db", default=str(DEFAULT_TRADE_DB))
+    parser.add_argument("--real-trade-lookback", type=int, default=300)
+    parser.add_argument("--real-trade-direction-min-samples", type=int, default=DEFAULT_REAL_TRADE_DIRECTION_MIN_SAMPLES)
+    parser.add_argument("--real-trade-direction-step", type=float, default=DEFAULT_REAL_TRADE_DIRECTION_STEP)
+    parser.add_argument("--real-trade-direction-max-bonus", type=float, default=DEFAULT_REAL_TRADE_DIRECTION_MAX_BONUS)
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--interval-minutes", type=float, default=30.0)
     return parser.parse_args()
@@ -503,6 +513,97 @@ def build_feedback_summary(records: list[dict]) -> dict[str, Any]:
     }
 
 
+def trade_db_direction_feedback(db_path: Path, limit: int = 300) -> dict[str, Any]:
+    buckets = {
+        "long": {"count": 0, "positive": 0, "profit_total_pct": 0.0},
+        "short": {"count": 0, "positive": 0, "profit_total_pct": 0.0},
+    }
+    if not db_path.exists() or limit <= 0:
+        return {"sample_size": 0, "by_action": buckets}
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute("select name from sqlite_master where type='table'").fetchall()
+            }
+            if "trades" not in tables:
+                return {"sample_size": 0, "by_action": buckets}
+            rows = conn.execute(
+                """
+                select is_short, close_profit, close_date
+                from trades
+                where is_open = 0
+                  and close_date is not null
+                order by close_date desc, id desc
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+    except sqlite3.Error:
+        return {"sample_size": 0, "by_action": buckets}
+
+    for is_short, close_profit, _close_date in rows:
+        action = "short" if int(is_short or 0) == 1 else "long"
+        try:
+            profit_pct = float(close_profit or 0.0) * 100.0
+        except (TypeError, ValueError):
+            profit_pct = 0.0
+        buckets[action]["count"] += 1
+        buckets[action]["profit_total_pct"] += profit_pct
+        if profit_pct > 0:
+            buckets[action]["positive"] += 1
+    for item in buckets.values():
+        count = int(item["count"])
+        item["positive_rate"] = round(item["positive"] / count, 4) if count else 0.0
+        item["avg_profit_total_pct"] = round(item["profit_total_pct"] / count, 4) if count else 0.0
+        item["profit_total_pct"] = round(item["profit_total_pct"], 4)
+    return {
+        "sample_size": sum(int(item["count"]) for item in buckets.values()),
+        "by_action": buckets,
+    }
+
+
+def apply_real_trade_direction_feedback(
+    metrics: list[DirectionMetrics],
+    feedback: dict[str, Any],
+    *,
+    min_samples: int,
+    bonus_step: float,
+    max_bonus: float,
+) -> list[DirectionMetrics]:
+    if not metrics:
+        return metrics
+    by_action = feedback.get("by_action", {}) if isinstance(feedback, dict) else {}
+    adjusted: list[DirectionMetrics] = []
+    for item in metrics:
+        side_feedback = by_action.get(item.side, {}) if isinstance(by_action, dict) else {}
+        samples = _as_int(side_feedback.get("count"), 0)
+        avg_profit = _as_float(side_feedback.get("avg_profit_total_pct"), 0.0)
+        positive_rate = _as_float(side_feedback.get("positive_rate"), 0.0)
+        live_bonus = 0.0
+        if samples >= max(int(min_samples), 1):
+            live_steps = min(samples - max(int(min_samples), 1) + 1, 3)
+            live_delta = min(max(float(bonus_step), 0.0) * live_steps, max(float(max_bonus), 0.0))
+            if avg_profit > 0 and positive_rate >= 0.5:
+                live_bonus = live_delta
+            elif avg_profit < 0 or positive_rate < 0.5:
+                live_bonus = -live_delta
+        adjusted.append(
+            DirectionMetrics(
+                strategy=item.strategy,
+                side=item.side,
+                trades=item.trades,
+                wins=item.wins,
+                losses=item.losses,
+                winrate=item.winrate,
+                profit_total_pct=item.profit_total_pct,
+                profit_total_abs=item.profit_total_abs,
+                score=round(item.score + live_bonus, 4),
+            )
+        )
+    return adjusted
+
+
 def run_once(args: argparse.Namespace) -> dict:
     config = Path(args.config).resolve()
     strategy_path = Path(args.strategy_path).resolve()
@@ -533,6 +634,18 @@ def run_once(args: argparse.Namespace) -> dict:
         except Exception as exc:
             errors.append({"strategy": strategy, "error": str(exc)[-2000:]})
 
+    real_trade_feedback = trade_db_direction_feedback(
+        Path(getattr(args, "trade_db", DEFAULT_TRADE_DB)),
+        limit=getattr(args, "real_trade_lookback", 300),
+    )
+    all_metrics = apply_real_trade_direction_feedback(
+        all_metrics,
+        real_trade_feedback,
+        min_samples=getattr(args, "real_trade_direction_min_samples", DEFAULT_REAL_TRADE_DIRECTION_MIN_SAMPLES),
+        bonus_step=getattr(args, "real_trade_direction_step", DEFAULT_REAL_TRADE_DIRECTION_STEP),
+        max_bonus=getattr(args, "real_trade_direction_max_bonus", DEFAULT_REAL_TRADE_DIRECTION_MAX_BONUS),
+    )
+
     action, best, reason = choose_recommendation(
         all_metrics,
         min_trades=args.min_side_trades,
@@ -559,6 +672,11 @@ def run_once(args: argparse.Namespace) -> dict:
         "evaluated_strategies": list(dict.fromkeys(strategies)),
         "market": market,
         "feedback_summary": feedback_summary,
+        "real_trade_feedback": real_trade_feedback,
+        "real_trade_feedback_source": {
+            "trade_db_path": str(Path(getattr(args, "trade_db", DEFAULT_TRADE_DB))),
+            "lookback": int(getattr(args, "real_trade_lookback", 300)),
+        },
         "usage_note": (
             "Advisory only. Trade only when live strategy entry signal agrees with recommended_side."
         ),

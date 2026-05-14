@@ -1,3 +1,5 @@
+import sqlite3
+
 from scripts import direction_advisor
 
 
@@ -213,6 +215,85 @@ def test_build_feedback_summary_groups_historical_recommendations():
     assert summary["by_action"]["short"]["positive_rate"] == 0.5
     assert summary["by_action"]["short"]["avg_profit_total_pct"] == 0.15
     assert summary["last_run_id"] == "r3"
+
+
+def test_trade_db_direction_feedback_groups_long_and_short(tmp_path):
+    db_path = tmp_path / "trades.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            create table trades (
+                id integer primary key,
+                is_open boolean not null,
+                is_short boolean,
+                close_profit float,
+                close_date datetime
+            )
+            """
+        )
+        conn.executemany(
+            """
+            insert into trades (is_open, is_short, close_profit, close_date)
+            values (?, ?, ?, ?)
+            """,
+            [
+                (0, 0, 0.01, "2026-05-14 10:00:00"),
+                (0, 1, 0.02, "2026-05-14 09:00:00"),
+                (0, 1, -0.01, "2026-05-14 08:00:00"),
+            ],
+        )
+
+    summary = direction_advisor.trade_db_direction_feedback(db_path, limit=10)
+
+    assert summary["sample_size"] == 3
+    assert summary["by_action"]["long"]["count"] == 1
+    assert summary["by_action"]["short"]["count"] == 2
+    assert summary["by_action"]["short"]["avg_profit_total_pct"] == 0.5
+
+
+def test_apply_real_trade_direction_feedback_can_flip_best_side():
+    metrics = [
+        direction_advisor.DirectionMetrics(
+            strategy="A",
+            side="long",
+            trades=4,
+            wins=3,
+            losses=1,
+            winrate=0.75,
+            profit_total_pct=0.5,
+            profit_total_abs=0.5,
+            score=0.5,
+        ),
+        direction_advisor.DirectionMetrics(
+            strategy="B",
+            side="short",
+            trades=4,
+            wins=2,
+            losses=2,
+            winrate=0.5,
+            profit_total_pct=0.4,
+            profit_total_abs=0.4,
+            score=0.4,
+        ),
+    ]
+
+    adjusted = direction_advisor.apply_real_trade_direction_feedback(
+        metrics,
+        {
+            "by_action": {
+                "long": {"count": 3, "avg_profit_total_pct": -0.4, "positive_rate": 0.33},
+                "short": {"count": 4, "avg_profit_total_pct": 0.6, "positive_rate": 0.75},
+            }
+        },
+        min_samples=3,
+        bonus_step=0.04,
+        max_bonus=0.15,
+    )
+
+    action, best, _ = direction_advisor.choose_recommendation(adjusted, min_trades=3, min_profit_pct=0.0)
+
+    assert action == "short"
+    assert best.strategy == "B"
 
 
 def test_apply_registry_safety_gate_holds_when_pool_window_is_negative():

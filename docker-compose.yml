@@ -131,6 +131,16 @@ services:
       - "30"
       - --min-registry-window-profit-pct
       - "0.0"
+      - --trade-db
+      - /workspace/user_data/tradesv3.sqlite
+      - --real-trade-lookback
+      - "300"
+      - --real-trade-direction-min-samples
+      - "3"
+      - --real-trade-direction-step
+      - "0.04"
+      - --real-trade-direction-max-bonus
+      - "0.15"
       - --use-llm-advisor
       - --advisor-model
       - deepseek-chat
@@ -150,6 +160,8 @@ services:
       - optimizer
     restart: unless-stopped
     container_name: freqtrade-strategy-researcher
+    depends_on:
+      - ai-strategy-lab
     user: ftuser
     entrypoint: ["python"]
     env_file:
@@ -168,16 +180,122 @@ services:
       - /workspace/user_data/config.json
       - --strategy-path
       - /workspace/user_data/strategies
+      - --strategies
+      - AIGeneratedLongTrendContinuationRunner2xSelective
+      - AIGeneratedLongTrendContinuationRunner2x
+      - --include-ai-generated
+      - --ai-candidates
+      - /workspace/user_data/autoopt/ai_strategy_candidates.json
+      - --kronos-forecast
+      - /workspace/user_data/autoopt/kronos_forecast.json
       - --windows
       - "1"
       - "2"
       - "7"
       - "30"
+      - "60"
+      - --output
+      - /workspace/user_data/autoopt/strategy_registry.json
+      - --formal-pool-output
+      - /workspace/user_data/autoopt/formal_strategy_pool.json
+      - --formal-pool-required-window-days
+      - "30"
+      - "60"
+      - --formal-pool-min-profit-pct
+      - "0.0"
+      - --formal-pool-min-trades
+      - "5"
+      - --formal-pool-max-strategies
+      - "6"
+      - --ledger
+      - /workspace/user_data/autoopt/strategy_researcher.jsonl
+      - --trade-db
+      - /workspace/user_data/tradesv3.sqlite
+      - --real-trade-lookback
+      - "300"
+      - --real-trade-priority-min-samples
+      - "3"
+      - --real-trade-priority-step
+      - "0.03"
+      - --real-trade-priority-max-bonus
+      - "0.12"
       - --min-trades
       - "1"
+      - --slippage-buffer-pct-per-trade
+      - "0.04"
+      - --min-net-profit-pct
+      - "0.10"
+      - --min-pass-rate
+      - "0.50"
+      - --pair-selection-output
+      - /workspace/user_data/autoopt/pair_selection.json
+      - --pair-selection-window-days
+      - "30"
+      - --pair-selection-min-trades
+      - "1"
+      - --pair-selection-min-profit-pct
+      - "0.0"
+      - --pair-selection-max-pairs
+      - "6"
+      - --pair-selection-min-hold-runs
+      - "2"
+      - --pair-selection-remove-below-profit-pct
+      - "-0.15"
       - --use-llm-advisor
       - --advisor-model
       - deepseek-chat
+      - --interval-minutes
+      - "360"
+      - --loop
+
+  ai-strategy-lab:
+    image: freqtrade-local-freqai
+    build:
+      context: .
+      dockerfile: "./docker/Dockerfile.freqai"
+      args:
+        sourceimage: freqtradeorg/freqtrade
+        sourcetag: stable
+    profiles:
+      - optimizer
+    restart: unless-stopped
+    container_name: freqtrade-ai-strategy-lab
+    user: ftuser
+    entrypoint: ["python"]
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ".:/workspace"
+    working_dir: /workspace
+    command:
+      - /workspace/scripts/ai_strategy_lab.py
+      - --config
+      - /workspace/user_data/config.json
+      - --strategy-path
+      - /workspace/user_data/strategies
+      - --output
+      - /workspace/user_data/autoopt/ai_strategy_candidates.json
+      - --ledger
+      - /workspace/user_data/autoopt/ai_strategy_lab.jsonl
+      - --kronos-forecast
+      - /workspace/user_data/autoopt/kronos_forecast.json
+      - --formal-pool
+      - /workspace/user_data/autoopt/formal_strategy_pool.json
+      - --use-llm
+      - --advisor-model
+      - deepseek-chat
+      - --max-candidates
+      - "6"
+      - --exploration-max-candidates
+      - "10"
+      - --exploration-stale-runs-threshold
+      - "3"
+      - --preserved-prune-stale-runs-threshold
+      - "6"
+      - --max-preserved-strategies
+      - "12"
       - --interval-minutes
       - "360"
       - --loop
@@ -210,10 +328,32 @@ services:
       - docker
       - --container
       - freqtrade
+      - --loss-fallback-from-strategy
+      - AIGeneratedLongTrendContinuationRunner2x
+      - --loss-fallback-to-strategy
+      - AIGeneratedLongTrendContinuationRunner2xSelective
+      - --loss-fallback-lookback-trades
+      - "5"
+      - --loss-fallback-loss-threshold
+      - "3"
+      - --loss-recovery-from-strategy
+      - AIGeneratedLongTrendContinuationRunner2xSelective
+      - --loss-recovery-to-strategy
+      - AIGeneratedLongTrendContinuationRunner2x
+      - --loss-recovery-lookback-trades
+      - "5"
+      - --loss-recovery-win-threshold
+      - "3"
+      - --loss-recovery-min-hold-days
+      - "3"
+      - --loss-recovery-min-score-margin
+      - "0.4"
       - --config
       - /workspace/user_data/config.json
       - --registry
       - /workspace/user_data/autoopt/strategy_registry.json
+      - --formal-pool
+      - /workspace/user_data/autoopt/formal_strategy_pool.json
       - --db
       - /workspace/user_data/tradesv3.sqlite
       - --min-passed-windows
@@ -222,6 +362,12 @@ services:
       - "5"
       - --min-score-margin
       - "0.15"
+      - --allow-strategies
+      - AIGeneratedLongTrendContinuationRunner2xSelective
+      - AIGeneratedLongTrendContinuation
+      - AIGeneratedLongTrendContinuationRunner
+      - AIGeneratedLongTrendContinuationRunner2x
+      - --disable-inactivity-fallback
       - --inactive-window-days
       - "1"
       - --inactive-min-trades
