@@ -55,6 +55,9 @@ sys.modules.setdefault("technical.qtpylib", qtpylib_module)
 sys.modules.setdefault("freqtrade.enums", freqtrade_enums)
 sys.modules.setdefault("freqtrade.strategy", freqtrade_strategy)
 
+from user_data.strategies.AIGeneratedLongTrendContinuation import (
+    AIGeneratedLongTrendContinuation,
+)
 from user_data.strategies.SampleStrategy import SampleStrategy
 
 for _module_name, _previous_module in _PREVIOUS_MODULES.items():
@@ -75,6 +78,15 @@ class ImmediateThread:
 
 def _strategy():
     strategy = object.__new__(SampleStrategy)
+    strategy.config = {"runmode": "dry_run"}
+    strategy._signal_email_cache = set()
+    strategy._email_warned = False
+    strategy._direction_gate_warned = False
+    return strategy
+
+
+def _ai_strategy():
+    strategy = object.__new__(AIGeneratedLongTrendContinuation)
     strategy.config = {"runmode": "dry_run"}
     strategy._signal_email_cache = set()
     strategy._email_warned = False
@@ -670,3 +682,46 @@ def test_last_bool_treats_nan_as_false():
     assert SampleStrategy._last_bool(pd.Series([None])) is False
     assert SampleStrategy._last_bool(pd.Series([0])) is False
     assert SampleStrategy._last_bool(pd.Series([1])) is True
+
+
+def test_ai_strategy_writes_signal_diagnostics(monkeypatch, tmp_path):
+    diagnostics_path = tmp_path / "signal_diagnostics.jsonl"
+    monkeypatch.setenv("SIGNAL_DIAGNOSTICS_PATH", str(diagnostics_path))
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(tmp_path / "missing.json"))
+    strategy = _ai_strategy()
+    dataframe = pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp("2026-05-14T13:00:00Z"),
+                "close": 100.0,
+                "low": 99.0,
+                "high": 101.0,
+                "ema20": 101.0,
+                "ema50": 102.0,
+                "rsi": 45.0,
+                "adx": 18.0,
+                "macdhist": -0.1,
+                "volume_ratio": 0.6,
+                "volatility_ratio": 1.0,
+                "bb_width": 0.01,
+                "bb_width_sma": 0.02,
+                "bb_lowerband": 98.0,
+                "bb_upperband": 102.0,
+                "range_market_1h": False,
+                "trend_up_1h": False,
+                "trend_up_15m": False,
+                "trend_down_1h": False,
+                "trend_down_15m": False,
+                "regime_high_vol": False,
+                "regime_low_vol": False,
+            }
+        ]
+    )
+
+    result = strategy.populate_entry_trend(dataframe.copy(), {"pair": "BTC/USDT:USDT"})
+
+    assert result["enter_long"].iloc[-1] == 0
+    payload = json.loads(diagnostics_path.read_text().strip())
+    assert payload["pair"] == "BTC/USDT:USDT"
+    assert payload["record_type"] == "signal_diagnostics"
+    assert "no_long_trend_context" in payload["long_blockers"]

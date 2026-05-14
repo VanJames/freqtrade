@@ -430,6 +430,94 @@ class SampleStrategy(IStrategy):
         except Exception as exc:  # pragma: no cover - diagnostics must not affect trading
             logger.debug("Failed to write signal diagnostics record: %s", exc)
 
+    def _append_custom_entry_diagnostics(
+        self,
+        dataframe: DataFrame,
+        metadata: dict,
+        long_blockers: list[str],
+        short_blockers: list[str],
+    ) -> None:
+        if not self._is_live_or_dry_run() or dataframe.empty:
+            return
+
+        last = dataframe.iloc[-1]
+        candle_time = last.get("date")
+        if hasattr(candle_time, "isoformat"):
+            candle_time = candle_time.isoformat()
+
+        cache_key = f"{metadata.get('pair', '')}:entry_diagnostics:{candle_time}"
+        diagnostic_cache = getattr(self, "_signal_diagnostic_cache", set())
+        if cache_key in diagnostic_cache:
+            return
+        diagnostic_cache.add(cache_key)
+        self._signal_diagnostic_cache = diagnostic_cache
+
+        close = self._last_float(last, "close")
+        rsi = self._last_float(last, "rsi")
+        adx = self._last_float(last, "adx")
+        volume_ratio = self._last_float(last, "volume_ratio")
+        volatility_ratio = self._last_float(last, "volatility_ratio", 1.0)
+        do_predict = str(last.get("do_predict", "n/a"))
+        future_return = self._last_float(last, "&-future_return", None)
+        has_enter_long = self._last_bool(dataframe.get("enter_long", pd.Series(dtype=float)))
+        has_enter_short = self._last_bool(dataframe.get("enter_short", pd.Series(dtype=float)))
+        regime = (
+            "high"
+            if bool(last.get("regime_high_vol", False))
+            else "low"
+            if bool(last.get("regime_low_vol", False))
+            else "balanced"
+        )
+
+        long_blockers_limited = long_blockers[:8] or ["passed"]
+        short_blockers_limited = short_blockers[:8] or ["passed"]
+        logger.info(
+            "Signal diagnostics %s time=%s close=%.8f rsi=%.2f adx=%.2f "
+            "volume_ratio=%.2f volatility_ratio=%.2f regime=%s trends="
+            "1h_up:%s 1h_down:%s 15m_up:%s 15m_down:%s freqai_do_predict=%s "
+            "freqai_future_return=%s long_blockers=%s short_blockers=%s",
+            metadata.get("pair", "unknown"),
+            candle_time,
+            close,
+            rsi,
+            adx,
+            volume_ratio,
+            volatility_ratio,
+            regime,
+            bool(last.get("trend_up_1h", False)),
+            bool(last.get("trend_down_1h", False)),
+            bool(last.get("trend_up_15m", False)),
+            bool(last.get("trend_down_15m", False)),
+            do_predict,
+            f"{future_return:.4f}" if future_return is not None else "n/a",
+            long_blockers_limited,
+            short_blockers_limited,
+        )
+        self._append_signal_diagnostic(
+            {
+                "record_type": "signal_diagnostics",
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "pair": metadata.get("pair", "unknown"),
+                "time": candle_time,
+                "close": close,
+                "rsi": rsi,
+                "adx": adx,
+                "volume_ratio": volume_ratio,
+                "volatility_ratio": volatility_ratio,
+                "regime": regime,
+                "trend_up_1h": bool(last.get("trend_up_1h", False)),
+                "trend_down_1h": bool(last.get("trend_down_1h", False)),
+                "trend_up_15m": bool(last.get("trend_up_15m", False)),
+                "trend_down_15m": bool(last.get("trend_down_15m", False)),
+                "freqai_do_predict": do_predict,
+                "freqai_future_return": future_return,
+                "enter_long": has_enter_long,
+                "enter_short": has_enter_short,
+                "long_blockers": long_blockers_limited,
+                "short_blockers": short_blockers_limited,
+            }
+        )
+
     @informative("1h")
     def populate_indicators_1h(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe["ema20"] = ta.EMA(dataframe, timeperiod=20)

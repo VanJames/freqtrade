@@ -41,6 +41,144 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
     "volume_min": 0.8
 }
 
+    def _build_long_blockers(
+        self,
+        dataframe,
+        archetype,
+        side,
+        adx_min,
+        volume_min,
+        rsi_long_max,
+        bb_tolerance,
+        long_context,
+        trend_long,
+        pullback_long,
+        breakout_long,
+        meanrev_long,
+        volatility_expanding,
+        recent_high,
+        volume_ok,
+    ):
+        if side not in {"long", "both"}:
+            return ["side_disabled"]
+        strategy_signal = {
+            "trend": trend_long,
+            "pullback": pullback_long,
+            "breakout": breakout_long,
+            "mean_reversion": meanrev_long,
+        }.get(archetype, trend_long)
+        if bool(strategy_signal.iloc[-1]):
+            return ["passed"]
+
+        last = dataframe.iloc[-1]
+        blockers = []
+        if archetype in {"trend", "pullback", "breakout"} and not bool(long_context.iloc[-1]):
+            blockers.append("no_long_trend_context")
+        if not bool(volume_ok.iloc[-1]):
+            blockers.append(f"volume_ratio<={volume_min:.2f}")
+        if self._last_float(last, "adx") <= adx_min:
+            blockers.append(f"adx<={adx_min:.2f}")
+        if archetype == "trend":
+            if self._last_float(last, "close") <= self._last_float(last, "ema20"):
+                blockers.append("close<=ema20")
+            if self._last_float(last, "ema20") <= self._last_float(last, "ema50"):
+                blockers.append("ema20<=ema50")
+            if self._last_float(last, "macdhist") <= 0:
+                blockers.append("macdhist<=0")
+            if self._last_float(last, "rsi") >= max(rsi_long_max, 52):
+                blockers.append(f"rsi>={max(rsi_long_max, 52):.0f}")
+        elif archetype == "pullback":
+            if self._last_float(last, "low") > self._last_float(last, "ema20") * (1 + bb_tolerance):
+                blockers.append("low>ema20_pullback")
+            if self._last_float(last, "close") <= self._last_float(last, "ema20"):
+                blockers.append("close<=ema20")
+            if self._last_float(last, "rsi") >= rsi_long_max:
+                blockers.append(f"rsi>={rsi_long_max:.0f}")
+        elif archetype == "breakout":
+            if not bool(volatility_expanding.iloc[-1]):
+                blockers.append("no_volatility_expansion")
+            if pd.isna(recent_high.iloc[-1]) or self._last_float(last, "close") <= float(recent_high.iloc[-1]):
+                blockers.append("close<=recent_high")
+            if self._last_float(last, "rsi") <= 52:
+                blockers.append("rsi<=52")
+        else:
+            if not bool(last.get("range_market_1h", False)) and self._last_float(last, "adx") >= adx_min:
+                blockers.append("not_range_context")
+            if self._last_float(last, "close") > self._last_float(last, "bb_lowerband") * (1 + bb_tolerance):
+                blockers.append("close>bb_lowerband")
+            if self._last_float(last, "rsi") >= rsi_long_max:
+                blockers.append(f"rsi>={rsi_long_max:.0f}")
+        return blockers or ["waiting_trigger"]
+
+    def _build_short_blockers(
+        self,
+        dataframe,
+        archetype,
+        side,
+        adx_min,
+        volume_min,
+        rsi_short_min,
+        bb_tolerance,
+        short_context,
+        trend_short,
+        pullback_short,
+        breakout_short,
+        meanrev_short,
+        volatility_expanding,
+        recent_low,
+        volume_ok,
+    ):
+        if side not in {"short", "both"}:
+            return ["side_disabled"]
+        strategy_signal = {
+            "trend": trend_short,
+            "pullback": pullback_short,
+            "breakout": breakout_short,
+            "mean_reversion": meanrev_short,
+        }.get(archetype, trend_short)
+        if bool(strategy_signal.iloc[-1]):
+            return ["passed"]
+
+        last = dataframe.iloc[-1]
+        blockers = []
+        if archetype in {"trend", "pullback", "breakout"} and not bool(short_context.iloc[-1]):
+            blockers.append("no_short_trend_context")
+        if not bool(volume_ok.iloc[-1]):
+            blockers.append(f"volume_ratio<={volume_min:.2f}")
+        if self._last_float(last, "adx") <= adx_min:
+            blockers.append(f"adx<={adx_min:.2f}")
+        if archetype == "trend":
+            if self._last_float(last, "close") >= self._last_float(last, "ema20"):
+                blockers.append("close>=ema20")
+            if self._last_float(last, "ema20") >= self._last_float(last, "ema50"):
+                blockers.append("ema20>=ema50")
+            if self._last_float(last, "macdhist") >= 0:
+                blockers.append("macdhist>=0")
+            if self._last_float(last, "rsi") <= min(rsi_short_min, 48):
+                blockers.append(f"rsi<={min(rsi_short_min, 48):.0f}")
+        elif archetype == "pullback":
+            if self._last_float(last, "high") < self._last_float(last, "ema20") * (1 - bb_tolerance):
+                blockers.append("high<ema20_pullback")
+            if self._last_float(last, "close") >= self._last_float(last, "ema20"):
+                blockers.append("close>=ema20")
+            if self._last_float(last, "rsi") <= rsi_short_min:
+                blockers.append(f"rsi<={rsi_short_min:.0f}")
+        elif archetype == "breakout":
+            if not bool(volatility_expanding.iloc[-1]):
+                blockers.append("no_volatility_expansion")
+            if pd.isna(recent_low.iloc[-1]) or self._last_float(last, "close") >= float(recent_low.iloc[-1]):
+                blockers.append("close>=recent_low")
+            if self._last_float(last, "rsi") >= 48:
+                blockers.append("rsi>=48")
+        else:
+            if not bool(last.get("range_market_1h", False)) and self._last_float(last, "adx") >= adx_min:
+                blockers.append("not_range_context")
+            if self._last_float(last, "close") < self._last_float(last, "bb_upperband") * (1 - bb_tolerance):
+                blockers.append("close<bb_upperband")
+            if self._last_float(last, "rsi") <= rsi_short_min:
+                blockers.append(f"rsi<={rsi_short_min:.0f}")
+        return blockers or ["waiting_trigger"]
+
     def populate_entry_trend(self, dataframe, metadata):
         dataframe["enter_long"] = 0
         dataframe["enter_short"] = 0
@@ -158,6 +296,44 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
 
         dataframe.loc[long_signal, ["enter_long", "enter_tag"]] = (1, f"ai_{archetype}_long")
         dataframe.loc[short_signal, ["enter_short", "enter_tag"]] = (1, f"ai_{archetype}_short")
+        self._append_custom_entry_diagnostics(
+            dataframe,
+            metadata,
+            self._build_long_blockers(
+                dataframe,
+                archetype,
+                side,
+                adx_min,
+                volume_min,
+                rsi_long_max,
+                bb_tolerance,
+                long_context,
+                trend_long,
+                pullback_long,
+                breakout_long,
+                meanrev_long,
+                volatility_expanding,
+                recent_high,
+                volume_ok,
+            ),
+            self._build_short_blockers(
+                dataframe,
+                archetype,
+                side,
+                adx_min,
+                volume_min,
+                rsi_short_min,
+                bb_tolerance,
+                short_context,
+                trend_short,
+                pullback_short,
+                breakout_short,
+                meanrev_short,
+                volatility_expanding,
+                recent_low,
+                volume_ok,
+            ),
+        )
         self._emit_signal_email(dataframe, metadata, "entry", "long")
         self._emit_signal_email(dataframe, metadata, "entry", "short")
         return dataframe
