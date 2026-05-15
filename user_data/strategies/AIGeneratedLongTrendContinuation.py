@@ -34,7 +34,7 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
     "roi_30": 0.012,
     "rsi_long_max": 54,
     "rsi_short_min": 46,
-    "side": "long",
+    "side": "both",
     "stoploss": -0.05,
     "trailing_offset": 0.016,
     "trailing_positive": 0.008,
