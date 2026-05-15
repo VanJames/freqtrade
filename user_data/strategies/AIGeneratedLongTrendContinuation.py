@@ -207,42 +207,58 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
         rsi_short_min = float(self.ai_candidate["rsi_short_min"])
         bb_tolerance = float(self.ai_candidate["bb_tolerance"])
 
-        volume_ok = dataframe["volume_ratio"] > max(volume_min, 0.35)
-        long_context = dataframe["trend_up_1h"] | dataframe["trend_up_15m"]
-        short_context = dataframe["trend_down_1h"] | dataframe["trend_down_15m"]
+        volume_ok = dataframe["volume_ratio"] > max(volume_min, 0.22)
+        long_context = (
+            dataframe["trend_up_1h"]
+            | dataframe["trend_up_15m"]
+            | (
+                (dataframe["adx"] > max(adx_min - 5, 9))
+                & (dataframe["close"] > dataframe["ema20"] * 0.995)
+                & (dataframe["rsi"] > 47)
+            )
+        )
+        short_context = (
+            dataframe["trend_down_1h"]
+            | dataframe["trend_down_15m"]
+            | (
+                (dataframe["adx"] > max(adx_min - 5, 9))
+                & (dataframe["close"] < dataframe["ema20"] * 1.005)
+                & (dataframe["rsi"] < 53)
+            )
+        )
         trend_long = (
             long_context
-            & (dataframe["adx"] > max(adx_min - 2, 10))
-            & (dataframe["close"] > dataframe["ema20"] * 0.998)
-            & (dataframe["ema20"] > dataframe["ema50"] * 0.998)
-            & (dataframe["macdhist"] > -0.015)
-            & (dataframe["rsi"] < max(rsi_long_max, 56))
+            & (dataframe["adx"] > max(adx_min - 4, 9))
+            & (dataframe["close"] > dataframe["ema20"] * 0.995)
+            & (dataframe["ema20"] > dataframe["ema50"] * 0.995)
+            & (dataframe["macdhist"] > -0.035)
+            & (dataframe["rsi"] < max(rsi_long_max, 60))
             & volume_ok
         )
         trend_short = (
             short_context
-            & (dataframe["adx"] > max(adx_min - 2, 10))
-            & (dataframe["close"] < dataframe["ema20"] * 1.002)
-            & (dataframe["ema20"] < dataframe["ema50"] * 1.002)
-            & (dataframe["macdhist"] < 0.015)
-            & (dataframe["rsi"] > min(rsi_short_min, 44))
+            & (dataframe["adx"] > max(adx_min - 4, 9))
+            & (dataframe["close"] < dataframe["ema20"] * 1.005)
+            & (dataframe["ema20"] < dataframe["ema50"] * 1.005)
+            & (dataframe["macdhist"] < 0.035)
+            & (dataframe["rsi"] > min(rsi_short_min, 40))
             & volume_ok
         )
 
         pullback_long = (
             long_context
-            & (dataframe["adx"] > max(adx_min - 5, 8))
-            & (dataframe["low"] <= dataframe["ema20"] * (1 + bb_tolerance + 0.002))
-            & (dataframe["close"] > dataframe["ema20"] * 0.997)
-            & (dataframe["rsi"] < max(rsi_long_max, 58))
+            & (dataframe["adx"] > max(adx_min - 6, 7))
+            & (dataframe["low"] <= dataframe["ema20"] * (1 + bb_tolerance + 0.004))
+            & (dataframe["close"] > dataframe["ema20"] * 0.994)
+            & (dataframe["rsi"] < max(rsi_long_max, 62))
             & volume_ok
         )
         pullback_short = (
             short_context
-            & (dataframe["adx"] > max(adx_min - 5, 8))
-            & (dataframe["high"] >= dataframe["ema20"] * (1 - bb_tolerance - 0.002))
-            & (dataframe["close"] < dataframe["ema20"] * 1.003)
-            & (dataframe["rsi"] > min(rsi_short_min, 42))
+            & (dataframe["adx"] > max(adx_min - 6, 7))
+            & (dataframe["high"] >= dataframe["ema20"] * (1 - bb_tolerance - 0.004))
+            & (dataframe["close"] < dataframe["ema20"] * 1.006)
+            & (dataframe["rsi"] > min(rsi_short_min, 38))
             & volume_ok
         )
 
@@ -255,15 +271,15 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
         breakout_long = (
             long_context
             & volatility_expanding
-            & (dataframe["close"] > recent_high * 0.999)
-            & (dataframe["rsi"] > 50)
+            & (dataframe["close"] > recent_high * 0.997)
+            & (dataframe["rsi"] > 48)
             & volume_ok
         )
         breakout_short = (
             short_context
             & volatility_expanding
-            & (dataframe["close"] < recent_low * 1.001)
-            & (dataframe["rsi"] < 50)
+            & (dataframe["close"] < recent_low * 1.003)
+            & (dataframe["rsi"] < 52)
             & volume_ok
         )
 
@@ -272,14 +288,14 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
         )
         meanrev_long = (
             range_context
-            & (dataframe["close"] <= dataframe["bb_lowerband"] * (1 + bb_tolerance + 0.002))
-            & (dataframe["rsi"] < max(rsi_long_max, 58))
+            & (dataframe["close"] <= dataframe["bb_lowerband"] * (1 + bb_tolerance + 0.004))
+            & (dataframe["rsi"] < max(rsi_long_max, 62))
             & volume_ok
         )
         meanrev_short = (
             range_context
-            & (dataframe["close"] >= dataframe["bb_upperband"] * (1 - bb_tolerance - 0.002))
-            & (dataframe["rsi"] > min(rsi_short_min, 42))
+            & (dataframe["close"] >= dataframe["bb_upperband"] * (1 - bb_tolerance - 0.004))
+            & (dataframe["rsi"] > min(rsi_short_min, 38))
             & volume_ok
         )
 
@@ -297,6 +313,10 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
         }
         long_signal = long_map.get(archetype, trend_long) if side in {"long", "both"} else pd.Series(False, index=dataframe.index)
         short_signal = short_map.get(archetype, trend_short) if side in {"short", "both"} else pd.Series(False, index=dataframe.index)
+        if side in {"long", "both"} and archetype == "trend":
+            long_signal = long_signal | pullback_long | breakout_long
+        if side in {"short", "both"} and archetype == "trend":
+            short_signal = short_signal | pullback_short | breakout_short
 
         if self._new_entries_disabled():
             long_signal = pd.Series(False, index=dataframe.index)
