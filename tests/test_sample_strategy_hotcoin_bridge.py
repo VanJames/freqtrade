@@ -882,6 +882,47 @@ def test_sync_bridge_wallet_view_uses_hotcoin_balance(monkeypatch, tmp_path):
     assert synced.used == 24.25
 
 
+def test_bridge_wallet_hook_resyncs_after_wallet_update(monkeypatch, tmp_path):
+    settings_path = tmp_path / "trade_execution.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hotcoin_signal_bridge_enabled": True,
+                "hotcoin_signal_execute": True,
+            }
+        )
+    )
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+
+    strategy = _strategy()
+    wallet = types.SimpleNamespace(currency="USDT", free=0.0, used=0.0, total=0.0)
+
+    class WalletStub:
+        def __init__(self):
+            self._stake_currency = "USDT"
+            self._wallets = {"USDT": wallet}
+
+        def update(self, require_update=True):
+            self._wallets["USDT"] = types.SimpleNamespace(
+                currency="USDT", free=8.20991600352e-07, used=0.0, total=8.20991600352e-07
+            )
+
+    strategy.wallets = WalletStub()
+    monkeypatch.setattr(
+        strategy,
+        "_load_hotcoin_balance_snapshot",
+        lambda settings: {"free": 55.0, "total": 80.0},
+    )
+
+    strategy._ensure_bridge_wallet_hook()
+    strategy.wallets.update()
+
+    synced = strategy.wallets._wallets["USDT"]
+    assert synced.free == 55.0
+    assert synced.total == 80.0
+    assert synced.used == 25.0
+
+
 def test_ai_strategy_writes_signal_diagnostics(monkeypatch, tmp_path):
     diagnostics_path = tmp_path / "signal_diagnostics.jsonl"
     probe_path = tmp_path / "strategy_runtime_probe.jsonl"

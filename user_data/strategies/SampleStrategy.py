@@ -842,6 +842,7 @@ class SampleStrategy(IStrategy):
             return proposed_stake
 
         try:
+            self._ensure_bridge_wallet_hook()
             self._sync_bridge_wallet_view(current_time)
             dataframe, _ = self.dp.get_analyzed_dataframe(pair=pair, timeframe=self.timeframe)
             if dataframe.empty:
@@ -875,7 +876,28 @@ class SampleStrategy(IStrategy):
             return proposed_stake
 
     def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
+        self._ensure_bridge_wallet_hook()
         self._sync_bridge_wallet_view(current_time)
+
+    def _ensure_bridge_wallet_hook(self) -> None:
+        wallets = getattr(self, "wallets", None)
+        if wallets is None:
+            return
+        if getattr(wallets, "_hotcoin_bridge_wrapped_update", False):
+            return
+
+        original_update = wallets.update
+
+        def wrapped_update(require_update: bool = True):
+            result = original_update(require_update)
+            try:
+                self._sync_bridge_wallet_view()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Hotcoin wallet post-update sync failed: %s", exc)
+            return result
+
+        wallets.update = wrapped_update
+        wallets._hotcoin_bridge_wrapped_update = True
 
     def _hotcoin_bridge_enabled(self, settings: Optional[dict] = None) -> bool:
         settings = settings or self._load_trade_execution_settings()
