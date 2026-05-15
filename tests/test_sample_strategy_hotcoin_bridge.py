@@ -1,5 +1,6 @@
 import json
 import logging
+import subprocess
 import sys
 import types
 from datetime import UTC, datetime, timedelta
@@ -837,6 +838,48 @@ def test_last_bool_treats_nan_as_false():
     assert SampleStrategy._last_bool(pd.Series([None])) is False
     assert SampleStrategy._last_bool(pd.Series([0])) is False
     assert SampleStrategy._last_bool(pd.Series([1])) is True
+
+
+def test_sync_bridge_wallet_view_uses_hotcoin_balance(monkeypatch, tmp_path):
+    settings_path = tmp_path / "trade_execution.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hotcoin_signal_bridge_enabled": True,
+                "hotcoin_signal_execute": True,
+                "hotcoin_mode": "web",
+                "hotcoin_adapter_path": "/tmp/hotcoin_adapter.py",
+            }
+        )
+    )
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+
+    strategy = _strategy()
+    strategy.wallets = types.SimpleNamespace(
+        _stake_currency="USDT",
+        _wallets={"USDT": types.SimpleNamespace(currency="USDT", free=0.0, used=0.0, total=0.0)},
+    )
+
+    payload = {
+        "code": 200,
+        "data": {
+            "totalAccountRights": "125.5",
+            "realAvailableBalance": "101.25",
+            "availableBalance": "99.0",
+        },
+    }
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    strategy._sync_bridge_wallet_view(datetime(2026, 5, 15, tzinfo=UTC))
+
+    synced = strategy.wallets._wallets["USDT"]
+    assert synced.free == 101.25
+    assert synced.total == 125.5
+    assert synced.used == 24.25
 
 
 def test_ai_strategy_writes_signal_diagnostics(monkeypatch, tmp_path):

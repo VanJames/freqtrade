@@ -87,6 +87,8 @@ class SampleStrategy(IStrategy):
         },
     ]
 
+    _hotcoin_wallet_sync_interval_seconds = 60
+
     order_types = {
         "entry": "limit",
         "exit": "limit",
@@ -840,6 +842,7 @@ class SampleStrategy(IStrategy):
             return proposed_stake
 
         try:
+            self._sync_bridge_wallet_view(current_time)
             dataframe, _ = self.dp.get_analyzed_dataframe(pair=pair, timeframe=self.timeframe)
             if dataframe.empty:
                 return proposed_stake
@@ -870,6 +873,149 @@ class SampleStrategy(IStrategy):
         except Exception as exc:  # pragma: no cover - defensive fallback
             logger.warning("custom_stake_amount fallback for %s: %s", pair, exc)
             return proposed_stake
+
+    def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
+        self._sync_bridge_wallet_view(current_time)
+
+    def _hotcoin_bridge_enabled(self, settings: Optional[dict] = None) -> bool:
+        settings = settings or self._load_trade_execution_settings()
+        enabled = self._truthy(
+            settings.get(
+                "hotcoin_signal_bridge_enabled",
+                os.getenv("HOTCOIN_SIGNAL_BRIDGE_ENABLED", "false"),
+            )
+        )
+        execute = self._truthy(
+            settings.get(
+                "hotcoin_signal_execute",
+                os.getenv("HOTCOIN_SIGNAL_EXECUTE", "false"),
+            )
+        )
+        return enabled and execute
+
+    def _sync_bridge_wallet_view(self, current_time: Optional[datetime] = None) -> None:
+        if not getattr(self, "wallets", None):
+            return
+        settings = self._load_trade_execution_settings()
+        if not self._hotcoin_bridge_enabled(settings):
+            return
+
+        now = current_time or datetime.now(UTC)
+        last_sync = getattr(self, "_hotcoin_wallet_last_sync", None)
+        if (
+            isinstance(last_sync, datetime)
+            and (now - last_sync).total_seconds() < self._hotcoin_wallet_sync_interval_seconds
+        ):
+            return
+
+        snapshot = self._load_hotcoin_balance_snapshot(settings)
+        self._hotcoin_wallet_last_sync = now
+        if not snapshot:
+            return
+
+        stake_currency = getattr(self.wallets, "_stake_currency", "USDT")
+        current_wallet = getattr(self.wallets, "_wallets", {}).get(stake_currency)
+        current_used = float(getattr(current_wallet, "used", 0.0) or 0.0) if current_wallet else 0.0
+        total = max(snapshot["total"], snapshot["free"])
+        used = max(total - snapshot["free"], current_used, 0.0)
+
+        wallet_type = type(current_wallet) if current_wallet is not None else None
+        if wallet_type is None:
+            from freqtrade.wallets import Wallet as WalletTuple
+
+            wallet_type = WalletTuple
+
+        self.wallets._wallets[stake_currency] = wallet_type(
+            stake_currency,
+            snapshot["free"],
+            used,
+            total,
+        )
+        logger.info(
+            "Hotcoin bridge wallet synced: %s free=%.8f total=%.8f",
+            stake_currency,
+            snapshot["free"],
+            total,
+        )
+
+    def _load_hotcoin_balance_snapshot(self, settings: dict) -> Optional[dict]:
+        script = str(
+            settings.get(
+                "hotcoin_adapter_path",
+                os.getenv("HOTCOIN_ADAPTER_PATH", "/freqtrade/scripts/hotcoin_adapter.py"),
+            )
+        )
+        mode = str(settings.get("hotcoin_mode", os.getenv("HOTCOIN_MODE", "web")))
+        env = os.environ.copy()
+        session_path = settings.get("hotcoin_session_path")
+        if session_path:
+            env.setdefault("HOTCOIN_SESSION_PATH", str(session_path))
+
+        try:
+            completed = subprocess.run(
+                ["python", script, "balance", "--mode", mode],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=20,
+            )
+        except Exception as exc:
+            logger.warning("Hotcoin balance sync failed to execute: %s", exc)
+            return None
+
+        if completed.returncode != 0:
+            logger.warning(
+                "Hotcoin balance sync returned non-zero exit code %s: %s",
+                completed.returncode,
+                (completed.stderr or completed.stdout).strip(),
+            )
+            return None
+
+        try:
+            payload = json.loads(completed.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            logger.warning("Hotcoin balance sync returned invalid JSON: %s", exc)
+            return None
+
+        if not isinstance(payload, dict) or payload.get("code") != 200:
+            logger.warning("Hotcoin balance sync failed: %s", payload)
+            return None
+
+        raw = payload.get("data", payload)
+        if not isinstance(raw, dict):
+            return None
+
+        def _to_float(value: object) -> Optional[float]:
+            if value is None:
+                return None
+            text = str(value).strip()
+            if text == "":
+                return None
+            try:
+                return float(text)
+            except (TypeError, ValueError):
+                return None
+
+        total = _to_float(raw.get("totalAccountRights"))
+        available_candidates = [
+            _to_float(raw.get("realAvailableBalance")),
+            _to_float(raw.get("availableBalance")),
+            _to_float(raw.get("available")),
+        ]
+        available_values = [value for value in available_candidates if value is not None]
+        free = max(available_values) if available_values else total
+
+        if free is None and total is None:
+            logger.warning("Hotcoin balance sync payload missing usable balance fields: %s", raw)
+            return None
+
+        if total is None:
+            total = free
+        if free is None:
+            free = total
+
+        return {"free": float(free), "total": float(total)}
 
     def custom_stoploss(
         self,
