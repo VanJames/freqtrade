@@ -1361,6 +1361,31 @@ class SampleStrategy(IStrategy):
                     error,
                 )
                 return
+            payload, payload_error = self._hotcoin_bridge_payload(result.stdout)
+            if payload_error:
+                error = payload_error
+                self._append_execution_ledger(
+                    bridge_settings,
+                    {
+                        "record_type": "hotcoin_execution",
+                        "status": "failed",
+                        "signal_id": signal_id,
+                        "pair": pair,
+                        "side": side,
+                        "candle_time": candle_time,
+                        "execute": execute,
+                        "error": error,
+                    },
+                )
+                self._maybe_disable_entries_after_hotcoin_failures(bridge_settings)
+                logger.warning(
+                    "Hotcoin bridge failed for %s %s %s: %s",
+                    pair,
+                    side,
+                    candle_time,
+                    error,
+                )
+                return
             self._append_execution_ledger(
                 bridge_settings,
                 {
@@ -1406,6 +1431,29 @@ class SampleStrategy(IStrategy):
             return command[command.index(key) + 1]
         except (ValueError, IndexError):
             return default
+
+    @staticmethod
+    def _hotcoin_bridge_payload(stdout: str) -> tuple[dict[str, object] | None, str]:
+        body = (stdout or "").strip()
+        if not body:
+            return None, ""
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return None, ""
+        if not isinstance(payload, dict):
+            return None, ""
+        code = payload.get("code")
+        if code is None:
+            return payload, ""
+        try:
+            code_int = int(code)
+        except (TypeError, ValueError):
+            return payload, f"Hotcoin returned invalid code payload: {body[:1000]}"
+        if code_int == 200:
+            return payload, ""
+        msg = str(payload.get("msg") or "unknown_error")
+        return payload, f"Hotcoin business error code={code_int} msg={msg}; body={body[:1000]}"
 
     def _verify_hotcoin_position(
         self,

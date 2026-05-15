@@ -413,6 +413,48 @@ def test_hotcoin_bridge_skips_duplicate_signal(monkeypatch, tmp_path):
     assert records[-1]["reason"] == "duplicate_signal_id"
 
 
+def test_hotcoin_bridge_marks_business_error_as_failed(monkeypatch, tmp_path):
+    settings_path = tmp_path / "trade_execution.json"
+    ledger_path = tmp_path / "execution_ledger.jsonl"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hotcoin_signal_bridge_enabled": True,
+                "hotcoin_signal_execute": True,
+                "hotcoin_order_amount": 1,
+                "hotcoin_order_type": "market",
+                "hotcoin_adapter_path": "/adapter.py",
+                "execution_ledger_path": str(ledger_path),
+                "hotcoin_order_cooldown_minutes": 0,
+            }
+        )
+    )
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+    monkeypatch.setattr("user_data.strategies.SampleStrategy.threading.Thread", ImmediateThread)
+
+    calls = []
+
+    def fake_run(command, capture_output, text, timeout, env):
+        calls.append(command)
+
+        class Result:
+            returncode = 0
+            stdout = '{"code": 401, "msg": "登录已失效，请重新登录"}' if "order" in command else '{"code": 200, "data": []}'
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("user_data.strategies.SampleStrategy.subprocess.run", fake_run)
+    strategy = _strategy()
+    last = pd.Series({"close": 100.0, "atr": 5.0})
+
+    strategy._dispatch_hotcoin_signal("ETH/USDT:USDT", "short", last, "2026-05-12T08:00:00")
+
+    records = [json.loads(line) for line in ledger_path.read_text().splitlines()]
+    assert [record["status"] for record in records] == ["submitted", "failed"]
+    assert "code=401" in records[-1]["error"]
+
+
 def test_hotcoin_failures_trip_risk_fuse(monkeypatch, tmp_path):
     settings_path = tmp_path / "trade_execution.json"
     ledger_path = tmp_path / "execution_ledger.jsonl"
