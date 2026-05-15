@@ -6,7 +6,7 @@ except ImportError:  # pragma: no cover - Freqtrade strategy loader path
 import pandas as pd
 
 
-class AIGeneratedLongTrendContinuation(SampleStrategy):
+class AIGeneratedDowntrendPullbackShort(SampleStrategy):
     """
     AI strategy-lab generated candidate.
 
@@ -15,30 +15,30 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
     """
 
     can_short = True
-    minimal_roi = {"0": 0.026, "30": 0.012, "90": 0.0}
-    stoploss = -0.05
+    minimal_roi = {"0": 0.008, "30": 0.025, "90": 0.0}
+    stoploss = -0.025
     trailing_stop = True
-    trailing_stop_positive = 0.008
-    trailing_stop_positive_offset = 0.016
+    trailing_stop_positive = 0.012
+    trailing_stop_positive_offset = 0.02
     trailing_only_offset_is_reached = False
     ai_candidate = {
     "adx_min": 20.0,
-    "archetype": "trend",
-    "bb_tolerance": 0.002,
-    "class_name": "AIGeneratedLongTrendContinuation",
-    "generated_by": "heuristic",
-    "name": "long_trend_continuation",
-    "reason": "Heuristic trend continuation candidate from market breadth.",
-    "risk_profile": "balanced",
-    "roi_0": 0.026,
-    "roi_30": 0.012,
-    "rsi_long_max": 48,
-    "rsi_short_min": 52,
-    "side": "long",
-    "stoploss": -0.05,
-    "trailing_offset": 0.016,
-    "trailing_positive": 0.008,
-    "volume_min": 0.8
+    "archetype": "pullback",
+    "bb_tolerance": 0.008,
+    "class_name": "AIGeneratedDowntrendPullbackShort",
+    "generated_by": "llm",
+    "name": "downtrend_pullback_short",
+    "reason": "For pairs with clear bearish EMA alignment (e.g., BTC, ETH, SOL 5m/15m), a pullback to the 20 EMA or 50 EMA on 15m provides a low-risk short entry, especially with declining volume and RSI in neutral zone.",
+    "risk_profile": "conservative",
+    "roi_0": 0.008,
+    "roi_30": 0.025,
+    "rsi_long_max": 40.0,
+    "rsi_short_min": 60.0,
+    "side": "short",
+    "stoploss": -0.025,
+    "trailing_offset": 0.02,
+    "trailing_positive": 0.012,
+    "volume_min": 0.5
 }
 
     def populate_entry_trend(self, dataframe, metadata):

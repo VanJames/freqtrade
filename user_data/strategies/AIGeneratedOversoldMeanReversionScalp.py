@@ -6,7 +6,7 @@ except ImportError:  # pragma: no cover - Freqtrade strategy loader path
 import pandas as pd
 
 
-class AIGeneratedLongTrendContinuation(SampleStrategy):
+class AIGeneratedOversoldMeanReversionScalp(SampleStrategy):
     """
     AI strategy-lab generated candidate.
 
@@ -15,30 +15,30 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
     """
 
     can_short = True
-    minimal_roi = {"0": 0.026, "30": 0.012, "90": 0.0}
-    stoploss = -0.05
+    minimal_roi = {"0": 0.01, "30": 0.02, "90": 0.0}
+    stoploss = -0.03
     trailing_stop = True
     trailing_stop_positive = 0.008
-    trailing_stop_positive_offset = 0.016
+    trailing_stop_positive_offset = 0.015
     trailing_only_offset_is_reached = False
     ai_candidate = {
-    "adx_min": 20.0,
-    "archetype": "trend",
-    "bb_tolerance": 0.002,
-    "class_name": "AIGeneratedLongTrendContinuation",
-    "generated_by": "heuristic",
-    "name": "long_trend_continuation",
-    "reason": "Heuristic trend continuation candidate from market breadth.",
+    "adx_min": 12.0,
+    "archetype": "mean_reversion",
+    "bb_tolerance": 0.005,
+    "class_name": "AIGeneratedOversoldMeanReversionScalp",
+    "generated_by": "llm",
+    "name": "oversold_mean_reversion_scalp",
+    "reason": "Pairs like BTC, ETH, SOL, BCH, LINK, XLM, UNI are showing oversold readings on 5m/15m (RSI below 30-35 in many cases). A bounce to the mean (BB middle) is plausible given the moderate BB width.",
     "risk_profile": "balanced",
-    "roi_0": 0.026,
-    "roi_30": 0.012,
-    "rsi_long_max": 48,
-    "rsi_short_min": 52,
+    "roi_0": 0.01,
+    "roi_30": 0.02,
+    "rsi_long_max": 30.0,
+    "rsi_short_min": 70.0,
     "side": "long",
-    "stoploss": -0.05,
-    "trailing_offset": 0.016,
+    "stoploss": -0.03,
+    "trailing_offset": 0.015,
     "trailing_positive": 0.008,
-    "volume_min": 0.8
+    "volume_min": 0.3
 }
 
     def populate_entry_trend(self, dataframe, metadata):

@@ -6,7 +6,7 @@ except ImportError:  # pragma: no cover - Freqtrade strategy loader path
 import pandas as pd
 
 
-class AIGeneratedLongTrendContinuation(SampleStrategy):
+class AIGeneratedBearishBreakoutBounceScalp(SampleStrategy):
     """
     AI strategy-lab generated candidate.
 
@@ -15,30 +15,30 @@ class AIGeneratedLongTrendContinuation(SampleStrategy):
     """
 
     can_short = True
-    minimal_roi = {"0": 0.026, "30": 0.012, "90": 0.0}
+    minimal_roi = {"0": 0.025, "30": 0.015, "90": 0.0}
     stoploss = -0.05
     trailing_stop = True
-    trailing_stop_positive = 0.008
-    trailing_stop_positive_offset = 0.016
+    trailing_stop_positive = 0.015
+    trailing_stop_positive_offset = 0.025
     trailing_only_offset_is_reached = False
     ai_candidate = {
-    "adx_min": 20.0,
-    "archetype": "trend",
-    "bb_tolerance": 0.002,
-    "class_name": "AIGeneratedLongTrendContinuation",
-    "generated_by": "heuristic",
-    "name": "long_trend_continuation",
-    "reason": "Heuristic trend continuation candidate from market breadth.",
-    "risk_profile": "balanced",
-    "roi_0": 0.026,
-    "roi_30": 0.012,
-    "rsi_long_max": 48,
-    "rsi_short_min": 52,
-    "side": "long",
+    "adx_min": 25.0,
+    "archetype": "breakout",
+    "bb_tolerance": 0.01,
+    "class_name": "AIGeneratedBearishBreakoutBounceScalp",
+    "generated_by": "llm",
+    "name": "bearish_breakout_bounce_scalp",
+    "reason": "With 14/20 pairs in downtrend and many showing bearish EMA structure (e.g., BTC, ETH, SOL, XRP, BCH, LINK, XLM, UNI), short breakout entries on 5m and 15m break of recent lows could capture quick downside momentum, especially on lower volume.",
+    "risk_profile": "aggressive",
+    "roi_0": 0.025,
+    "roi_30": 0.015,
+    "rsi_long_max": 45.0,
+    "rsi_short_min": 65.0,
+    "side": "short",
     "stoploss": -0.05,
-    "trailing_offset": 0.016,
-    "trailing_positive": 0.008,
-    "volume_min": 0.8
+    "trailing_offset": 0.025,
+    "trailing_positive": 0.015,
+    "volume_min": 1.0
 }
 
     def populate_entry_trend(self, dataframe, metadata):
