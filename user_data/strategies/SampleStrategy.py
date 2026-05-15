@@ -988,36 +988,97 @@ class SampleStrategy(IStrategy):
             return
         self._signal_email_cache.add(cache_key)
 
+        signal_plan = self._hotcoin_signal_plan(metadata["pair"], side, last, candle_time)
         subject = f"[Freqtrade] {metadata['pair']} {side.upper()} {action}"
-        body = "\n".join(
-            [
-                f"pair: {metadata['pair']}",
-                f"action: {action}",
-                f"side: {side}",
-                f"time: {candle_time}",
-                f"close: {float(last['close']):.8f}",
-                f"rsi: {float(last.get('rsi', 0.0)):.2f}",
-                f"adx: {float(last.get('adx', 0.0)):.2f}",
-                f"atr_pct: {float(last.get('atr_pct', 0.0)):.4f}",
-                f"volatility_ratio: {float(last.get('volatility_ratio', 1.0)):.2f}",
-                f"volume_ratio: {float(last.get('volume_ratio', 0.0)):.2f}",
-                f"regime_high_vol: {bool(last.get('regime_high_vol', False))}",
-                f"regime_balanced: {bool(last.get('regime_balanced', False))}",
-                f"regime_low_vol: {bool(last.get('regime_low_vol', False))}",
-                f"trend_up_1h: {bool(last.get('trend_up_1h', False))}",
-                f"trend_down_1h: {bool(last.get('trend_down_1h', False))}",
-                f"trend_up_15m: {bool(last.get('trend_up_15m', False))}",
-                f"trend_down_15m: {bool(last.get('trend_down_15m', False))}",
-            ]
-        )
+        body_lines = [
+            f"pair: {metadata['pair']}",
+            f"action: {action}",
+            f"side: {side}",
+            f"time: {candle_time}",
+            f"close: {float(last['close']):.8f}",
+            f"rsi: {float(last.get('rsi', 0.0)):.2f}",
+            f"adx: {float(last.get('adx', 0.0)):.2f}",
+            f"atr_pct: {float(last.get('atr_pct', 0.0)):.4f}",
+            f"volatility_ratio: {float(last.get('volatility_ratio', 1.0)):.2f}",
+            f"volume_ratio: {float(last.get('volume_ratio', 0.0)):.2f}",
+            f"regime_high_vol: {bool(last.get('regime_high_vol', False))}",
+            f"regime_balanced: {bool(last.get('regime_balanced', False))}",
+            f"regime_low_vol: {bool(last.get('regime_low_vol', False))}",
+            f"trend_up_1h: {bool(last.get('trend_up_1h', False))}",
+            f"trend_down_1h: {bool(last.get('trend_down_1h', False))}",
+            f"trend_up_15m: {bool(last.get('trend_up_15m', False))}",
+            f"trend_down_15m: {bool(last.get('trend_down_15m', False))}",
+        ]
+        if signal_plan is not None:
+            body_lines.extend(
+                [
+                    f"entry_price: {signal_plan['price']:.8f}",
+                    f"stop_loss: {signal_plan['stop_loss']:.8f}",
+                    f"take_profit: {signal_plan['take_profit']:.8f}",
+                    f"signal_id: {signal_plan['signal_id']}",
+                    f"hotcoin_execute: {signal_plan['execute']}",
+                    f"hotcoin_order_type: {signal_plan['order_type']}",
+                    f"hotcoin_amount: {signal_plan['amount']:g}",
+                ]
+            )
+        body = "\n".join(body_lines)
         self._send_email_async(subject, body)
         if action == "entry":
             self._dispatch_hotcoin_signal(metadata["pair"], side, last, candle_time)
 
+    def _hotcoin_signal_plan(
+        self, pair: str, side: str, last: pd.Series, candle_time: str
+    ) -> dict[str, object] | None:
+        bridge_settings = self._load_trade_execution_settings()
+        close = float(last["close"])
+        atr = float(last.get("atr", close * 0.02) or close * 0.02)
+        stop_mult = float(
+            bridge_settings.get(
+                "hotcoin_atr_stop_mult",
+                os.getenv("HOTCOIN_ATR_STOP_MULT", str(self.atr_stop_mult.value)),
+            )
+        )
+        reward_mult = float(
+            bridge_settings.get("hotcoin_reward_risk_mult", os.getenv("HOTCOIN_REWARD_RISK_MULT", "1.6"))
+        )
+        amount_raw = bridge_settings.get("hotcoin_order_amount", os.getenv("HOTCOIN_ORDER_AMOUNT", "0"))
+        try:
+            amount = float(amount_raw)
+        except ValueError:
+            amount = 0.0
+        execute_raw = bridge_settings.get(
+            "hotcoin_signal_execute",
+            os.getenv("HOTCOIN_SIGNAL_EXECUTE", "false"),
+        )
+        execute = str(execute_raw).lower() in {"1", "true", "yes", "on"}
+        order_type = bridge_settings.get("hotcoin_order_type", os.getenv("HOTCOIN_ORDER_TYPE", "market"))
+
+        stop_distance = atr * stop_mult
+        if side == "long":
+            stop_loss = close - stop_distance
+            take_profit = close + (stop_distance * reward_mult)
+        else:
+            stop_loss = close + stop_distance
+            take_profit = close - (stop_distance * reward_mult)
+
+        return {
+            "bridge_settings": bridge_settings,
+            "price": close,
+            "amount": amount,
+            "execute": execute,
+            "order_type": order_type,
+            "signal_id": self._hotcoin_signal_id(pair, side, candle_time, close),
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+        }
+
     def _dispatch_hotcoin_signal(
         self, pair: str, side: str, last: pd.Series, candle_time: str
     ) -> None:
-        bridge_settings = self._load_trade_execution_settings()
+        signal_plan = self._hotcoin_signal_plan(pair, side, last, candle_time)
+        if signal_plan is None:
+            return
+        bridge_settings = signal_plan["bridge_settings"]
         enabled_raw = bridge_settings.get(
             "hotcoin_signal_bridge_enabled",
             os.getenv("HOTCOIN_SIGNAL_BRIDGE_ENABLED", "false"),
@@ -1031,12 +1092,8 @@ class SampleStrategy(IStrategy):
         if not enabled:
             return
 
-        amount_raw = bridge_settings.get("hotcoin_order_amount", os.getenv("HOTCOIN_ORDER_AMOUNT", "0"))
-        try:
-            amount = float(amount_raw)
-        except ValueError:
-            logger.warning("Invalid HOTCOIN_ORDER_AMOUNT=%s; Hotcoin signal skipped.", amount_raw)
-            return
+        amount = float(signal_plan["amount"])
+        amount_raw = str(amount)
         if amount <= 0:
             logger.warning("HOTCOIN_ORDER_AMOUNT must be > 0; Hotcoin signal skipped.")
             return
@@ -1047,21 +1104,12 @@ class SampleStrategy(IStrategy):
         )
         symbol = pair.split(":")[0]
         order_side = "open_long" if side == "long" else "open_short"
-        order_type = bridge_settings.get("hotcoin_order_type", os.getenv("HOTCOIN_ORDER_TYPE", "market"))
+        order_type = str(signal_plan["order_type"])
         mode = bridge_settings.get("hotcoin_mode", os.getenv("HOTCOIN_MODE", "web"))
-        execute_raw = bridge_settings.get(
-            "hotcoin_signal_execute",
-            os.getenv("HOTCOIN_SIGNAL_EXECUTE", "false"),
-        )
-        execute = str(execute_raw).lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        execute = bool(signal_plan["execute"])
 
-        close = float(last["close"])
-        signal_id = self._hotcoin_signal_id(pair, side, candle_time, close)
+        close = float(signal_plan["price"])
+        signal_id = str(signal_plan["signal_id"])
         duplicate_reason = self._hotcoin_duplicate_reason(bridge_settings, signal_id, pair, side)
         if duplicate_reason:
             self._append_execution_ledger(
@@ -1079,20 +1127,8 @@ class SampleStrategy(IStrategy):
             )
             logger.info("Hotcoin signal skipped for %s %s %s: %s", pair, side, candle_time, duplicate_reason)
             return
-        atr = float(last.get("atr", close * 0.02) or close * 0.02)
-        stop_mult = float(
-            bridge_settings.get("hotcoin_atr_stop_mult", os.getenv("HOTCOIN_ATR_STOP_MULT", str(self.atr_stop_mult.value)))
-        )
-        reward_mult = float(
-            bridge_settings.get("hotcoin_reward_risk_mult", os.getenv("HOTCOIN_REWARD_RISK_MULT", "1.6"))
-        )
-        stop_distance = atr * stop_mult
-        if side == "long":
-            stop_loss = close - stop_distance
-            take_profit = close + (stop_distance * reward_mult)
-        else:
-            stop_loss = close + stop_distance
-            take_profit = close - (stop_distance * reward_mult)
+        stop_loss = float(signal_plan["stop_loss"])
+        take_profit = float(signal_plan["take_profit"])
 
         command = [
             "python",

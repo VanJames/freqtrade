@@ -669,6 +669,59 @@ def test_emit_signal_email_ignores_non_entry(monkeypatch):
     assert calls == []
 
 
+def test_emit_signal_email_includes_trade_plan(monkeypatch, tmp_path):
+    settings_path = tmp_path / "trade_execution.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hotcoin_order_amount": 12.5,
+                "hotcoin_order_type": "market",
+                "hotcoin_signal_execute": True,
+                "hotcoin_atr_stop_mult": 2,
+                "hotcoin_reward_risk_mult": 1.5,
+            }
+        )
+    )
+    monkeypatch.setenv("TRADE_EXECUTION_SETTINGS_PATH", str(settings_path))
+    strategy = _strategy()
+    calls = []
+    monkeypatch.setattr(strategy, "_send_email_async", lambda *args: calls.append(args))
+    monkeypatch.setattr(strategy, "_dispatch_hotcoin_signal", lambda *args: None)
+    dataframe = pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp("2026-05-12T08:00:00Z"),
+                "enter_short": 1,
+                "close": 100.0,
+                "atr": 2.0,
+                "rsi": 40.0,
+                "adx": 20.0,
+                "atr_pct": 0.02,
+                "volatility_ratio": 1.1,
+                "volume_ratio": 2.0,
+                "regime_high_vol": False,
+                "regime_balanced": True,
+                "regime_low_vol": False,
+                "trend_up_1h": False,
+                "trend_down_1h": True,
+                "trend_up_15m": False,
+                "trend_down_15m": True,
+            }
+        ]
+    )
+
+    strategy._emit_signal_email(dataframe, {"pair": "BTC/USDT:USDT"}, "entry", "short")
+
+    assert len(calls) == 1
+    _subject, body = calls[0]
+    assert "entry_price: 100.00000000" in body
+    assert "stop_loss: 104.00000000" in body
+    assert "take_profit: 94.00000000" in body
+    assert "hotcoin_execute: True" in body
+    assert "hotcoin_amount: 12.5" in body
+    assert "signal_id:" in body
+
+
 def test_recent_signal_keeps_trigger_alive_for_window():
     series = pd.Series([False, True, False, False, False])
 
