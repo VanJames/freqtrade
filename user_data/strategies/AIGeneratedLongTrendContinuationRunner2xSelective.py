@@ -52,7 +52,12 @@ class AIGeneratedLongTrendContinuationRunner2xSelective(
         return cleaned or set(self.fallback_pairs)
 
     def populate_entry_trend(self, dataframe, metadata):
-        dataframe = super().populate_entry_trend(dataframe, metadata)
+        original_candidate = self.ai_candidate
+        self.ai_candidate = dict(type(self).ai_candidate)
+        try:
+            dataframe = super().populate_entry_trend(dataframe, metadata)
+        finally:
+            self.ai_candidate = original_candidate
         if metadata.get("pair") not in self._load_allowed_pairs():
             dataframe["enter_long"] = 0
             dataframe["enter_short"] = 0
