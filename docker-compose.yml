@@ -126,9 +126,9 @@ services:
       - --min-side-trades
       - "1"
       - --registry-pool-positive-window-days
-      - "30"
+      - "7"
       - --registry-target-positive-window-days
-      - "30"
+      - "7"
       - --min-registry-window-profit-pct
       - "0.0"
       - --trade-db
@@ -199,8 +199,8 @@ services:
       - --formal-pool-output
       - /workspace/user_data/autoopt/formal_strategy_pool.json
       - --formal-pool-required-window-days
+      - "7"
       - "30"
-      - "60"
       - --formal-pool-min-profit-pct
       - "0.0"
       - --formal-pool-min-trades
@@ -377,9 +377,9 @@ services:
       - --inactive-min-score
       - "-1.25"
       - --require-positive-window-days
-      - "30"
+      - "7"
       - --pool-positive-window-days
-      - "30"
+      - "7"
       - --min-required-window-profit-pct
       - "0.0"
       - --cooldown-minutes
