@@ -177,3 +177,23 @@ def test_check_signal_path_sync_warns_on_mismatch(monkeypatch, tmp_path):
 
     assert result.status == "warn"
     assert "line count mismatch" in " ".join(result.details["warnings"])
+
+
+def test_enrich_runtime_probe_analysis_falls_back_to_signal_blockers():
+    runtime_probe_analysis = {
+        "count": 100,
+        "enter_long_true": 0,
+        "enter_short_true": 0,
+        "top_long_blockers": [],
+        "top_short_blockers": [],
+    }
+    signal_analysis = {
+        "top_long_blockers": [("ema20<=ema50", 12)],
+        "top_short_blockers": [("side_disabled", 8)],
+    }
+
+    result = health_check.enrich_runtime_probe_analysis(runtime_probe_analysis, signal_analysis)
+
+    assert result["top_long_blockers"] == [("ema20<=ema50", 12)]
+    assert result["top_short_blockers"] == [("side_disabled", 8)]
+    assert result["blocker_source"] == "signal_diagnostics_fallback"

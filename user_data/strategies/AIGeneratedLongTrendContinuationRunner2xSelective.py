@@ -13,17 +13,28 @@ class AIGeneratedLongTrendContinuationRunner2xSelective(
     AIGeneratedLongTrendContinuationRunner2x
 ):
     """
-    Restrict the runner to pairs with positive recent full-period attribution.
+    Restrict the runner to a tighter pair subset and bias execution short-first.
 
-    This is a pragmatic bridge before implementing a fully dynamic pair
-    selection pipeline.  It keeps the proven entry/exit logic and removes the
-    pairs that dragged the latest 30-day portfolio negative.
+    The live diagnostics show the broad market is currently failing the long
+    trend gate while the advisor repeatedly leans short.  Rather than waiting
+    for the formal pool to recover, this wrapper narrows the live universe and
+    flips the inherited AI candidate toward bearish breakout continuation.
     """
 
+    ai_candidate = {
+        **AIGeneratedLongTrendContinuationRunner2x.ai_candidate,
+        "name": "short_breakout_selective",
+        "reason": "Live diagnostics show weak long trend structure and repeated short-side pressure.",
+        "side": "short",
+        "archetype": "breakout",
+        "adx_min": 14.0,
+        "volume_min": 0.35,
+        "rsi_short_min": 40.0,
+    }
     fallback_pairs = {
         "BTC/USDT:USDT",
+        "ETH/USDT:USDT",
         "SOL/USDT:USDT",
-        "XLM/USDT:USDT",
         "LINK/USDT:USDT",
     }
     pair_selection_path = Path(__file__).resolve().parents[1] / "autoopt" / "pair_selection.json"

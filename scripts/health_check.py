@@ -520,6 +520,21 @@ def summarize_runtime_pressure(runtime_probe_analysis: dict[str, Any]) -> list[s
     return reasons[:6]
 
 
+def enrich_runtime_probe_analysis(
+    runtime_probe_analysis: dict[str, Any], signal_analysis: dict[str, Any]
+) -> dict[str, Any]:
+    enriched = dict(runtime_probe_analysis)
+    used_fallback = False
+    if not enriched.get("top_long_blockers"):
+        enriched["top_long_blockers"] = list(signal_analysis.get("top_long_blockers", []))
+        used_fallback = used_fallback or bool(enriched["top_long_blockers"])
+    if not enriched.get("top_short_blockers"):
+        enriched["top_short_blockers"] = list(signal_analysis.get("top_short_blockers", []))
+        used_fallback = used_fallback or bool(enriched["top_short_blockers"])
+    enriched["blocker_source"] = "signal_diagnostics_fallback" if used_fallback else "runtime_probe"
+    return enriched
+
+
 def check_container_strategy_code(freqtrade_container: str) -> CheckResult:
     checks = {
         "has_hold_policy": "grep -n 'direction_advisor_hold_policy' /freqtrade/user_data/strategies/SampleStrategy.py",
@@ -754,6 +769,7 @@ def build_results(args: argparse.Namespace) -> list[CheckResult]:
     signal_analysis = analyze_signal_diagnostics(signal_records)
     runtime_probe_records = read_jsonl_tail(runtime_probe_path, args.signal_limit)
     runtime_probe_analysis = analyze_strategy_runtime_probe(runtime_probe_records)
+    runtime_probe_display_analysis = enrich_runtime_probe_analysis(runtime_probe_analysis, signal_analysis)
 
     results = [
         config_result,
@@ -789,13 +805,16 @@ def build_results(args: argparse.Namespace) -> list[CheckResult]:
             CheckResult(
                 "runtime_probe_pressure",
                 "ok"
-                if runtime_probe_analysis.get("enter_long_true", 0) or runtime_probe_analysis.get("enter_short_true", 0)
+                if runtime_probe_display_analysis.get("enter_long_true", 0)
+                or runtime_probe_display_analysis.get("enter_short_true", 0)
                 else "warn",
-                "runtime probe summarized" if runtime_probe_analysis.get("count", 0) else "runtime probe missing",
+                "runtime probe summarized"
+                if runtime_probe_display_analysis.get("count", 0)
+                else "runtime probe missing",
                 {
                     "path": str(runtime_probe_path),
-                    "pressure": summarize_runtime_pressure(runtime_probe_analysis),
-                    **runtime_probe_analysis,
+                    "pressure": summarize_runtime_pressure(runtime_probe_display_analysis),
+                    **runtime_probe_display_analysis,
                 },
             )
         )
