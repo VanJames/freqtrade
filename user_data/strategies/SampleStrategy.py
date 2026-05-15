@@ -986,45 +986,51 @@ class SampleStrategy(IStrategy):
         cache_key = f"{metadata['pair']}:{action}:{side}:{candle_time}"
         if cache_key in self._signal_email_cache:
             return
-        self._signal_email_cache.add(cache_key)
-
-        signal_plan = self._hotcoin_signal_plan(metadata["pair"], side, last, candle_time)
-        subject = f"[Freqtrade] {metadata['pair']} {side.upper()} {action}"
-        body_lines = [
-            f"pair: {metadata['pair']}",
-            f"action: {action}",
-            f"side: {side}",
-            f"time: {candle_time}",
-            f"close: {float(last['close']):.8f}",
-            f"rsi: {float(last.get('rsi', 0.0)):.2f}",
-            f"adx: {float(last.get('adx', 0.0)):.2f}",
-            f"atr_pct: {float(last.get('atr_pct', 0.0)):.4f}",
-            f"volatility_ratio: {float(last.get('volatility_ratio', 1.0)):.2f}",
-            f"volume_ratio: {float(last.get('volume_ratio', 0.0)):.2f}",
-            f"regime_high_vol: {bool(last.get('regime_high_vol', False))}",
-            f"regime_balanced: {bool(last.get('regime_balanced', False))}",
-            f"regime_low_vol: {bool(last.get('regime_low_vol', False))}",
-            f"trend_up_1h: {bool(last.get('trend_up_1h', False))}",
-            f"trend_down_1h: {bool(last.get('trend_down_1h', False))}",
-            f"trend_up_15m: {bool(last.get('trend_up_15m', False))}",
-            f"trend_down_15m: {bool(last.get('trend_down_15m', False))}",
-        ]
-        if signal_plan is not None:
-            body_lines.extend(
-                [
-                    f"entry_price: {signal_plan['price']:.8f}",
-                    f"stop_loss: {signal_plan['stop_loss']:.8f}",
-                    f"take_profit: {signal_plan['take_profit']:.8f}",
-                    f"signal_id: {signal_plan['signal_id']}",
-                    f"hotcoin_execute: {signal_plan['execute']}",
-                    f"hotcoin_order_type: {signal_plan['order_type']}",
-                    f"hotcoin_amount: {signal_plan['amount']:g}",
-                ]
-            )
-        body = "\n".join(body_lines)
-        self._send_email_async(subject, body)
         if action == "entry":
-            self._dispatch_hotcoin_signal(metadata["pair"], side, last, candle_time)
+            self._dispatch_hotcoin_signal(metadata["pair"], side, last, candle_time, cache_key=cache_key)
+
+    def _send_hotcoin_entry_email(
+        self,
+        pair: str,
+        side: str,
+        last: pd.Series,
+        candle_time: str,
+        signal_plan: dict[str, object],
+        cache_key: str,
+    ) -> None:
+        if cache_key in self._signal_email_cache:
+            return
+        self._signal_email_cache.add(cache_key)
+        subject = f"[Freqtrade] {pair} {side.upper()} entry"
+        body = "\n".join(
+            [
+                f"pair: {pair}",
+                "action: entry",
+                f"side: {side}",
+                f"time: {candle_time}",
+                f"close: {float(last['close']):.8f}",
+                f"rsi: {float(last.get('rsi', 0.0)):.2f}",
+                f"adx: {float(last.get('adx', 0.0)):.2f}",
+                f"atr_pct: {float(last.get('atr_pct', 0.0)):.4f}",
+                f"volatility_ratio: {float(last.get('volatility_ratio', 1.0)):.2f}",
+                f"volume_ratio: {float(last.get('volume_ratio', 0.0)):.2f}",
+                f"regime_high_vol: {bool(last.get('regime_high_vol', False))}",
+                f"regime_balanced: {bool(last.get('regime_balanced', False))}",
+                f"regime_low_vol: {bool(last.get('regime_low_vol', False))}",
+                f"trend_up_1h: {bool(last.get('trend_up_1h', False))}",
+                f"trend_down_1h: {bool(last.get('trend_down_1h', False))}",
+                f"trend_up_15m: {bool(last.get('trend_up_15m', False))}",
+                f"trend_down_15m: {bool(last.get('trend_down_15m', False))}",
+                f"entry_price: {float(signal_plan['price']):.8f}",
+                f"stop_loss: {float(signal_plan['stop_loss']):.8f}",
+                f"take_profit: {float(signal_plan['take_profit']):.8f}",
+                f"signal_id: {signal_plan['signal_id']}",
+                f"hotcoin_execute: {bool(signal_plan['execute'])}",
+                f"hotcoin_order_type: {signal_plan['order_type']}",
+                f"hotcoin_amount: {float(signal_plan['amount']):g}",
+            ]
+        )
+        self._send_email_async(subject, body)
 
     def _hotcoin_signal_plan(
         self, pair: str, side: str, last: pd.Series, candle_time: str
@@ -1073,7 +1079,7 @@ class SampleStrategy(IStrategy):
         }
 
     def _dispatch_hotcoin_signal(
-        self, pair: str, side: str, last: pd.Series, candle_time: str
+        self, pair: str, side: str, last: pd.Series, candle_time: str, *, cache_key: str | None = None
     ) -> None:
         signal_plan = self._hotcoin_signal_plan(pair, side, last, candle_time)
         if signal_plan is None:
@@ -1173,6 +1179,8 @@ class SampleStrategy(IStrategy):
                 "execute": execute,
             },
         )
+        if cache_key:
+            self._send_hotcoin_entry_email(pair, side, last, candle_time, signal_plan, cache_key)
         threading.Thread(
             target=self._run_hotcoin_bridge,
             args=(command, pair, side, candle_time, execute, bridge_settings, signal_id),
