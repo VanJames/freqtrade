@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from logging import getLogger
+from typing import Any
+
+import orjson
+from sqlalchemy import Boolean, Column, DateTime, MetaData, Numeric, String, Table, Text, desc, insert, select, update
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from trading_system.models import OrderResult, Regime
+
+logger = getLogger(__name__)
+
+metadata = MetaData()
+
+order_tracks = Table(
+    "order_tracks",
+    metadata,
+    Column("order_id", String(64), primary_key=True),
+    Column("symbol", String(32), nullable=False),
+    Column("regime_mode", String(20), nullable=False),
+    Column("initial_qty", Numeric(18, 8), nullable=False),
+    Column("maker_filled", Numeric(18, 8), nullable=False, default=0),
+    Column("taker_twap_filled", Numeric(18, 8), nullable=False, default=0),
+    Column("fee_paid", Numeric(18, 8), nullable=False, default=0),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+account_snapshots = Table(
+    "account_snapshots",
+    metadata,
+    Column("snapshot_time", DateTime(timezone=True), primary_key=True),
+    Column("total_equity", Numeric(18, 4), nullable=False),
+    Column("active_hedging", Boolean, nullable=False, default=False),
+    Column("serialized_memory", Text, nullable=False),
+)
+
+
+class StateStore:
+    def __init__(self, dsn: str) -> None:
+        self.engine: AsyncEngine = create_async_engine(dsn, pool_pre_ping=True)
+
+    async def initialize(self) -> None:
+        async with self.engine.begin() as conn:
+            await conn.run_sync(metadata.create_all)
+
+    async def record_order(self, order: OrderResult, regime: Regime) -> None:
+        async with self.engine.begin() as conn:
+            stmt = insert(order_tracks).values(
+                order_id=order.id,
+                symbol=order.symbol,
+                regime_mode=regime.value,
+                initial_qty=order.amount,
+                maker_filled=order.filled,
+                taker_twap_filled=0,
+                fee_paid=order.fee,
+                created_at=datetime.now(timezone.utc),
+            )
+            await conn.execute(stmt)
+
+    async def record_twap_fill(self, order_id: str, filled: float, fee: float) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                update(order_tracks)
+                .where(order_tracks.c.order_id == order_id)
+                .values(
+                    taker_twap_filled=order_tracks.c.taker_twap_filled + filled,
+                    fee_paid=order_tracks.c.fee_paid + fee,
+                )
+            )
+
+    async def save_snapshot(self, equity: float, active_hedging: bool, memory: dict[str, Any]) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                insert(account_snapshots).values(
+                    snapshot_time=datetime.now(timezone.utc),
+                    total_equity=equity,
+                    active_hedging=active_hedging,
+                    serialized_memory=orjson.dumps(memory).decode("utf-8"),
+                )
+            )
+
+    async def load_latest_snapshot(self) -> dict[str, Any] | None:
+        async with self.engine.begin() as conn:
+            result = await conn.execute(
+                select(account_snapshots.c.serialized_memory)
+                .order_by(desc(account_snapshots.c.snapshot_time))
+                .limit(1)
+            )
+            row = result.first()
+        if row is None:
+            return None
+        return orjson.loads(row.serialized_memory)
+
+    async def close(self) -> None:
+        await self.engine.dispose()

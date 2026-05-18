@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "okx-quant-system"
+version = "0.1.0"
+description = "Async OKX perpetual futures quantitative trading system with dry-run safety defaults."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "ccxt>=4.4.0",
+  "pandas>=2.0.0",
+  "numpy>=1.24.0",
+  "pydantic>=2.5.0",
+  "pydantic-settings>=2.1.0",
+  "SQLAlchemy>=2.0.0",
+  "asyncpg>=0.29.0",
+  "redis>=5.0.0",
+  "orjson>=3.9.0",
+  "typer>=0.12.0",
+  "rich>=13.7.0",
+  "openai>=1.90.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.0",
+  "ruff>=0.5.0",
+]
+
+[project.scripts]
+okx-quant = "trading_system.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
