@@ -5,18 +5,20 @@ import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from html import escape
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from trading_system.config import Settings
 from trading_system.runtime_config import RUNTIME_FIELDS, runtime_defaults, validate_runtime_config
 
 
 app = FastAPI(title="OKX Quant Dashboard")
+FAVICON_PATH = Path(__file__).with_name("assets") / "favicon.ico"
 
 
 def dashboard_tz() -> ZoneInfo:
@@ -156,6 +158,11 @@ async def index() -> str:
     return render_page(data)
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> FileResponse:
+    return FileResponse(FAVICON_PATH, media_type="image/x-icon")
+
+
 def render_page(data: dict[str, Any]) -> str:
     snapshot = data["latest_snapshot"] or {}
     memory = snapshot.get("serialized_memory") or {}
@@ -175,6 +182,7 @@ def render_page(data: dict[str, Any]) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="10">
+  <link rel="icon" href="/favicon.ico" sizes="32x32">
   <title>OKX Quant Dashboard</title>
   <style>
     :root {{ color-scheme: dark; --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e8eaed; --muted:#9aa4b2; --good:#39d98a; --warn:#ffcc66; --bad:#ff6b6b; }}
