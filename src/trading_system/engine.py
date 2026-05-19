@@ -48,6 +48,14 @@ class OKXQuantEngine:
             shock_reward_risk=settings.shock_reward_risk,
             trend_reward_risk=settings.trend_reward_risk,
             min_take_profit_pct=settings.min_take_profit_pct,
+            trailing_gap_pct=settings.trailing_gap_pct,
+            min_trailing_activate_r=settings.min_trailing_activate_r,
+            enable_trend_short=settings.enable_trend_short,
+            trend_long_risk_multiplier=settings.trend_long_risk_multiplier,
+            trend_short_risk_multiplier=settings.trend_short_risk_multiplier,
+            defensive_risk_multiplier=settings.defensive_risk_multiplier,
+            shock_trend_risk_multiplier=settings.shock_trend_risk_multiplier,
+            shock_trend_down_risk_multiplier=settings.shock_trend_down_risk_multiplier,
         )
         self.risk = RiskManager(settings)
         self.execution = ExecutionEngine(

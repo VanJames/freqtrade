@@ -65,6 +65,12 @@ class MarketFeatures:
     range_low_4h: float = 0.0
     range_amplitude_4h: float = 0.0
     close_1h: float = 0.0
+    current_4h_low: float = 0.0
+    current_4h_high: float = 0.0
+    previous_1h_low: float = 0.0
+    previous_1h_high: float = 0.0
+    last_4h_close: float = 0.0
+    prev_4h_close: float = 0.0
     ret_24h: float = 0.0
     ret_72h: float = 0.0
     range_24h: float = 0.0
@@ -131,6 +137,10 @@ class TrailingState:
     position_side: PositionSide
     entry_price: float
     atr: float
+    stop_loss: float = 0.0
+    take_profit: float | None = None
+    trailing_gap_pct: float | None = None
+    min_trailing_activate_r: float = 1.0
     highest_price: float = 0.0
     lowest_price: float = 0.0
     active: bool = False

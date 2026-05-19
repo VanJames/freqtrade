@@ -10,11 +10,13 @@ from typing import Any
 import ccxt
 import pandas as pd
 
-from trading_system.indicators import atr, directional_indicators, ema, macd, ohlcv_frame, rsi
+from trading_system.indicators import atr, ema, macd, ohlcv_frame, rsi
 from trading_system.llm_regime import LLMRegimeReviewer, RegimeReviewInput
-from trading_system.models import PositionSide, Regime
+from trading_system.models import PositionSide, Regime, Side, SignalType, TradeSignal
 from trading_system.opportunity import opportunity_metadata, score_opportunity, sol_structure_stop, sol_trade_allowed
-from trading_system.position_sizing import adjusted_risk_multiplier
+from trading_system.regime import classify_user_4h_market, market_features_to_backtest_dict
+from trading_system.risk import RiskManager
+from trading_system.strategy import StrategyEngine
 from trading_system.volatility import build_volatility_policy, needs_llm_review
 
 
@@ -30,11 +32,17 @@ class BacktestConfig:
     warmup_days: int = 10
     initial_equity: float = 10_000.0
     risk_percent: float = 0.01
+    same_direction_risk_limit: float = 0.03
+    daily_drawdown_limit: float = 0.05
     shock_leverage_limit: float = 3.0
     trend_symbol_leverage_limit: float = 5.0
     max_signal_risk_multiplier: float = 1.5
     confirmation_position_sizing: bool = False
     confirmation_max_risk_multiplier: float = 3.0
+    funding_block_threshold: float = 0.001
+    backtest_funding_rate: float = 0.0
+    spike_amplitude_threshold: float = 1.0
+    spike_lock_seconds: int = 0
     fee_rate: float = 0.0002
     slippage_rate: float = 0.0001
     output_dir: Path = Path("reports")
@@ -47,7 +55,7 @@ class BacktestConfig:
     shock_short_zone_max: float = 0.80
     shock_long_rsi_5m_max: float = 48.0
     shock_short_rsi_5m_min: float = 52.0
-    classifier_mode: str = "dev"
+    classifier_mode: str = "user_4h"
     min_stop_loss_pct: float = 0.002
     high_vol_min_stop_loss_pct: float = 0.004
     extreme_vol_min_stop_loss_pct: float = 0.005
@@ -133,6 +141,25 @@ class BacktestResult:
         losses = [trade.pnl for trade in self.trades if trade.pnl <= 0]
         return sum(losses) / len(losses) if losses else 0.0
 
+    @property
+    def duration_hours(self) -> float:
+        return max((self.ended_at - self.started_at).total_seconds() / 3600, 0.0)
+
+    @property
+    def avg_hours_per_trade(self) -> float:
+        return self.duration_hours / len(self.trades) if self.trades else 0.0
+
+    @property
+    def avg_entry_gap_hours(self) -> float:
+        if len(self.trades) < 2:
+            return 0.0
+        ordered = sorted(self.trades, key=lambda trade: trade.entry_time)
+        gaps = [
+            (ordered[index].entry_time - ordered[index - 1].entry_time).total_seconds() / 3600
+            for index in range(1, len(ordered))
+        ]
+        return sum(gaps) / len(gaps)
+
 
 @dataclass(slots=True)
 class OptimizationCandidate:
@@ -161,6 +188,23 @@ class OKXBacktester:
             base_url=config.llm_regime_base_url or None,
             api_key_env=config.llm_regime_api_key_env or None,
             enabled=config.llm_regime_review_enabled,
+        )
+        self.strategy = StrategyEngine(
+            min_stop_loss_pct=config.min_stop_loss_pct,
+            high_vol_min_stop_loss_pct=config.high_vol_min_stop_loss_pct,
+            extreme_vol_min_stop_loss_pct=config.extreme_vol_min_stop_loss_pct,
+            max_stop_loss_pct=config.max_stop_loss_pct,
+            shock_reward_risk=config.shock_reward_risk,
+            trend_reward_risk=config.trend_reward_risk,
+            min_take_profit_pct=config.min_take_profit_pct,
+            trailing_gap_pct=config.trailing_gap_pct,
+            min_trailing_activate_r=config.min_trailing_activate_r,
+            enable_trend_short=config.enable_trend_short,
+            trend_long_risk_multiplier=config.trend_long_risk_multiplier,
+            trend_short_risk_multiplier=config.trend_short_risk_multiplier,
+            defensive_risk_multiplier=config.defensive_risk_multiplier,
+            shock_trend_risk_multiplier=config.shock_trend_risk_multiplier,
+            shock_trend_down_risk_multiplier=config.shock_trend_down_risk_multiplier,
         )
         self.llm_review_count = 0
 
@@ -331,6 +375,8 @@ class OKXBacktester:
         regime_counts: dict[str, int] = {}
         open_position: dict[str, Any] | None = None
         last_regime_check: pd.Timestamp | None = None
+        risk = RiskManager(self.config)
+        risk.update_equity(equity)
 
         for idx in range(240, len(df5)):
             now = df5.index[idx]
@@ -344,10 +390,8 @@ class OKXBacktester:
             if len(history_1h) < 80 or len(history_4h) < 50:
                 continue
 
-            if self.config.classifier_mode == "user_4h":
-                regime, features = classify_user_4h_rules(history_1h, history_4h, symbol)
-            else:
-                regime, features = classify_kline_only(history_1h, history_4h)
+            regime, market_features = classify_user_4h_market(history_1h, history_4h, symbol)
+            features = market_features_to_backtest_dict(market_features, history_1h, history_4h)
             if last_regime_check is None or now - last_regime_check >= pd.Timedelta(hours=1):
                 regime_counts[regime.value] = regime_counts.get(regime.value, 0) + 1
                 hit = evaluate_regime_hit(symbol, now, regime, features, df5, idx)
@@ -365,38 +409,28 @@ class OKXBacktester:
                     open_position = None
                 continue
 
-            if self.config.classifier_mode == "user_4h":
-                signal = build_user_rule_signal(symbol, regime, features, history_5m, self.config)
-            else:
-                signal = build_signal(symbol, regime, features, history_5m, self.config)
-            if signal is None:
-                continue
             review = self.review_regime_sync(symbol, regime, features)
             if not review.allow_trade or review.proposed_regime != regime:
                 continue
 
-            stop_distance = abs(signal["entry"] - signal["stop"])
-            if stop_distance <= 0:
-                continue
-            risk_multiplier = adjusted_risk_multiplier(signal, self.config)
-            signal["risk_multiplier"] = risk_multiplier
-            risk_percent = self.config.risk_percent * risk_multiplier
-            qty = (equity * risk_percent) / stop_distance
-            leverage_limit = (
-                self.config.shock_leverage_limit
-                if regime == Regime.SHOCK
-                else self.config.trend_symbol_leverage_limit
+            strategy_signals = self.strategy.build_signals(
+                symbol=symbol,
+                regime=regime,
+                previous_regime=regime,
+                features=market_features,
+                candles_5m=history_5m.iloc[-200:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                positions=[],
             )
-            qty = min(qty, (equity * leverage_limit) / signal["entry"])
-            open_position = {
-                **signal,
-                "qty": qty,
-                "entry_time": now,
-                "highest": signal["entry"],
-                "lowest": signal["entry"],
-                "atr": features["atr_1h"],
-                "min_trailing_activate_r": self.config.min_trailing_activate_r,
-            }
+            if not strategy_signals:
+                continue
+            trade_signal = strategy_signals[0]
+            decision = risk.assess(trade_signal, equity, self.config.backtest_funding_rate)
+            if not decision.allowed:
+                continue
+            risk_multiplier = risk.signal_risk_multiplier(trade_signal)
+            qty = decision.size
+            risk.reserve_risk(trade_signal.position_side, risk_multiplier)
+            open_position = trade_signal_to_position(trade_signal, qty, now, features["atr_1h"], risk_multiplier)
 
         if open_position:
             now = df5.index[-1]
@@ -421,7 +455,7 @@ class OKXBacktester:
 
     def write_report(self, result: BacktestResult) -> Path:
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
-        report_path = self.config.output_dir / f"okx_backtest_{result.ended_at:%Y%m%d_%H%M%S}.md"
+        report_path = self.config.output_dir / f"okx_backtest_{datetime.now(timezone.utc):%Y%m%d_%H%M%S_%f}.md"
         by_symbol: dict[str, list[SimTrade]] = {}
         for trade in result.trades:
             by_symbol.setdefault(trade.symbol, []).append(trade)
@@ -434,6 +468,7 @@ class OKXBacktester:
             f"- 品种: `{', '.join(self.config.symbols)}`",
             f"- 杠杆限制: shock `{self.config.shock_leverage_limit:.1f}x`, trend `{self.config.trend_symbol_leverage_limit:.1f}x`, signal risk cap `{self.config.max_signal_risk_multiplier:.1f}x`",
             f"- 确认级别动态仓位: `{self.config.confirmation_position_sizing}`, max risk `{self.config.confirmation_max_risk_multiplier:.1f}x`",
+            f"- 风控约束: same direction `{self.config.same_direction_risk_limit:.2%}`, daily drawdown `{self.config.daily_drawdown_limit:.2%}`, funding block `{self.config.funding_block_threshold:.4%}`, backtest funding `{self.config.backtest_funding_rate:.4%}`",
             f"- 手续费假设: maker `{self.config.fee_rate:.4%}` 每边，滑点 `{self.config.slippage_rate:.4%}` 每边",
             f"- SHOCK 参数: stop `{self.config.shock_stop_atr} ATR`, take_profit `{self.config.shock_take_profit_atr} ATR`, "
             f"long zone `{self.config.shock_long_zone_min:.0%}-{self.config.shock_long_zone_max:.0%}`, "
@@ -447,6 +482,8 @@ class OKXBacktester:
             "",
             f"- K线数量: `{result.candles_by_symbol}`",
             f"- 下单/交易次数: `{len(result.trades)}`",
+            f"- 下单频率: 平均 `{result.avg_hours_per_trade:.2f}` 小时一单（按回测总时长 / 交易次数）",
+            f"- 相邻入场平均间隔: `{result.avg_entry_gap_hours:.2f}` 小时",
             f"- 盈利交易数: `{sum(1 for trade in result.trades if trade.pnl > 0)}`",
             f"- 亏损交易数: `{sum(1 for trade in result.trades if trade.pnl <= 0)}`",
             f"- 盈利比例/胜率: `{result.win_rate:.2%}`",
@@ -530,6 +567,8 @@ class OKXBacktester:
                     f"### {symbol}",
                     "",
                     f"- 交易次数: `{len(trades)}`",
+                    f"- 下单频率: 平均 `{symbol_avg_hours_per_trade(result, trades):.2f}` 小时一单",
+                    f"- 相邻入场平均间隔: `{avg_entry_gap_hours(trades):.2f}` 小时",
                     f"- 胜率: `{wins / len(trades):.2%}`" if trades else "- 胜率: `0.00%`",
                     f"- 净利润: `{pnl:.2f} USDT`",
                     "",
@@ -607,49 +646,75 @@ class OKXBacktester:
         )
 
 
-def classify_kline_only(history_1h: pd.DataFrame, history_4h: pd.DataFrame) -> tuple[Regime, dict[str, float]]:
-    adx_series, plus_di, minus_di = directional_indicators(history_1h.high, history_1h.low, history_1h.close)
-    atr_1h = atr(history_1h.high, history_1h.low, history_1h.close)
-    atr_4h = atr(history_4h.high, history_4h.low, history_4h.close)
-    ema20 = ema(history_1h.close, 20)
-    ema60 = ema(history_1h.close, 60)
-    rsi_1h = rsi(history_1h.close, 14)
-    range_4h = history_4h.iloc[-42:]
-    high_42 = float(range_4h.high.max())
-    low_42 = float(range_4h.low.min())
-    close = float(history_1h.close.iloc[-1])
-    amplitude = (high_42 - low_42) / low_42 if low_42 else 0.0
-    recent_3 = history_1h.iloc[-3:]
-    features = {
-        "adx": float(adx_series.iloc[-1]),
-        "plus_di": float(plus_di.iloc[-1]),
-        "minus_di": float(minus_di.iloc[-1]),
-        "atr_1h": float(atr_1h.iloc[-1]),
-        "atr_4h": float(atr_4h.iloc[-1]),
-        "ema20": float(ema20.iloc[-1]),
-        "ema60": float(ema60.iloc[-1]),
-        "rsi_1h": float(rsi_1h.iloc[-1]),
-        "high_42": high_42,
-        "low_42": low_42,
-        "close": close,
-        "amplitude": amplitude,
+def symbol_avg_hours_per_trade(result: BacktestResult, trades: list[SimTrade]) -> float:
+    return result.duration_hours / len(trades) if trades else 0.0
+
+
+def avg_entry_gap_hours(trades: list[SimTrade]) -> float:
+    if len(trades) < 2:
+        return 0.0
+    ordered = sorted(trades, key=lambda trade: trade.entry_time)
+    gaps = [
+        (ordered[index].entry_time - ordered[index - 1].entry_time).total_seconds() / 3600
+        for index in range(1, len(ordered))
+    ]
+    return sum(gaps) / len(gaps)
+
+
+def sim_signal_to_trade_signal(symbol: str, signal: dict[str, Any]) -> TradeSignal:
+    position_side = PositionSide(signal["side"])
+    side = Side.BUY if position_side == PositionSide.LONG else Side.SELL
+    metadata = {
+        key: value
+        for key, value in signal.items()
+        if key
+        not in {
+            "side",
+            "regime",
+            "entry",
+            "stop",
+            "take_profit",
+        }
     }
-    if close > high_42 and features["adx"] > 25 and features["plus_di"] > features["minus_di"]:
-        return Regime.TREND_LONG, features
-    if close < low_42 and features["adx"] > 25 and features["minus_di"] > features["plus_di"]:
-        return Regime.TREND_SHORT, features
-    if (
-        amplitude <= 0.08
-        and float(recent_3.high.max()) <= high_42
-        and float(recent_3.low.min()) >= low_42
-        and features["adx"] < 18
-    ):
-        return Regime.SHOCK, features
-    if amplitude <= 0.12 and features["adx"] < 25 and features["ema20"] > features["ema60"]:
-        return Regime.SHOCK_TREND_UP, features
-    if amplitude <= 0.12 and features["adx"] < 25 and features["ema20"] < features["ema60"]:
-        return Regime.SHOCK_TREND_DOWN, features
-    return Regime.UNKNOWN, features
+    return TradeSignal(
+        symbol=symbol,
+        signal_type=SignalType.ENTER_TREND,
+        side=side,
+        position_side=position_side,
+        regime=Regime(signal["regime"]),
+        price=float(signal["entry"]),
+        stop_loss=float(signal["stop"]),
+        take_profit=float(signal["take_profit"]) if signal.get("take_profit") is not None else None,
+        reason="backtest_user_4h_signal",
+        metadata=metadata,
+    )
+
+
+def trade_signal_to_position(
+    signal: TradeSignal,
+    qty: float,
+    entry_time: pd.Timestamp,
+    atr_1h: float,
+    risk_multiplier: float,
+) -> dict[str, Any]:
+    metadata = signal.metadata or {}
+    return {
+        "side": signal.position_side,
+        "regime": signal.regime,
+        "entry": float(signal.price),
+        "stop": float(signal.stop_loss),
+        "take_profit": float(signal.take_profit) if signal.take_profit is not None else None,
+        "qty": qty,
+        "entry_time": entry_time,
+        "highest": float(signal.price),
+        "lowest": float(signal.price),
+        "atr": atr_1h,
+        "trailing_gap_pct": float(metadata.get("trailing_gap_pct", 0.0) or 0.0),
+        "min_trailing_activate_r": float(metadata.get("min_trailing_activate_r", 1.0) or 1.0),
+        "opportunity_score": int(metadata.get("opportunity_score", 0) or 0),
+        "opportunity_grade": str(metadata.get("opportunity_grade", "")),
+        "risk_multiplier": risk_multiplier,
+    }
 
 
 def classify_user_4h_rules(

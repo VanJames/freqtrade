@@ -16,6 +16,14 @@ class StrategyEngine:
         shock_reward_risk: float = 1.15,
         trend_reward_risk: float = 1.8,
         min_take_profit_pct: float = 0.004,
+        trailing_gap_pct: float = 0.0025,
+        min_trailing_activate_r: float = 1.0,
+        enable_trend_short: bool = True,
+        trend_long_risk_multiplier: float = 0.35,
+        trend_short_risk_multiplier: float = 0.5,
+        defensive_risk_multiplier: float = 0.7,
+        shock_trend_risk_multiplier: float = 0.1,
+        shock_trend_down_risk_multiplier: float = 0.1,
     ) -> None:
         self.min_stop_loss_pct = min_stop_loss_pct
         self.high_vol_min_stop_loss_pct = high_vol_min_stop_loss_pct
@@ -24,6 +32,14 @@ class StrategyEngine:
         self.shock_reward_risk = shock_reward_risk
         self.trend_reward_risk = trend_reward_risk
         self.min_take_profit_pct = min_take_profit_pct
+        self.trailing_gap_pct = trailing_gap_pct
+        self.min_trailing_activate_r = min_trailing_activate_r
+        self.enable_trend_short = enable_trend_short
+        self.trend_long_risk_multiplier = trend_long_risk_multiplier
+        self.trend_short_risk_multiplier = trend_short_risk_multiplier
+        self.defensive_risk_multiplier = defensive_risk_multiplier
+        self.shock_trend_risk_multiplier = shock_trend_risk_multiplier
+        self.shock_trend_down_risk_multiplier = shock_trend_down_risk_multiplier
 
     def build_signals(
         self,
@@ -42,19 +58,8 @@ class StrategyEngine:
         if signals:
             return signals
 
-        if regime in {Regime.TREND_LONG, Regime.TREND_SHORT}:
-            signal = self._trend_signal(symbol, regime, features, candles_5m)
-            return [signal] if signal else []
-
-        if regime in {Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_DOWN}:
-            signal = self._shock_trend_signal(symbol, regime, features, candles_5m)
-            return [signal] if signal else []
-
-        if regime == Regime.SHOCK:
-            signal = self._grid_signal(symbol, features, candles_5m)
-            return [signal] if signal else []
-
-        return []
+        signal = self._user_4h_signal(symbol, regime, features, candles_5m)
+        return [signal] if signal else []
 
     def hedge_release_signals(
         self,
@@ -142,6 +147,490 @@ class StrategyEngine:
                         )
                     )
         return signals
+
+    def _user_4h_signal(
+        self,
+        symbol: str,
+        regime: Regime,
+        features: MarketFeatures,
+        candles_5m: list[list[float]],
+    ) -> TradeSignal | None:
+        df = ohlcv_frame(candles_5m)
+        if len(df) < 35 or features.atr_1h <= 0:
+            return None
+        price = float(df.close.iloc[-1])
+        previous = df.iloc[-2]
+        current = df.iloc[-1]
+        macd_line, signal_line, _ = macd(df.close)
+        ema20_5m = ema(df.close, 20)
+        rsi_5m = rsi(df.close, 14)
+        last_rsi = float(rsi_5m.iloc[-1])
+        ema_now = float(ema20_5m.iloc[-1])
+        ema_prev = float(ema20_5m.iloc[-4])
+        crossed_up = crossed_above(macd_line, signal_line)
+        crossed_down = crossed_below(macd_line, signal_line)
+        recent_pullback_down = recent_down_candle(df)
+        recent_pullback_up = recent_up_candle(df)
+        trend_up_aligned = self._multi_timeframe_aligned(df, PositionSide.LONG)
+        trend_down_aligned = self._multi_timeframe_aligned(df, PositionSide.SHORT)
+        volatility_policy = self._volatility_policy(price, features, df)
+        trend_long_near_breakout = (
+            price >= features.range_high_4h - volatility_policy.breakout_retrace_atr * features.atr_1h
+        )
+        trend_short_near_breakout = (
+            price <= features.range_low_4h + volatility_policy.breakout_retrace_atr * features.atr_1h
+        )
+        long_momentum_positive = bool(macd_line.iloc[-1] >= signal_line.iloc[-1])
+        short_momentum_positive = bool(macd_line.iloc[-1] <= signal_line.iloc[-1])
+
+        if regime == Regime.SHOCK:
+            midpoint = (features.range_high_4h + features.range_low_4h) / 2
+            if price < midpoint and crossed_up:
+                stop = self._cap_stop(price, features.range_low_4h, PositionSide.LONG)
+                take_profit = price + self._reward(price, stop, self.shock_reward_risk)
+                opportunity = score_opportunity(
+                    symbol=symbol,
+                    regime=regime,
+                    side=PositionSide.LONG,
+                    checks={
+                        "regime_direction": True,
+                        "pullback": price < midpoint,
+                        "confirmation_candle": float(current.close) > float(current.open),
+                        "momentum_cross": crossed_up,
+                        "momentum_positive": long_momentum_positive,
+                        "price_location": price > float(previous.low),
+                        "rsi_quality": last_rsi <= 52,
+                        "not_chasing": True,
+                        "range_position": price > features.range_low_4h,
+                    },
+                    reward_risk=abs(take_profit - price) / abs(price - stop) if price != stop else 0.0,
+                    volatility_tier=volatility_policy.tier,
+                )
+                return self._entry_signal(
+                    symbol,
+                    Side.BUY,
+                    PositionSide.LONG,
+                    Regime.SHOCK,
+                    price,
+                    stop,
+                    take_profit,
+                    "user_4h_shock_long_reversal",
+                    {
+                        **opportunity_metadata(opportunity),
+                        "risk_multiplier": max(self.defensive_risk_multiplier * 0.5, opportunity.risk_multiplier),
+                    },
+                )
+            if price > midpoint and crossed_down:
+                stop = self._cap_stop(price, features.range_high_4h, PositionSide.SHORT)
+                take_profit = price - self._reward(price, stop, self.shock_reward_risk)
+                opportunity = score_opportunity(
+                    symbol=symbol,
+                    regime=regime,
+                    side=PositionSide.SHORT,
+                    checks={
+                        "regime_direction": True,
+                        "pullback": price > midpoint,
+                        "confirmation_candle": float(current.close) < float(current.open),
+                        "momentum_cross": crossed_down,
+                        "momentum_positive": short_momentum_positive,
+                        "price_location": price < float(previous.high),
+                        "rsi_quality": last_rsi >= 48,
+                        "not_chasing": True,
+                        "range_position": price < features.range_high_4h,
+                    },
+                    reward_risk=abs(price - take_profit) / abs(stop - price) if price != stop else 0.0,
+                    volatility_tier=volatility_policy.tier,
+                )
+                return self._entry_signal(
+                    symbol,
+                    Side.SELL,
+                    PositionSide.SHORT,
+                    Regime.SHOCK,
+                    price,
+                    stop,
+                    take_profit,
+                    "user_4h_shock_short_reversal",
+                    {
+                        **opportunity_metadata(opportunity),
+                        "risk_multiplier": max(self.defensive_risk_multiplier * 0.5, opportunity.risk_multiplier),
+                    },
+                )
+
+        trend_long_rsi_quality = 40 <= last_rsi <= 66
+        trend_long_opportunity = score_opportunity(
+            symbol=symbol,
+            regime=regime,
+            side=PositionSide.LONG,
+            checks={
+                "regime_direction": regime == Regime.TREND_LONG,
+                "multi_timeframe": trend_up_aligned,
+                "one_hour_trend": features.ema20_1h >= features.ema60_1h,
+                "four_hour_trend": trend_long_near_breakout,
+                "pullback": recent_pullback_down,
+                "confirmation_candle": float(current.close) > float(current.open),
+                "momentum_cross": crossed_up,
+                "momentum_positive": long_momentum_positive,
+                "price_location": price >= ema_now * 0.998,
+                "ema_slope": ema_now >= ema_prev,
+                "rsi_quality": trend_long_rsi_quality,
+                "not_chasing": last_rsi <= 70,
+            },
+            penalties={
+                "extreme_volatility": volatility_policy.tier == "EXTREME",
+                "counter_ema": features.ema20_1h < features.ema60_1h,
+            },
+            reward_risk=self.trend_reward_risk,
+            volatility_tier=volatility_policy.tier,
+            min_score=88,
+        )
+        if (
+            regime == Regime.TREND_LONG
+            and trend_long_opportunity.allow_trade
+            and (not volatility_policy.require_multi_timeframe or trend_up_aligned)
+            and (not volatility_policy.require_near_breakout or trend_long_near_breakout)
+            and recent_pullback_down
+            and float(current.close) > float(current.open)
+            and price >= ema_now * 0.998
+            and trend_long_rsi_quality
+            and crossed_up
+            and self._sol_allowed(symbol, PositionSide.LONG, regime, trend_long_opportunity.score, features)
+        ):
+            raw_stop = self._trend_stop(price, features.previous_1h_low, features.atr_1h, PositionSide.LONG, volatility_policy)
+            stop = self._cap_stop(price, raw_stop, PositionSide.LONG, volatility_policy)
+            stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
+            reward_risk = self.trend_reward_risk + (0.4 if trend_long_opportunity.score >= 88 else 0.2 if trend_long_opportunity.score >= 78 else 0.0)
+            return self._entry_signal(
+                symbol,
+                Side.BUY,
+                PositionSide.LONG,
+                regime,
+                price,
+                stop,
+                price + self._reward(price, stop, reward_risk),
+                "user_4h_trend_long_pullback_confirmed",
+                {
+                    "trailing_gap_pct": self.trailing_gap_pct,
+                    "min_trailing_activate_r": self.min_trailing_activate_r,
+                    **opportunity_metadata(trend_long_opportunity),
+                    "risk_multiplier": max(
+                        self.trend_long_risk_multiplier * volatility_policy.risk_multiplier,
+                        trend_long_opportunity.risk_multiplier,
+                    ),
+                    "volatility_tier": volatility_policy.tier,
+                },
+            )
+
+        trend_short_rsi_quality = 34 <= last_rsi <= 60
+        trend_short_opportunity = score_opportunity(
+            symbol=symbol,
+            regime=regime,
+            side=PositionSide.SHORT,
+            checks={
+                "regime_direction": regime == Regime.TREND_SHORT,
+                "multi_timeframe": trend_down_aligned,
+                "one_hour_trend": features.ema20_1h <= features.ema60_1h,
+                "four_hour_trend": trend_short_near_breakout and features.last_4h_close < features.prev_4h_close,
+                "pullback": recent_pullback_up,
+                "confirmation_candle": float(current.close) < float(current.open),
+                "momentum_cross": crossed_down,
+                "momentum_positive": short_momentum_positive,
+                "price_location": price <= ema_now * 1.002,
+                "ema_slope": ema_now <= ema_prev,
+                "rsi_quality": trend_short_rsi_quality,
+                "not_chasing": last_rsi >= 24,
+            },
+            penalties={
+                "extreme_volatility": volatility_policy.tier == "EXTREME",
+                "counter_ema": features.ema20_1h > features.ema60_1h,
+                "overextended": price < features.range_low_4h * 0.985,
+            },
+            reward_risk=self.trend_reward_risk,
+            volatility_tier=volatility_policy.tier,
+            min_score=88,
+        )
+        if (
+            self.enable_trend_short
+            and regime == Regime.TREND_SHORT
+            and trend_short_opportunity.allow_trade
+            and (not volatility_policy.require_multi_timeframe or trend_down_aligned)
+            and (not volatility_policy.require_near_breakout or trend_short_near_breakout)
+            and features.ema20_1h <= features.ema60_1h
+            and features.last_4h_close < features.prev_4h_close
+            and features.last_4h_close <= features.range_low_4h * 1.01
+            and price < features.range_low_4h * 1.003
+            and recent_pullback_up
+            and float(current.close) < float(current.open)
+            and price <= ema_now * 1.002
+            and trend_short_rsi_quality
+            and crossed_down
+            and self._sol_allowed(symbol, PositionSide.SHORT, regime, trend_short_opportunity.score, features)
+        ):
+            raw_stop = self._trend_stop(price, features.previous_1h_high, features.atr_1h, PositionSide.SHORT, volatility_policy)
+            stop = self._cap_stop(price, raw_stop, PositionSide.SHORT, volatility_policy)
+            stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
+            reward_risk = self.trend_reward_risk + (0.4 if trend_short_opportunity.score >= 88 else 0.2 if trend_short_opportunity.score >= 78 else 0.0)
+            return self._entry_signal(
+                symbol,
+                Side.SELL,
+                PositionSide.SHORT,
+                regime,
+                price,
+                stop,
+                price - self._reward(price, stop, reward_risk),
+                "user_4h_trend_short_pullback_confirmed",
+                {
+                    "trailing_gap_pct": self.trailing_gap_pct,
+                    "min_trailing_activate_r": self.min_trailing_activate_r,
+                    **opportunity_metadata(trend_short_opportunity),
+                    "risk_multiplier": max(
+                        self.trend_short_risk_multiplier * volatility_policy.risk_multiplier,
+                        trend_short_opportunity.risk_multiplier,
+                    ),
+                    "volatility_tier": volatility_policy.tier,
+                },
+            )
+
+        signal = self._user_4h_shock_trend_signal(
+            symbol,
+            regime,
+            features,
+            df,
+            price,
+            current,
+            crossed_up,
+            crossed_down,
+            recent_pullback_down,
+            recent_pullback_up,
+            trend_up_aligned,
+            trend_down_aligned,
+            long_momentum_positive,
+            short_momentum_positive,
+            ema_now,
+            ema_prev,
+            last_rsi,
+            volatility_policy,
+        )
+        return signal
+
+    def _user_4h_shock_trend_signal(
+        self,
+        symbol: str,
+        regime: Regime,
+        features: MarketFeatures,
+        df,
+        price: float,
+        current,
+        crossed_up: bool,
+        crossed_down: bool,
+        recent_pullback_down: bool,
+        recent_pullback_up: bool,
+        trend_up_aligned: bool,
+        trend_down_aligned: bool,
+        long_momentum_positive: bool,
+        short_momentum_positive: bool,
+        ema_now: float,
+        ema_prev: float,
+        last_rsi: float,
+        volatility_policy,
+    ) -> TradeSignal | None:
+        shock_trend_up_rsi_quality = 42 <= last_rsi <= 66
+        shock_trend_up_opportunity = score_opportunity(
+            symbol=symbol,
+            regime=regime,
+            side=PositionSide.LONG,
+            checks={
+                "regime_direction": regime == Regime.SHOCK_TREND_UP,
+                "multi_timeframe": trend_up_aligned,
+                "one_hour_trend": features.ema20_1h >= features.ema60_1h,
+                "four_hour_trend": features.last_4h_close > features.prev_4h_close,
+                "pullback": recent_pullback_down,
+                "confirmation_candle": float(current.close) > float(current.open),
+                "momentum_cross": crossed_up,
+                "momentum_positive": long_momentum_positive,
+                "price_location": price >= ema_now * 0.998 and price >= features.ema20_1h * 0.997,
+                "ema_slope": ema_now >= ema_prev,
+                "rsi_quality": shock_trend_up_rsi_quality,
+                "not_chasing": last_rsi <= 68,
+                "range_position": features.close_position_72h <= 0.92,
+            },
+            penalties={
+                "directional_conflict": self._directional_breakout_active(features)
+                and not (features.ret_72h > 0 and features.ret_24h > -0.01),
+                "rsi_extreme": last_rsi > 72,
+                "counter_ema": features.ema20_1h < features.ema60_1h,
+                "overextended": features.close_position_72h > 0.96,
+            },
+            reward_risk=self.trend_reward_risk,
+            volatility_tier=volatility_policy.tier,
+            min_score=88,
+        )
+        if (
+            regime == Regime.SHOCK_TREND_UP
+            and shock_trend_up_opportunity.allow_trade
+            and trend_up_aligned
+            and features.ema20_1h >= features.ema60_1h
+            and price >= features.ema20_1h * 0.997
+            and features.last_4h_close > features.prev_4h_close
+            and recent_pullback_down
+            and float(current.close) > float(current.open)
+            and crossed_up
+            and price >= ema_now * 0.998
+            and ema_now >= ema_prev
+            and shock_trend_up_rsi_quality
+            and self._sol_allowed(symbol, PositionSide.LONG, regime, shock_trend_up_opportunity.score, features)
+        ):
+            stop = self._cap_stop(price, features.current_4h_low, PositionSide.LONG)
+            stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
+            reward_risk = self.trend_reward_risk + (
+                0.4 if shock_trend_up_opportunity.score >= 88 else 0.2 if shock_trend_up_opportunity.score >= 78 else 0.0
+            )
+            return self._entry_signal(
+                symbol,
+                Side.BUY,
+                PositionSide.LONG,
+                regime,
+                price,
+                stop,
+                price + self._reward(price, stop, reward_risk),
+                "user_4h_shock_trend_up_pullback_confirmed",
+                {
+                    "trailing_gap_pct": self.trailing_gap_pct,
+                    "min_trailing_activate_r": self.min_trailing_activate_r,
+                    **opportunity_metadata(shock_trend_up_opportunity),
+                    "risk_multiplier": max(
+                        self.shock_trend_risk_multiplier,
+                        shock_trend_up_opportunity.risk_multiplier,
+                    ),
+                    "volatility_tier": volatility_policy.tier,
+                },
+            )
+
+        shock_trend_down_rsi_quality = 34 <= last_rsi <= 58
+        shock_trend_down_opportunity = score_opportunity(
+            symbol=symbol,
+            regime=regime,
+            side=PositionSide.SHORT,
+            checks={
+                "regime_direction": regime == Regime.SHOCK_TREND_DOWN,
+                "multi_timeframe": trend_down_aligned,
+                "one_hour_trend": features.ema20_1h <= features.ema60_1h,
+                "four_hour_trend": features.last_4h_close < features.prev_4h_close,
+                "pullback": recent_pullback_up,
+                "confirmation_candle": float(current.close) < float(current.open),
+                "momentum_cross": crossed_down,
+                "momentum_positive": short_momentum_positive,
+                "price_location": price <= ema_now * 1.002 and price <= features.ema20_1h * 1.003,
+                "ema_slope": ema_now <= ema_prev,
+                "rsi_quality": shock_trend_down_rsi_quality,
+                "not_chasing": last_rsi >= 24,
+                "range_position": features.close_position_72h >= 0.08,
+            },
+            penalties={
+                "directional_conflict": self._directional_breakout_active(features)
+                and not (features.ret_72h < 0 and features.ret_24h < 0.01),
+                "rsi_extreme": last_rsi < 20,
+                "counter_ema": features.ema20_1h > features.ema60_1h,
+                "overextended": features.close_position_72h < 0.04,
+            },
+            reward_risk=self.trend_reward_risk,
+            volatility_tier=volatility_policy.tier,
+            min_score=88,
+        )
+        if (
+            regime == Regime.SHOCK_TREND_DOWN
+            and shock_trend_down_opportunity.allow_trade
+            and trend_down_aligned
+            and features.ema20_1h <= features.ema60_1h
+            and price <= features.ema20_1h * 1.003
+            and features.last_4h_close < features.prev_4h_close
+            and recent_pullback_up
+            and float(current.close) < float(current.open)
+            and crossed_down
+            and price <= ema_now * 1.002
+            and ema_now <= ema_prev
+            and shock_trend_down_rsi_quality
+            and self._sol_allowed(symbol, PositionSide.SHORT, regime, shock_trend_down_opportunity.score, features)
+        ):
+            stop = self._cap_stop(price, features.current_4h_high, PositionSide.SHORT)
+            stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
+            reward_risk = self.trend_reward_risk + (
+                0.4
+                if shock_trend_down_opportunity.score >= 88
+                else 0.2
+                if shock_trend_down_opportunity.score >= 78
+                else 0.0
+            )
+            return self._entry_signal(
+                symbol,
+                Side.SELL,
+                PositionSide.SHORT,
+                regime,
+                price,
+                stop,
+                price - self._reward(price, stop, reward_risk),
+                "user_4h_shock_trend_down_pullback_confirmed",
+                {
+                    "trailing_gap_pct": self.trailing_gap_pct,
+                    "min_trailing_activate_r": self.min_trailing_activate_r,
+                    **opportunity_metadata(shock_trend_down_opportunity),
+                    "risk_multiplier": max(
+                        self.shock_trend_down_risk_multiplier,
+                        shock_trend_down_opportunity.risk_multiplier,
+                    ),
+                    "volatility_tier": volatility_policy.tier,
+                },
+            )
+        return None
+
+    def _entry_signal(
+        self,
+        symbol: str,
+        side: Side,
+        position_side: PositionSide,
+        regime: Regime,
+        price: float,
+        stop: float,
+        take_profit: float,
+        reason: str,
+        metadata: dict[str, object],
+        signal_type: SignalType = SignalType.ENTER_TREND,
+    ) -> TradeSignal:
+        return TradeSignal(
+            symbol=symbol,
+            signal_type=signal_type,
+            side=side,
+            position_side=position_side,
+            regime=regime,
+            price=price,
+            stop_loss=stop,
+            take_profit=take_profit,
+            reason=reason,
+            metadata=metadata,
+        )
+
+    def _sol_allowed(
+        self,
+        symbol: str,
+        side: PositionSide,
+        regime: Regime,
+        score: int,
+        features: MarketFeatures,
+    ) -> bool:
+        return sol_trade_allowed(
+            symbol=symbol,
+            side=side,
+            regime=regime,
+            score=score,
+            close_position_72h=features.close_position_72h,
+            ret_24h=features.ret_24h,
+            ret_72h=features.ret_72h,
+            range_72h=features.range_72h,
+        )
+
+    def _directional_breakout_active(self, features: MarketFeatures) -> bool:
+        wide_directional = abs(features.ret_72h) >= 0.04 and features.range_72h >= 0.07
+        short_directional = abs(features.ret_24h) >= 0.03 and features.range_24h >= 0.035
+        return wide_directional or short_directional
 
     def _trend_signal(
         self,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from trading_system.models import Regime
-from trading_system.regime import ForesightData, MarketRegimeClassifier
+from trading_system.regime import MarketRegimeClassifier
 
 
 def make_candles(
@@ -28,7 +28,7 @@ def test_classifier_detects_shock_when_range_is_tight() -> None:
     assert features.range_amplitude_4h <= 0.08
 
 
-def test_classifier_requires_foresight_for_trend_long() -> None:
+def test_classifier_uses_user_4h_trend_long_without_foresight() -> None:
     classifier = MarketRegimeClassifier()
     candles_1h = make_candles(80, 100.0, 0.6)
     candles_4h = make_candles(60, 100.0, 0.01, interval_ms=4 * 60 * 60 * 1000)
@@ -41,33 +41,21 @@ def test_classifier_requires_foresight_for_trend_long() -> None:
     candles_1h[-1][4] = 130.0
     candles_1h[-1][2] = 131.0
 
-    no_foresight, _ = classifier.classify("BTC/USDT:USDT", candles_1h, candles_4h)
-    with_foresight, _ = classifier.classify(
-        "BTC/USDT:USDT",
-        candles_1h,
-        candles_4h,
-        ForesightData(oi_change_4h=0.2, short_liq_p95_hit=True),
-    )
+    regime, _ = classifier.classify("BTC/USDT:USDT", candles_1h, candles_4h)
 
-    assert no_foresight != Regime.TREND_LONG
-    assert with_foresight == Regime.TREND_LONG
+    assert regime == Regime.TREND_LONG
 
 
-def test_classifier_downgrades_trend_long_without_daily_confirmation() -> None:
+def test_classifier_does_not_infer_trend_from_1h_breakout_only() -> None:
     classifier = MarketRegimeClassifier()
     candles_1h = make_candles(80, 100.0, 0.6)
     candles_4h = make_candles(60, 100.0, 0.0, interval_ms=4 * 60 * 60 * 1000)
     candles_1h[-1][4] = 130.0
     candles_1h[-1][2] = 131.0
 
-    regime, _ = classifier.classify(
-        "BTC/USDT:USDT",
-        candles_1h,
-        candles_4h,
-        ForesightData(oi_change_4h=0.2, short_liq_p95_hit=True),
-    )
+    regime, _ = classifier.classify("BTC/USDT:USDT", candles_1h, candles_4h)
 
-    assert regime == Regime.SHOCK_TREND_UP
+    assert regime == Regime.SHOCK
 
 
 def test_classifier_treats_wide_directional_drop_as_shock_trend_down() -> None:

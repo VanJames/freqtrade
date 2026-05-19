@@ -34,11 +34,48 @@ def dsn() -> str:
     return value.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
+async def ensure_dashboard_schema(conn: asyncpg.Connection) -> None:
+    await conn.execute(
+        """
+        create table if not exists order_tracks (
+            order_id varchar(64) primary key,
+            symbol varchar(32) not null,
+            regime_mode varchar(20) not null,
+            initial_qty numeric(18, 8) not null,
+            maker_filled numeric(18, 8) not null default 0,
+            taker_twap_filled numeric(18, 8) not null default 0,
+            fee_paid numeric(18, 8) not null default 0,
+            created_at timestamp with time zone not null
+        )
+        """
+    )
+    await conn.execute(
+        """
+        create table if not exists account_snapshots (
+            snapshot_time timestamp with time zone primary key,
+            total_equity numeric(18, 4) not null,
+            active_hedging boolean not null default false,
+            serialized_memory text not null
+        )
+        """
+    )
+    await conn.execute(
+        """
+        create table if not exists runtime_settings (
+            setting_key varchar(64) primary key,
+            setting_value text not null,
+            updated_at timestamp with time zone not null
+        )
+        """
+    )
+
+
 async def fetch_dashboard_data() -> dict[str, Any]:
     settings = Settings()
     defaults = runtime_defaults(settings)
     conn = await asyncpg.connect(dsn())
     try:
+        await ensure_dashboard_schema(conn)
         latest_snapshot = await conn.fetchrow(
             """
             select snapshot_time, total_equity, active_hedging, serialized_memory
@@ -135,6 +172,7 @@ async def api_update_runtime_config(payload: dict[str, Any] = Body(...)) -> JSON
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     conn = await asyncpg.connect(dsn())
     try:
+        await ensure_dashboard_schema(conn)
         async with conn.transaction():
             for key, value in values.items():
                 await conn.execute(

@@ -51,11 +51,18 @@ class StateStore:
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
         self.engine: AsyncEngine = create_async_engine(dsn, pool_pre_ping=True)
+        self._schema_ready = False
 
     async def initialize(self) -> None:
         await ensure_database_exists(self.dsn)
         async with self.engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
+        self._schema_ready = True
+
+    async def ensure_schema(self) -> None:
+        if self._schema_ready:
+            return
+        await self.initialize()
 
     async def record_order(self, order: OrderResult, regime: Regime) -> None:
         async with self.engine.begin() as conn:
@@ -106,6 +113,7 @@ class StateStore:
         return orjson.loads(row.serialized_memory)
 
     async def save_runtime_settings(self, values: dict[str, float]) -> None:
+        await self.ensure_schema()
         now = datetime.now(timezone.utc)
         async with self.engine.begin() as conn:
             for key, value in values.items():
@@ -120,6 +128,7 @@ class StateStore:
                 await conn.execute(stmt)
 
     async def load_runtime_settings(self) -> dict[str, float]:
+        await self.ensure_schema()
         async with self.engine.begin() as conn:
             rows = await conn.execute(select(runtime_settings.c.setting_key, runtime_settings.c.setting_value))
         result: dict[str, float] = {}

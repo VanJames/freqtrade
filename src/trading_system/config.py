@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     max_stop_loss_pct: float = 0.012
     shock_reward_risk: float = 1.15
     trend_reward_risk: float = 1.8
+    trailing_gap_pct: float = 0.0025
+    min_trailing_activate_r: float = 1.0
+    enable_trend_short: bool = True
+    trend_long_risk_multiplier: float = 0.35
+    trend_short_risk_multiplier: float = 0.5
+    defensive_risk_multiplier: float = 0.7
+    shock_trend_risk_multiplier: float = 0.1
+    shock_trend_down_risk_multiplier: float = 0.1
     min_take_profit_pct: float = 0.004
     llm_regime_review_enabled: bool = False
     llm_regime_provider: str = "openai"

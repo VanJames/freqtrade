@@ -60,20 +60,26 @@ def backtest(
     symbols: Optional[str] = typer.Option(None, help="Comma-separated OKX swap symbols. Defaults to .env SYMBOLS."),
     initial_equity: float = typer.Option(10_000.0, help="Initial equity in USDT."),
     risk_percent: Optional[float] = typer.Option(None, help="Base risk per trade, e.g. 0.01 means 1%."),
+    same_direction_risk_limit: Optional[float] = typer.Option(None, help="Same-direction risk cap."),
+    daily_drawdown_limit: Optional[float] = typer.Option(None, help="Daily drawdown fuse threshold."),
     shock_stop_atr: float = typer.Option(1.0, help="SHOCK stop distance in ATR."),
     shock_take_profit_atr: float = typer.Option(1.8, help="SHOCK take-profit distance in ATR."),
-    classifier_mode: str = typer.Option("dev", help="Regime classifier mode: dev or user_4h."),
+    classifier_mode: str = typer.Option("user_4h", help="Regime classifier mode. Only user_4h is supported."),
     shock_leverage_limit: Optional[float] = typer.Option(None, help="Maximum leverage for SHOCK grid trades."),
     trend_leverage_limit: Optional[float] = typer.Option(None, help="Maximum leverage for trend/shock-trend trades."),
     max_signal_risk_multiplier: Optional[float] = typer.Option(None, help="Maximum per-signal risk multiplier."),
-    confirmation_position_sizing: bool = typer.Option(False, help="Boost position size only for highly confirmed signals."),
-    confirmation_max_risk_multiplier: float = typer.Option(3.0, help="Maximum boosted risk multiplier for confirmed signals."),
-    llm_review: bool = typer.Option(False, help="Enable LLM regime review during backtest."),
+    confirmation_position_sizing: Optional[bool] = typer.Option(None, help="Boost position size only for highly confirmed signals."),
+    confirmation_max_risk_multiplier: Optional[float] = typer.Option(None, help="Maximum boosted risk multiplier for confirmed signals."),
+    funding_rate: float = typer.Option(0.0, help="Backtest funding rate assumption."),
+    funding_block_threshold: Optional[float] = typer.Option(None, help="Funding rate threshold used by risk checks."),
+    llm_review: Optional[bool] = typer.Option(None, help="Enable LLM regime review during backtest. Defaults to .env."),
     llm_provider: Optional[str] = typer.Option(None, help="LLM provider: openai or deepseek."),
     llm_model: Optional[str] = typer.Option(None, help="LLM model name."),
     llm_max_calls: int = typer.Option(50, help="Maximum LLM review calls during one backtest."),
 ) -> None:
     configure_logging(logging.INFO)
+    if classifier_mode != "user_4h":
+        raise typer.BadParameter("dev classifier was removed; use user_4h.")
     settings = Settings()
     selected_symbols = [item.strip() for item in symbols.split(",") if item.strip()] if symbols else settings.symbols
     result, report_path = OKXBacktester(
@@ -82,6 +88,10 @@ def backtest(
             days=days,
             initial_equity=initial_equity,
             risk_percent=risk_percent if risk_percent is not None else settings.risk_percent,
+            same_direction_risk_limit=(
+                same_direction_risk_limit if same_direction_risk_limit is not None else settings.same_direction_risk_limit
+            ),
+            daily_drawdown_limit=daily_drawdown_limit if daily_drawdown_limit is not None else settings.daily_drawdown_limit,
             shock_leverage_limit=shock_leverage_limit if shock_leverage_limit is not None else settings.shock_leverage_limit,
             trend_symbol_leverage_limit=trend_leverage_limit if trend_leverage_limit is not None else settings.trend_symbol_leverage_limit,
             max_signal_risk_multiplier=(
@@ -89,8 +99,20 @@ def backtest(
                 if max_signal_risk_multiplier is not None
                 else settings.max_signal_risk_multiplier
             ),
-            confirmation_position_sizing=confirmation_position_sizing,
-            confirmation_max_risk_multiplier=confirmation_max_risk_multiplier,
+            confirmation_position_sizing=(
+                confirmation_position_sizing
+                if confirmation_position_sizing is not None
+                else settings.confirmation_position_sizing
+            ),
+            confirmation_max_risk_multiplier=(
+                confirmation_max_risk_multiplier
+                if confirmation_max_risk_multiplier is not None
+                else settings.confirmation_max_risk_multiplier
+            ),
+            funding_block_threshold=(
+                funding_block_threshold if funding_block_threshold is not None else settings.funding_block_threshold
+            ),
+            backtest_funding_rate=funding_rate,
             shock_stop_atr=shock_stop_atr,
             shock_take_profit_atr=shock_take_profit_atr,
             classifier_mode=classifier_mode,
@@ -98,7 +120,7 @@ def backtest(
             high_vol_min_stop_loss_pct=settings.high_vol_min_stop_loss_pct,
             extreme_vol_min_stop_loss_pct=settings.extreme_vol_min_stop_loss_pct,
             min_take_profit_pct=settings.min_take_profit_pct,
-            llm_regime_review_enabled=llm_review,
+            llm_regime_review_enabled=llm_review if llm_review is not None else settings.llm_regime_review_enabled,
             llm_regime_provider=llm_provider or settings.llm_regime_provider,
             llm_regime_model=llm_model or settings.llm_regime_model,
             llm_regime_base_url=settings.llm_regime_base_url,
@@ -108,6 +130,8 @@ def backtest(
     ).run()
     typer.echo(f"report: {report_path}")
     typer.echo(f"trades: {len(result.trades)}")
+    typer.echo(f"avg_hours_per_trade: {result.avg_hours_per_trade:.2f}")
+    typer.echo(f"avg_entry_gap_hours: {result.avg_entry_gap_hours:.2f}")
     typer.echo(f"win_rate: {result.win_rate:.2%}")
     typer.echo(f"total_pnl: {result.total_pnl:.2f} USDT")
     typer.echo(f"regime_accuracy: {result.regime_accuracy:.2%}")
@@ -117,10 +141,12 @@ def backtest(
 def optimize_params(
     symbol: str = typer.Option(..., help="Single OKX swap symbol, e.g. SOL/USDT:USDT."),
     days: int = typer.Option(30, help="Optimization lookback window in calendar days."),
-    classifier_mode: str = typer.Option("user_4h", help="Regime classifier mode: dev or user_4h."),
+    classifier_mode: str = typer.Option("user_4h", help="Regime classifier mode. Only user_4h is supported."),
     top_n: int = typer.Option(10, help="Number of top parameter sets to report."),
 ) -> None:
     configure_logging(logging.INFO)
+    if classifier_mode != "user_4h":
+        raise typer.BadParameter("dev classifier was removed; use user_4h.")
     settings = Settings()
     top, report_path = OKXBacktester(
         BacktestConfig(
