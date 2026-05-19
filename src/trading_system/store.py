@@ -5,7 +5,8 @@ from logging import getLogger
 from typing import Any
 
 import orjson
-from sqlalchemy import Boolean, Column, DateTime, MetaData, Numeric, String, Table, Text, desc, insert, select, update
+from sqlalchemy import Boolean, Column, DateTime, MetaData, Numeric, String, Table, Text, desc, insert, select, text, update
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from trading_system.models import OrderResult, Regime
@@ -39,9 +40,11 @@ account_snapshots = Table(
 
 class StateStore:
     def __init__(self, dsn: str) -> None:
+        self.dsn = dsn
         self.engine: AsyncEngine = create_async_engine(dsn, pool_pre_ping=True)
 
     async def initialize(self) -> None:
+        await ensure_database_exists(self.dsn)
         async with self.engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
 
@@ -95,3 +98,26 @@ class StateStore:
 
     async def close(self) -> None:
         await self.engine.dispose()
+
+
+async def ensure_database_exists(dsn: str) -> None:
+    url = make_url(dsn)
+    database = url.database
+    if not database or database == "postgres":
+        return
+
+    admin_engine = create_async_engine(
+        url.set(database="postgres"),
+        isolation_level="AUTOCOMMIT",
+        pool_pre_ping=True,
+    )
+    try:
+        async with admin_engine.connect() as conn:
+            exists = await conn.scalar(text("SELECT 1 FROM pg_database WHERE datname = :database"), {"database": database})
+            if exists:
+                return
+            preparer = conn.sync_connection.dialect.identifier_preparer
+            await conn.execute(text(f"CREATE DATABASE {preparer.quote(database)}"))
+            logger.info("created postgres database database=%s", database)
+    finally:
+        await admin_engine.dispose()

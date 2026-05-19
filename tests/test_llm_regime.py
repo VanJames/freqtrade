@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from trading_system.llm_regime import LLMRegimeReviewer, RegimeReview
 from trading_system.llm_regime import RegimeReviewInput
 from trading_system.models import Regime
@@ -82,3 +84,44 @@ def test_llm_cache_key_ignores_small_price_noise() -> None:
     )
 
     assert first == second
+
+
+@pytest.mark.asyncio
+async def test_llm_review_is_globally_rate_limited(monkeypatch) -> None:
+    reviewer = LLMRegimeReviewer(enabled=True, min_interval_seconds=900, cache_ttl_seconds=0)
+    calls = 0
+
+    def fake_call_model(item: RegimeReviewInput) -> RegimeReview:
+        nonlocal calls
+        calls += 1
+        return RegimeReview(
+            action="KEEP",
+            proposed_regime=item.rule_regime,
+            confidence=0.9,
+            allow_trade=True,
+            risk_multiplier=1.0,
+            reasons=["tested"],
+            missing_evidence=[],
+        )
+
+    monkeypatch.setattr(reviewer, "_call_model", fake_call_model)
+
+    features = {
+        "adx": 30,
+        "plus_di": 25,
+        "minus_di": 20,
+        "atr_pct": 0.01,
+        "range_amplitude_4h": 0.08,
+        "ema20_1h": 100,
+        "ema60_1h": 95,
+        "range_high_4h": 120,
+        "range_low_4h": 80,
+        "close_1h": 105,
+        "volatility_tier": "HIGH",
+    }
+    first = RegimeReviewInput("BTC/USDT:USDT", Regime.SHOCK_TREND_UP, features)
+    second = RegimeReviewInput("ETH/USDT:USDT", Regime.SHOCK_TREND_UP, {**features, "close_1h": 106})
+
+    assert (await reviewer.review(first)).reasons == ["tested"]
+    assert (await reviewer.review(second)).reasons == ["llm_rate_limited"]
+    assert calls == 1

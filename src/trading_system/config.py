@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     llm_regime_base_url: str = ""
     llm_regime_api_key_env: str = ""
     llm_regime_review_cache_ttl_seconds: int = 900
-    llm_regime_review_min_interval_seconds: int = 120
+    llm_regime_review_min_interval_seconds: int = 900
 
     @field_validator("symbols", mode="before")
     @classmethod

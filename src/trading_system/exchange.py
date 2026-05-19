@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import time
 from abc import ABC, abstractmethod
 from logging import getLogger
 from typing import Any
@@ -185,6 +186,9 @@ class CcxtOkxExchange(ExchangeClient):
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self.exchange: Any | None = None
+        self._positions_cache: tuple[float, list[Position]] | None = None
+        self._positions_lock = asyncio.Lock()
+        self._positions_cache_ttl_seconds = 10.0
 
     async def initialize(self) -> None:
         import ccxt.pro as ccxtpro
@@ -217,6 +221,7 @@ class CcxtOkxExchange(ExchangeClient):
         params: dict[str, Any],
     ) -> OrderResult:
         raw = await self.api.create_order(symbol, order_type, side.value, amount, price, params)
+        self._invalidate_positions_cache()
         return OrderResult(
             id=str(raw["id"]),
             symbol=symbol,
@@ -284,8 +289,19 @@ class CcxtOkxExchange(ExchangeClient):
         return float(balance.get("USDT", {}).get("total") or 0.0)
 
     async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
-        symbols = [symbol] if symbol else None
-        raw_positions = await self.api.fetch_positions(symbols=symbols)
+        now = time.monotonic()
+        async with self._positions_lock:
+            if self._positions_cache and now - self._positions_cache[0] <= self._positions_cache_ttl_seconds:
+                return self._filter_positions(self._positions_cache[1], symbol)
+            raw_positions = await self.api.fetch_positions()
+            positions = self._parse_positions(raw_positions)
+            self._positions_cache = (now, positions)
+            return self._filter_positions(positions, symbol)
+
+    def _invalidate_positions_cache(self) -> None:
+        self._positions_cache = None
+
+    def _parse_positions(self, raw_positions: list[dict[str, Any]]) -> list[Position]:
         positions: list[Position] = []
         for raw in raw_positions:
             contracts = float(raw.get("contracts") or 0.0)
@@ -303,6 +319,12 @@ class CcxtOkxExchange(ExchangeClient):
                 )
             )
         return positions
+
+    @staticmethod
+    def _filter_positions(positions: list[Position], symbol: str | None = None) -> list[Position]:
+        if symbol is None:
+            return list(positions)
+        return [position for position in positions if position.symbol == symbol]
 
     async def fetch_funding_rate(self, symbol: str) -> float:
         funding = await self.api.fetch_funding_rate(symbol)

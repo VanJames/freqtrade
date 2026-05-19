@@ -8,8 +8,8 @@ services:
     secrets:
       - app_env
     depends_on:
-      postgres:
-        condition: service_healthy
+      init-db:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     command: ["run", "--no-dry-run", "--with-store", "--with-redis"]
@@ -25,7 +25,7 @@ services:
       postgres:
         condition: service_healthy
     command: ["init-db"]
-    profiles: ["tools"]
+    restart: "no"
 
   backtest:
     build: .
@@ -48,10 +48,10 @@ services:
       LLM_REGIME_PROVIDER: ${LLM_REGIME_PROVIDER:-}
       LLM_REGIME_MODEL: ${LLM_REGIME_MODEL:-}
       LLM_REGIME_REVIEW_CACHE_TTL_SECONDS: ${LLM_REGIME_REVIEW_CACHE_TTL_SECONDS:-900}
-      LLM_REGIME_REVIEW_MIN_INTERVAL_SECONDS: ${LLM_REGIME_REVIEW_MIN_INTERVAL_SECONDS:-120}
+      LLM_REGIME_REVIEW_MIN_INTERVAL_SECONDS: ${LLM_REGIME_REVIEW_MIN_INTERVAL_SECONDS:-900}
     depends_on:
-      postgres:
-        condition: service_healthy
+      init-db:
+        condition: service_completed_successfully
     command: ["python", "-m", "uvicorn", "trading_system.dashboard:app", "--host", "0.0.0.0", "--port", "8080"]
     ports:
       - "18080:8080"
@@ -68,7 +68,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d trading"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 10

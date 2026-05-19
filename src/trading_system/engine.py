@@ -154,7 +154,9 @@ class OKXQuantEngine:
             base_min_stop_loss_pct=self.settings.min_stop_loss_pct,
             high_vol_min_stop_loss_pct=self.settings.high_vol_min_stop_loss_pct,
             extreme_vol_min_stop_loss_pct=self.settings.extreme_vol_min_stop_loss_pct,
-            range_72h=features.range_amplitude_4h,
+            ret_24h=features.ret_24h,
+            range_24h=features.range_24h,
+            range_72h=features.range_72h,
         )
         review_features["volatility_tier"] = volatility_policy.tier
         review = (
@@ -235,7 +237,10 @@ class OKXQuantEngine:
             if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
                 self.position_manager.register_entry(signal, abs(signal.price - signal.stop_loss))
             if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
-                self.risk.reserve_risk(signal.position_side)
+                self.risk.reserve_risk(
+                    signal.position_side,
+                    self.risk.signal_risk_multiplier(signal),
+                )
             if self.store:
                 await self.store.record_order(order, signal.regime)
 

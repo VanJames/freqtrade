@@ -50,7 +50,7 @@ class LLMRegimeReviewer:
         min_override_confidence: float = 0.72,
         enabled: bool = False,
         cache_ttl_seconds: int = 900,
-        min_interval_seconds: int = 120,
+        min_interval_seconds: int = 900,
     ) -> None:
         self.model = model
         self.provider = provider.lower()
@@ -63,6 +63,7 @@ class LLMRegimeReviewer:
         self.min_interval_seconds = min_interval_seconds
         self._rules_cache: str | None = None
         self._review_cache: dict[str, CachedRegimeReview] = {}
+        self._last_call_at = 0.0
         self._last_call_at_by_symbol: dict[str, float] = {}
         self._lock = asyncio.Lock()
 
@@ -76,7 +77,7 @@ class LLMRegimeReviewer:
             if cached and now - cached.created_at <= self.cache_ttl_seconds:
                 return self.cached_review(cached.review)
             last_call_at = self._last_call_at_by_symbol.get(item.symbol, 0.0)
-            if now - last_call_at < self.min_interval_seconds:
+            if now - self._last_call_at < self.min_interval_seconds or now - last_call_at < self.min_interval_seconds:
                 return RegimeReview(
                     action="KEEP",
                     proposed_regime=item.rule_regime,
@@ -86,6 +87,7 @@ class LLMRegimeReviewer:
                     reasons=["llm_rate_limited"],
                     missing_evidence=[],
                 )
+            self._last_call_at = now
             self._last_call_at_by_symbol[item.symbol] = now
         try:
             review = await asyncio.to_thread(self._call_model, item)

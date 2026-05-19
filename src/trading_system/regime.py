@@ -47,6 +47,7 @@ class MarketRegimeClassifier:
         low_42 = float(range_4h.low.min())
         amplitude = (high_42 - low_42) / low_42 if low_42 else 0.0
         close = float(df_1h.close.iloc[-1])
+        directional_features = self._directional_features(df_1h)
         last_3 = df_1h.iloc[-3:]
         recent_not_breaking = bool(last_3.high.max() <= high_42 and last_3.low.min() >= low_42)
         structural_regime = self._structural_4h_drift(df_4h.iloc[-6:])
@@ -64,6 +65,11 @@ class MarketRegimeClassifier:
             range_low_4h=low_42,
             range_amplitude_4h=amplitude,
             close_1h=close,
+            ret_24h=directional_features["ret_24h"],
+            ret_72h=directional_features["ret_72h"],
+            range_24h=directional_features["range_24h"],
+            range_72h=directional_features["range_72h"],
+            close_position_72h=directional_features["close_position_72h"],
             oi_change_4h=foresight.oi_change_4h,
             short_liq_p95_hit=foresight.short_liq_p95_hit,
             long_liq_p95_hit=foresight.long_liq_p95_hit,
@@ -210,6 +216,32 @@ class MarketRegimeClassifier:
         if ret_72h < 0 and ret_24h < 0.01 and ema20_1h <= ema60_1h and close_position <= 0.45:
             return Regime.SHOCK_TREND_DOWN
         return None
+
+    def _directional_features(self, df_1h) -> dict[str, float]:
+        if len(df_1h) < 72:
+            return {
+                "ret_24h": 0.0,
+                "ret_72h": 0.0,
+                "range_24h": 0.0,
+                "range_72h": 0.0,
+                "close_position_72h": 0.5,
+            }
+        recent_24h = df_1h.iloc[-24:]
+        recent_72h = df_1h.iloc[-72:]
+        close = float(df_1h.close.iloc[-1])
+        open_24h = float(recent_24h.open.iloc[0])
+        open_72h = float(recent_72h.open.iloc[0])
+        high_24h = float(recent_24h.high.max())
+        low_24h = float(recent_24h.low.min())
+        high_72h = float(recent_72h.high.max())
+        low_72h = float(recent_72h.low.min())
+        return {
+            "ret_24h": (close - open_24h) / open_24h if open_24h else 0.0,
+            "ret_72h": (close - open_72h) / open_72h if open_72h else 0.0,
+            "range_24h": (high_24h - low_24h) / close if close else 0.0,
+            "range_72h": (high_72h - low_72h) / close if close else 0.0,
+            "close_position_72h": (close - low_72h) / (high_72h - low_72h) if high_72h > low_72h else 0.5,
+        }
 
     def _directional_breakout_active(self, df_1h) -> bool:
         if len(df_1h) < 72:

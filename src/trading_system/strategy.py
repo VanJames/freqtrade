@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from trading_system.indicators import atr, crossed_above, crossed_below, ema, macd, ohlcv_frame, rsi
 from trading_system.models import HedgeLock, MarketFeatures, Position, PositionSide, Regime, Side, SignalType, TradeSignal
+from trading_system.opportunity import opportunity_metadata, score_opportunity, sol_structure_stop, sol_trade_allowed
 from trading_system.volatility import build_volatility_policy
 
 
@@ -161,16 +162,56 @@ class StrategyEngine:
 
         if regime == Regime.TREND_LONG:
             near_breakout = price >= features.range_high_4h - volatility_policy.breakout_retrace_atr * features.atr_1h
+            momentum_positive = bool(macd_line.iloc[-1] >= signal_line.iloc[-1])
+            rsi_quality = 40 <= last_rsi <= 64
             pullback = (
                 (not volatility_policy.require_near_breakout or near_breakout)
                 and (not volatility_policy.require_multi_timeframe or self._multi_timeframe_aligned(df, PositionSide.LONG))
                 and price >= float(ema20_5m.iloc[-1])
-                and 45 <= last_rsi <= 55
+                and rsi_quality
             )
-            if pullback and crossed_above(macd_line, signal_line):
+            opportunity = score_opportunity(
+                symbol=symbol,
+                regime=regime,
+                side=PositionSide.LONG,
+                checks={
+                    "regime_direction": True,
+                    "multi_timeframe": self._multi_timeframe_aligned(df, PositionSide.LONG),
+                    "one_hour_trend": features.ema20_1h >= features.ema60_1h,
+                    "four_hour_trend": near_breakout,
+                    "pullback": recent_down_candle(df),
+                    "confirmation_candle": float(df.close.iloc[-1]) > float(df.open.iloc[-1]),
+                    "momentum_cross": crossed_above(macd_line, signal_line),
+                    "momentum_positive": momentum_positive,
+                    "price_location": price >= float(ema20_5m.iloc[-1]),
+                    "ema_slope": float(ema20_5m.iloc[-1]) >= float(ema20_5m.iloc[-4]),
+                    "rsi_quality": rsi_quality,
+                    "not_chasing": last_rsi <= 68,
+                },
+                penalties={"extreme_volatility": volatility_policy.tier == "EXTREME"},
+                reward_risk=2.5,
+                volatility_tier=volatility_policy.tier,
+                min_score=88,
+            )
+            if (
+                pullback
+                and opportunity.allow_trade
+                and crossed_above(macd_line, signal_line)
+                and sol_trade_allowed(
+                    symbol=symbol,
+                    side=PositionSide.LONG,
+                    regime=regime,
+                    score=opportunity.score,
+                    close_position_72h=features.close_position_72h,
+                    ret_24h=features.ret_24h,
+                    ret_72h=features.ret_72h,
+                    range_72h=features.range_72h,
+                )
+            ):
                 raw_stop = max(float(df.low.iloc[-12:].min()), price - 1.2 * features.atr_1h)
                 raw_stop = self._trend_stop(price, raw_stop, features.atr_1h, PositionSide.LONG, volatility_policy)
                 stop = self._cap_stop(price, raw_stop, PositionSide.LONG, volatility_policy)
+                stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
                 return TradeSignal(
                     symbol=symbol,
                     signal_type=SignalType.ENTER_TREND,
@@ -181,21 +222,61 @@ class StrategyEngine:
                     stop_loss=stop,
                     take_profit=price + self._reward(price, stop, 2.5),
                     reason="trend_long_pullback_macd_cross",
-                    metadata={"volatility_tier": volatility_policy.tier},
+                    metadata={"volatility_tier": volatility_policy.tier, **opportunity_metadata(opportunity)},
                 )
 
         if regime == Regime.TREND_SHORT:
             near_breakout = price <= features.range_low_4h + volatility_policy.breakout_retrace_atr * features.atr_1h
+            momentum_positive = bool(macd_line.iloc[-1] <= signal_line.iloc[-1])
+            rsi_quality = 36 <= last_rsi <= 58
             pullback = (
                 (not volatility_policy.require_near_breakout or near_breakout)
                 and (not volatility_policy.require_multi_timeframe or self._multi_timeframe_aligned(df, PositionSide.SHORT))
                 and price <= float(ema20_5m.iloc[-1])
-                and 45 <= last_rsi <= 55
+                and rsi_quality
             )
-            if pullback and crossed_below(macd_line, signal_line):
+            opportunity = score_opportunity(
+                symbol=symbol,
+                regime=regime,
+                side=PositionSide.SHORT,
+                checks={
+                    "regime_direction": True,
+                    "multi_timeframe": self._multi_timeframe_aligned(df, PositionSide.SHORT),
+                    "one_hour_trend": features.ema20_1h <= features.ema60_1h,
+                    "four_hour_trend": near_breakout,
+                    "pullback": recent_up_candle(df),
+                    "confirmation_candle": float(df.close.iloc[-1]) < float(df.open.iloc[-1]),
+                    "momentum_cross": crossed_below(macd_line, signal_line),
+                    "momentum_positive": momentum_positive,
+                    "price_location": price <= float(ema20_5m.iloc[-1]),
+                    "ema_slope": float(ema20_5m.iloc[-1]) <= float(ema20_5m.iloc[-4]),
+                    "rsi_quality": rsi_quality,
+                    "not_chasing": last_rsi >= 28,
+                },
+                penalties={"extreme_volatility": volatility_policy.tier == "EXTREME"},
+                reward_risk=2.5,
+                volatility_tier=volatility_policy.tier,
+                min_score=88,
+            )
+            if (
+                pullback
+                and opportunity.allow_trade
+                and crossed_below(macd_line, signal_line)
+                and sol_trade_allowed(
+                    symbol=symbol,
+                    side=PositionSide.SHORT,
+                    regime=regime,
+                    score=opportunity.score,
+                    close_position_72h=features.close_position_72h,
+                    ret_24h=features.ret_24h,
+                    ret_72h=features.ret_72h,
+                    range_72h=features.range_72h,
+                )
+            ):
                 raw_stop = min(float(df.high.iloc[-12:].max()), price + 1.2 * features.atr_1h)
                 raw_stop = self._trend_stop(price, raw_stop, features.atr_1h, PositionSide.SHORT, volatility_policy)
                 stop = self._cap_stop(price, raw_stop, PositionSide.SHORT, volatility_policy)
+                stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
                 return TradeSignal(
                     symbol=symbol,
                     signal_type=SignalType.ENTER_TREND,
@@ -206,7 +287,7 @@ class StrategyEngine:
                     stop_loss=stop,
                     take_profit=price - self._reward(price, stop, 2.5),
                     reason="trend_short_pullback_macd_cross",
-                    metadata={"volatility_tier": volatility_policy.tier},
+                    metadata={"volatility_tier": volatility_policy.tier, **opportunity_metadata(opportunity)},
                 )
         return None
 
@@ -236,21 +317,63 @@ class StrategyEngine:
         last_4h_down = len(frame_4h) >= 2 and float(frame_4h.close.iloc[-1]) < float(frame_4h.close.iloc[-2])
         trend_up_aligned = self._multi_timeframe_aligned(df, PositionSide.LONG)
         trend_down_aligned = self._multi_timeframe_aligned(df, PositionSide.SHORT)
+        long_momentum_positive = bool(macd_line.iloc[-1] >= signal_line.iloc[-1])
+        short_momentum_positive = bool(macd_line.iloc[-1] <= signal_line.iloc[-1])
 
+        long_rsi_quality = 42 <= last_rsi <= 66
+        long_opportunity = score_opportunity(
+            symbol=symbol,
+            regime=regime,
+            side=PositionSide.LONG,
+            checks={
+                "regime_direction": regime == Regime.SHOCK_TREND_UP,
+                "multi_timeframe": trend_up_aligned,
+                "one_hour_trend": features.ema20_1h >= features.ema60_1h,
+                "four_hour_trend": last_4h_up,
+                "pullback": recent_pullback_down,
+                "confirmation_candle": float(current.close) > float(current.open),
+                "momentum_cross": crossed_above(macd_line, signal_line),
+                "momentum_positive": long_momentum_positive,
+                "price_location": price >= ema_now * 0.998 and price >= features.ema20_1h * 0.997,
+                "ema_slope": ema_now >= ema_prev,
+                "rsi_quality": long_rsi_quality,
+                "not_chasing": last_rsi <= 68,
+            },
+            penalties={
+                "rsi_extreme": last_rsi > 72,
+                "counter_ema": features.ema20_1h < features.ema60_1h,
+            },
+            reward_risk=self.trend_reward_risk,
+            volatility_tier="NORMAL",
+            min_score=88,
+        )
         if (
             regime == Regime.SHOCK_TREND_UP
+            and long_opportunity.allow_trade
             and trend_up_aligned
             and features.ema20_1h >= features.ema60_1h
-            and price >= features.ema20_1h * 0.998
+            and price >= features.ema20_1h * 0.997
             and last_4h_up
             and recent_pullback_down
             and float(current.close) > float(current.open)
             and crossed_above(macd_line, signal_line)
-            and price >= ema_now
+            and price >= ema_now * 0.998
             and ema_now >= ema_prev
-            and 45 <= last_rsi <= 62
+            and long_rsi_quality
+            and sol_trade_allowed(
+                symbol=symbol,
+                side=PositionSide.LONG,
+                regime=regime,
+                score=long_opportunity.score,
+                close_position_72h=features.close_position_72h,
+                ret_24h=features.ret_24h,
+                ret_72h=features.ret_72h,
+                range_72h=features.range_72h,
+            )
         ):
             stop = self._cap_stop(price, float(current_4h.low.min()), PositionSide.LONG)
+            stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
+            reward_risk = self.trend_reward_risk + (0.4 if long_opportunity.score >= 88 else 0.2 if long_opportunity.score >= 78 else 0.0)
             return TradeSignal(
                 symbol=symbol,
                 signal_type=SignalType.ENTER_TREND,
@@ -259,24 +382,65 @@ class StrategyEngine:
                 regime=regime,
                 price=price,
                 stop_loss=stop,
-                take_profit=price + self._reward(price, stop, self.trend_reward_risk),
+                take_profit=price + self._reward(price, stop, reward_risk),
                 reason="shock_trend_up_pullback_confirmed",
+                metadata=opportunity_metadata(long_opportunity),
             )
 
+        short_rsi_quality = 34 <= last_rsi <= 58
+        short_opportunity = score_opportunity(
+            symbol=symbol,
+            regime=regime,
+            side=PositionSide.SHORT,
+            checks={
+                "regime_direction": regime == Regime.SHOCK_TREND_DOWN,
+                "multi_timeframe": trend_down_aligned,
+                "one_hour_trend": features.ema20_1h <= features.ema60_1h,
+                "four_hour_trend": last_4h_down,
+                "pullback": recent_pullback_up,
+                "confirmation_candle": float(current.close) < float(current.open),
+                "momentum_cross": crossed_below(macd_line, signal_line),
+                "momentum_positive": short_momentum_positive,
+                "price_location": price <= ema_now * 1.002 and price <= features.ema20_1h * 1.003,
+                "ema_slope": ema_now <= ema_prev,
+                "rsi_quality": short_rsi_quality,
+                "not_chasing": last_rsi >= 26,
+            },
+            penalties={
+                "rsi_extreme": last_rsi < 22,
+                "counter_ema": features.ema20_1h > features.ema60_1h,
+            },
+            reward_risk=self.trend_reward_risk,
+            volatility_tier="NORMAL",
+            min_score=88,
+        )
         if (
             regime == Regime.SHOCK_TREND_DOWN
+            and short_opportunity.allow_trade
             and trend_down_aligned
             and features.ema20_1h <= features.ema60_1h
-            and price <= features.ema20_1h * 1.002
+            and price <= features.ema20_1h * 1.003
             and last_4h_down
             and recent_pullback_up
             and float(current.close) < float(current.open)
             and crossed_below(macd_line, signal_line)
-            and price <= ema_now
+            and price <= ema_now * 1.002
             and ema_now <= ema_prev
-            and 38 <= last_rsi <= 55
+            and short_rsi_quality
+            and sol_trade_allowed(
+                symbol=symbol,
+                side=PositionSide.SHORT,
+                regime=regime,
+                score=short_opportunity.score,
+                close_position_72h=features.close_position_72h,
+                ret_24h=features.ret_24h,
+                ret_72h=features.ret_72h,
+                range_72h=features.range_72h,
+            )
         ):
             stop = self._cap_stop(price, float(current_4h.high.max()), PositionSide.SHORT)
+            stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
+            reward_risk = self.trend_reward_risk + (0.4 if short_opportunity.score >= 88 else 0.2 if short_opportunity.score >= 78 else 0.0)
             return TradeSignal(
                 symbol=symbol,
                 signal_type=SignalType.ENTER_TREND,
@@ -285,8 +449,9 @@ class StrategyEngine:
                 regime=regime,
                 price=price,
                 stop_loss=stop,
-                take_profit=price - self._reward(price, stop, self.trend_reward_risk),
+                take_profit=price - self._reward(price, stop, reward_risk),
                 reason="shock_trend_down_pullback_confirmed",
+                metadata=opportunity_metadata(short_opportunity),
             )
         return None
 
@@ -439,3 +604,15 @@ class StrategyEngine:
 
     def _reward(self, price: float, stop: float, reward_risk: float) -> float:
         return max(price * self.min_take_profit_pct, reward_risk * abs(price - stop))
+
+
+def recent_down_candle(df) -> bool:
+    if len(df) < 4:
+        return False
+    return bool((df.close.iloc[-4:-1] < df.open.iloc[-4:-1]).any())
+
+
+def recent_up_candle(df) -> bool:
+    if len(df) < 4:
+        return False
+    return bool((df.close.iloc[-4:-1] > df.open.iloc[-4:-1]).any())

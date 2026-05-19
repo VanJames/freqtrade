@@ -65,6 +65,11 @@ class MarketFeatures:
     range_low_4h: float = 0.0
     range_amplitude_4h: float = 0.0
     close_1h: float = 0.0
+    ret_24h: float = 0.0
+    ret_72h: float = 0.0
+    range_24h: float = 0.0
+    range_72h: float = 0.0
+    close_position_72h: float = 0.5
     oi_change_4h: float = 0.0
     short_liq_p95_hit: bool = False
     long_liq_p95_hit: bool = False
@@ -129,4 +134,3 @@ class TrailingState:
     highest_price: float = 0.0
     lowest_price: float = 0.0
     active: bool = False
-

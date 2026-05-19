@@ -73,8 +73,10 @@ class RiskManager:
         if stop_distance <= 0:
             return RiskDecision(False, "invalid_stop_distance")
 
+        risk_multiplier = self.signal_risk_multiplier(signal)
+        risk_budget = self.settings.risk_percent * risk_multiplier
         current_direction_risk = self.direction_risk.get(signal.position_side, 0.0)
-        if current_direction_risk + self.settings.risk_percent > self.settings.same_direction_risk_limit:
+        if current_direction_risk + risk_budget > self.settings.same_direction_risk_limit:
             return RiskDecision(False, "same_direction_risk_limit")
 
         min_reward_risk = 1.5
@@ -87,7 +89,7 @@ class RiskManager:
             if reward / stop_distance < min_reward_risk:
                 return RiskDecision(False, "reward_risk_below_funding_threshold")
 
-        size = (equity * self.settings.risk_percent) / stop_distance
+        size = (equity * risk_budget) / stop_distance
         leverage_limit = (
             self.settings.shock_leverage_limit
             if signal.regime == Regime.SHOCK
@@ -99,5 +101,13 @@ class RiskManager:
             return RiskDecision(False, "zero_position_size")
         return RiskDecision(True, size=size, min_reward_risk=min_reward_risk)
 
-    def reserve_risk(self, side: PositionSide) -> None:
-        self.direction_risk[side] = self.direction_risk.get(side, 0.0) + self.settings.risk_percent
+    def reserve_risk(self, side: PositionSide, risk_multiplier: float = 1.0) -> None:
+        self.direction_risk[side] = self.direction_risk.get(side, 0.0) + self.settings.risk_percent * risk_multiplier
+
+    @staticmethod
+    def signal_risk_multiplier(signal: TradeSignal) -> float:
+        try:
+            value = float(signal.metadata.get("risk_multiplier", 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+        return max(0.0, min(value, 1.5))
