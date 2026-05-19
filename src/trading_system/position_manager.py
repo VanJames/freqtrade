@@ -8,7 +8,12 @@ class PositionManager:
         self.trailing: dict[tuple[str, PositionSide], TrailingState] = {}
 
     def register_entry(self, signal: TradeSignal, atr_value: float) -> None:
-        if signal.regime not in {Regime.TREND_LONG, Regime.TREND_SHORT}:
+        if signal.regime not in {
+            Regime.TREND_LONG,
+            Regime.TREND_SHORT,
+            Regime.SHOCK_TREND_UP,
+            Regime.SHOCK_TREND_DOWN,
+        }:
             return
         key = (signal.symbol, signal.position_side)
         self.trailing[key] = TrailingState(
@@ -78,4 +83,3 @@ class PositionManager:
             reason=reason,
             metadata={"contracts": contracts, "reduce_only": True},
         )
-

@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     funding_block_threshold: float = 0.001
     spike_amplitude_threshold: float = 0.035
     spike_lock_seconds: int = 7200
+    min_stop_loss_pct: float = 0.002
+    high_vol_min_stop_loss_pct: float = 0.004
+    extreme_vol_min_stop_loss_pct: float = 0.005
     max_stop_loss_pct: float = 0.012
     shock_reward_risk: float = 1.15
     trend_reward_risk: float = 1.8
@@ -37,6 +40,8 @@ class Settings(BaseSettings):
     llm_regime_model: str = "gpt-4.1-mini"
     llm_regime_base_url: str = ""
     llm_regime_api_key_env: str = ""
+    llm_regime_review_cache_ttl_seconds: int = 900
+    llm_regime_review_min_interval_seconds: int = 120
 
     @field_validator("symbols", mode="before")
     @classmethod

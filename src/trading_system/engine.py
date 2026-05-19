@@ -16,6 +16,7 @@ from trading_system.regime import MarketRegimeClassifier
 from trading_system.risk import RiskManager
 from trading_system.store import StateStore
 from trading_system.strategy import StrategyEngine
+from trading_system.volatility import build_volatility_policy, needs_llm_review
 
 logger = getLogger(__name__)
 
@@ -38,6 +39,9 @@ class OKXQuantEngine:
         self.foresight = foresight or ForesightProvider()
         self.regime_classifier = MarketRegimeClassifier()
         self.strategy = StrategyEngine(
+            min_stop_loss_pct=settings.min_stop_loss_pct,
+            high_vol_min_stop_loss_pct=settings.high_vol_min_stop_loss_pct,
+            extreme_vol_min_stop_loss_pct=settings.extreme_vol_min_stop_loss_pct,
             max_stop_loss_pct=settings.max_stop_loss_pct,
             shock_reward_risk=settings.shock_reward_risk,
             trend_reward_risk=settings.trend_reward_risk,
@@ -57,6 +61,8 @@ class OKXQuantEngine:
             base_url=settings.llm_regime_base_url or None,
             api_key_env=settings.llm_regime_api_key_env or None,
             enabled=settings.llm_regime_review_enabled,
+            cache_ttl_seconds=settings.llm_regime_review_cache_ttl_seconds,
+            min_interval_seconds=settings.llm_regime_review_min_interval_seconds,
         )
         self.hedge_locks: dict[str, HedgeLock] = {}
         self.klines = {
@@ -129,23 +135,34 @@ class OKXQuantEngine:
             self.klines[symbol]["4h"],
             self.foresight.get(symbol),
         )
-        review = await self.llm_reviewer.review(
-            RegimeReviewInput(
-                symbol=symbol,
-                rule_regime=regime,
-                features={
-                    "adx": features.adx,
-                    "plus_di": features.plus_di,
-                    "minus_di": features.minus_di,
-                    "atr_1h": features.atr_1h,
-                    "ema20_1h": features.ema20_1h,
-                    "ema60_1h": features.ema60_1h,
-                    "range_high_4h": features.range_high_4h,
-                    "range_low_4h": features.range_low_4h,
-                    "range_amplitude_4h": features.range_amplitude_4h,
-                    "close_1h": features.close_1h,
-                },
+        review_features = {
+            "adx": features.adx,
+            "plus_di": features.plus_di,
+            "minus_di": features.minus_di,
+            "atr_1h": features.atr_1h,
+            "atr_pct": features.atr_1h / features.close_1h if features.close_1h else 0.0,
+            "ema20_1h": features.ema20_1h,
+            "ema60_1h": features.ema60_1h,
+            "range_high_4h": features.range_high_4h,
+            "range_low_4h": features.range_low_4h,
+            "range_amplitude_4h": features.range_amplitude_4h,
+            "close_1h": features.close_1h,
+        }
+        volatility_policy = build_volatility_policy(
+            price=features.close_1h,
+            atr_1h=features.atr_1h,
+            base_min_stop_loss_pct=self.settings.min_stop_loss_pct,
+            high_vol_min_stop_loss_pct=self.settings.high_vol_min_stop_loss_pct,
+            extreme_vol_min_stop_loss_pct=self.settings.extreme_vol_min_stop_loss_pct,
+            range_72h=features.range_amplitude_4h,
+        )
+        review_features["volatility_tier"] = volatility_policy.tier
+        review = (
+            await self.llm_reviewer.review(
+                RegimeReviewInput(symbol=symbol, rule_regime=regime, features=review_features)
             )
+            if needs_llm_review(volatility_policy, regime)
+            else self.llm_reviewer.default_review(regime)
         )
         regime = review.proposed_regime
         if not review.allow_trade:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +13,7 @@ import pandas as pd
 from trading_system.indicators import atr, directional_indicators, ema, macd, ohlcv_frame, rsi
 from trading_system.llm_regime import LLMRegimeReviewer, RegimeReviewInput
 from trading_system.models import PositionSide, Regime
+from trading_system.volatility import build_volatility_policy, needs_llm_review
 
 
 TIMEFRAME_MS = {
@@ -40,6 +41,9 @@ class BacktestConfig:
     shock_long_rsi_5m_max: float = 48.0
     shock_short_rsi_5m_min: float = 52.0
     classifier_mode: str = "dev"
+    min_stop_loss_pct: float = 0.002
+    high_vol_min_stop_loss_pct: float = 0.004
+    extreme_vol_min_stop_loss_pct: float = 0.005
     min_take_profit_pct: float = 0.004
     trailing_gap_pct: float = 0.0025
     max_stop_loss_pct: float = 0.012
@@ -47,10 +51,11 @@ class BacktestConfig:
     trend_reward_risk: float = 1.8
     min_trailing_activate_r: float = 1.0
     enable_trend_short: bool = True
+    trend_long_risk_multiplier: float = 0.35
     trend_short_risk_multiplier: float = 0.5
     defensive_risk_multiplier: float = 0.7
-    shock_trend_risk_multiplier: float = 0.5
-    shock_trend_down_risk_multiplier: float = 0.35
+    shock_trend_risk_multiplier: float = 0.1
+    shock_trend_down_risk_multiplier: float = 0.1
     llm_regime_review_enabled: bool = False
     llm_regime_provider: str = "openai"
     llm_regime_model: str = "gpt-4.1-mini"
@@ -119,6 +124,23 @@ class BacktestResult:
         return sum(losses) / len(losses) if losses else 0.0
 
 
+@dataclass(slots=True)
+class OptimizationCandidate:
+    config: BacktestConfig
+    result: BacktestResult
+    score: float
+
+    @property
+    def params(self) -> dict[str, float]:
+        return {
+            "min_stop_loss_pct": self.config.min_stop_loss_pct,
+            "min_take_profit_pct": self.config.min_take_profit_pct,
+            "defensive_risk_multiplier": self.config.defensive_risk_multiplier,
+            "shock_trend_risk_multiplier": self.config.shock_trend_risk_multiplier,
+            "shock_trend_down_risk_multiplier": self.config.shock_trend_down_risk_multiplier,
+        }
+
+
 class OKXBacktester:
     def __init__(self, config: BacktestConfig) -> None:
         self.config = config
@@ -155,6 +177,51 @@ class OKXBacktester:
 
         report_path = self.write_report(result)
         return result, report_path
+
+    def optimize_symbol(
+        self,
+        symbol: str,
+        min_stop_loss_pcts: list[float],
+        min_take_profit_pcts: list[float],
+        defensive_risk_multipliers: list[float],
+        shock_trend_risk_multipliers: list[float],
+        shock_trend_down_risk_multipliers: list[float],
+        top_n: int = 10,
+    ) -> tuple[list[OptimizationCandidate], Path]:
+        end_ms = self.exchange.milliseconds()
+        start_ms = end_ms - self.config.days * 24 * 60 * 60 * 1000
+        fetch_start_ms = start_ms - self.config.warmup_days * 24 * 60 * 60 * 1000
+        candles_5m = self.fetch_ohlcv(symbol, fetch_start_ms, end_ms)
+        candidates: list[OptimizationCandidate] = []
+        for min_stop_loss_pct in min_stop_loss_pcts:
+            for min_take_profit_pct in min_take_profit_pcts:
+                for defensive_risk_multiplier in defensive_risk_multipliers:
+                    for shock_trend_risk_multiplier in shock_trend_risk_multipliers:
+                        for shock_trend_down_risk_multiplier in shock_trend_down_risk_multipliers:
+                            config = replace(
+                                self.config,
+                                symbols=[symbol],
+                                min_stop_loss_pct=min_stop_loss_pct,
+                                min_take_profit_pct=min_take_profit_pct,
+                                defensive_risk_multiplier=defensive_risk_multiplier,
+                                shock_trend_risk_multiplier=shock_trend_risk_multiplier,
+                                shock_trend_down_risk_multiplier=shock_trend_down_risk_multiplier,
+                            )
+                            tester = OKXBacktester(config)
+                            trades, hits, curve, counts = tester.backtest_symbol(symbol, candles_5m, start_ms)
+                            result = BacktestResult(
+                                started_at=datetime.fromtimestamp(start_ms / 1000, timezone.utc),
+                                ended_at=datetime.fromtimestamp(end_ms / 1000, timezone.utc),
+                                trades=trades,
+                                regime_hits=hits,
+                                candles_by_symbol={symbol: len(candles_5m)},
+                                regime_counts=counts,
+                                equity_curve=curve,
+                            )
+                            candidates.append(OptimizationCandidate(config, result, optimization_score(result)))
+        candidates.sort(key=lambda item: item.score, reverse=True)
+        report_path = self.write_optimization_report(symbol, candidates[:top_n], len(candidates))
+        return candidates[:top_n], report_path
 
     def fetch_ohlcv(self, symbol: str, since_ms: int, end_ms: int) -> list[list[float]]:
         cache_path = self.cache_path(symbol, since_ms, end_ms)
@@ -268,7 +335,7 @@ class OKXBacktester:
                 continue
 
             if self.config.classifier_mode == "user_4h":
-                regime, features = classify_user_4h_rules(history_1h, history_4h)
+                regime, features = classify_user_4h_rules(history_1h, history_4h, symbol)
             else:
                 regime, features = classify_kline_only(history_1h, history_4h)
             if last_regime_check is None or now - last_regime_check >= pd.Timedelta(hours=1):
@@ -444,8 +511,53 @@ class OKXBacktester:
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return report_path
 
+    def write_optimization_report(
+        self,
+        symbol: str,
+        candidates: list[OptimizationCandidate],
+        total_candidates: int,
+    ) -> Path:
+        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        report_path = self.config.output_dir / f"okx_optimize_{symbol_to_filename(symbol)}_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.md"
+        lines = [
+            f"# {symbol} 参数寻优报告",
+            "",
+            f"- 回测天数: `{self.config.days}`",
+            f"- 行情判断模式: `{self.config.classifier_mode}`",
+            f"- 搜索组合数: `{total_candidates}`",
+            "- 评分: `total_pnl - 低交易数惩罚 - 胜率低于50%惩罚 - 平均亏损大于平均盈利惩罚`",
+            "",
+            "| rank | score | pnl | win_rate | trades | avg_win | avg_loss | min_sl | min_tp | shock_risk | shock_trend_up | shock_trend_down |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for rank, candidate in enumerate(candidates, start=1):
+            params = candidate.params
+            result = candidate.result
+            lines.append(
+                f"| {rank} | {candidate.score:.2f} | {result.total_pnl:.2f} | {result.win_rate:.2%} | "
+                f"{len(result.trades)} | {result.avg_win:.2f} | {result.avg_loss:.2f} | "
+                f"{params['min_stop_loss_pct']:.3%} | {params['min_take_profit_pct']:.3%} | "
+                f"{params['defensive_risk_multiplier']:.2f} | {params['shock_trend_risk_multiplier']:.2f} | "
+                f"{params['shock_trend_down_risk_multiplier']:.2f} |"
+            )
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        return report_path
+
     def review_regime_sync(self, symbol: str, regime: Regime, features: dict[str, Any]):
         if not self.config.llm_regime_review_enabled:
+            return self.llm_reviewer.default_review(regime)
+        price = float(features.get("close", features.get("close_1h", 0.0)))
+        policy = build_volatility_policy(
+            price=price,
+            atr_1h=float(features.get("atr_1h", 0.0)),
+            base_min_stop_loss_pct=self.config.min_stop_loss_pct,
+            high_vol_min_stop_loss_pct=self.config.high_vol_min_stop_loss_pct,
+            extreme_vol_min_stop_loss_pct=self.config.extreme_vol_min_stop_loss_pct,
+            ret_24h=float(features.get("ret_24h", 0.0)),
+            range_24h=float(features.get("range_24h", 0.0)),
+            range_72h=float(features.get("range_72h", 0.0)),
+        )
+        if not needs_llm_review(policy, regime):
             return self.llm_reviewer.default_review(regime)
         if self.llm_review_count >= self.config.llm_max_calls:
             return self.llm_reviewer.default_review(regime)
@@ -501,7 +613,11 @@ def classify_kline_only(history_1h: pd.DataFrame, history_4h: pd.DataFrame) -> t
     return Regime.UNKNOWN, features
 
 
-def classify_user_4h_rules(history_1h: pd.DataFrame, history_4h: pd.DataFrame) -> tuple[Regime, dict[str, float]]:
+def classify_user_4h_rules(
+    history_1h: pd.DataFrame,
+    history_4h: pd.DataFrame,
+    symbol: str = "",
+) -> tuple[Regime, dict[str, float]]:
     window = history_4h.iloc[-42:]
     recent_3 = history_4h.iloc[-3:]
     recent_6 = history_4h.iloc[-6:]
@@ -513,6 +629,7 @@ def classify_user_4h_rules(history_1h: pd.DataFrame, history_4h: pd.DataFrame) -
     low_in_last_2 = low_pos >= len(window) - 2
     last_close = float(history_1h.close.iloc[-1])
     atr_1h_value = float(atr(history_1h.high, history_1h.low, history_1h.close).iloc[-1])
+    directional = directional_breakout_features(history_1h)
     features = {
         "high_42": high_42,
         "low_42": low_42,
@@ -527,6 +644,7 @@ def classify_user_4h_rules(history_1h: pd.DataFrame, history_4h: pd.DataFrame) -
         "last_4h_close": float(history_4h.close.iloc[-1]),
         "prev_4h_close": float(history_4h.close.iloc[-2]),
         "close": last_close,
+        **directional,
     }
 
     up_3 = bool(
@@ -543,10 +661,14 @@ def classify_user_4h_rules(history_1h: pd.DataFrame, history_4h: pd.DataFrame) -
         and recent_3.high.iloc[2] < recent_3.high.iloc[1]
         and (float(recent_3.low.min()) <= low_42 or low_in_last_2)
     )
-    if up_3:
+    if up_3 and daily_trend_confirmed(history_4h, PositionSide.LONG):
         return Regime.TREND_LONG, features
-    if down_3:
+    if up_3:
+        return Regime.SHOCK_TREND_UP, features
+    if down_3 and daily_trend_confirmed(history_4h, PositionSide.SHORT):
         return Regime.TREND_SHORT, features
+    if down_3:
+        return Regime.SHOCK_TREND_DOWN, features
 
     alternating = count_4h_direction_changes(recent_6) >= 3
     rising_high_steps = sum(
@@ -567,11 +689,118 @@ def classify_user_4h_rules(history_1h: pd.DataFrame, history_4h: pd.DataFrame) -
         return Regime.SHOCK_TREND_UP, features
     if alternating and falling_low_steps >= 3 and falling_high_steps >= 2 and ema20_1h < ema60_1h:
         return Regime.SHOCK_TREND_DOWN, features
+    structural_regime = classify_structural_4h_drift(
+        rising_high_steps,
+        rising_low_steps,
+        falling_high_steps,
+        falling_low_steps,
+    )
+    if structural_regime is not None:
+        return structural_regime, features
+
+    if symbol.startswith("SOL/"):
+        directional_regime = classify_directional_breakout(directional, ema20_1h, ema60_1h)
+        if directional_regime is not None:
+            return directional_regime, features
+        if directional_breakout_active(directional):
+            return Regime.UNKNOWN, features
 
     no_breakout = not high_in_last_2 and not low_in_last_2
     if no_breakout:
         return Regime.SHOCK, features
     return Regime.UNKNOWN, features
+
+
+def classify_structural_4h_drift(
+    rising_high_steps: int,
+    rising_low_steps: int,
+    falling_high_steps: int,
+    falling_low_steps: int,
+) -> Regime | None:
+    up_structure = rising_high_steps >= 3 or rising_low_steps >= 3
+    down_structure = falling_low_steps >= 3 or falling_high_steps >= 3
+    if up_structure and not down_structure:
+        return Regime.SHOCK_TREND_UP
+    if down_structure and not up_structure:
+        return Regime.SHOCK_TREND_DOWN
+    if up_structure and down_structure:
+        return Regime.UNKNOWN
+    return None
+
+
+def daily_trend_confirmed(history_4h: pd.DataFrame, side: PositionSide) -> bool:
+    daily = resample_history(history_4h, "1D")
+    if len(daily) < 3:
+        return False
+    last_2 = daily.iloc[-2:]
+    previous = daily.iloc[-3]
+    current = daily.iloc[-1]
+    close_series = daily.close.astype(float)
+    ema_fast = ema(close_series, 3)
+    ema_slow = ema(close_series, 5)
+    if side == PositionSide.LONG:
+        two_green = bool((last_2.close > last_2.open).all()) and float(current.close) > float(previous.close)
+        breaks_previous_high = float(current.close) > float(previous.high)
+        ema_confirm = float(ema_fast.iloc[-1]) > float(ema_slow.iloc[-1]) and float(current.close) > float(
+            previous.close
+        )
+        return two_green or breaks_previous_high or ema_confirm
+    two_red = bool((last_2.close < last_2.open).all()) and float(current.close) < float(previous.close)
+    breaks_previous_low = float(current.close) < float(previous.low)
+    ema_confirm = float(ema_fast.iloc[-1]) < float(ema_slow.iloc[-1]) and float(current.close) < float(
+        previous.close
+    )
+    return two_red or breaks_previous_low or ema_confirm
+
+
+def directional_breakout_features(history_1h: pd.DataFrame) -> dict[str, float]:
+    if len(history_1h) < 72:
+        return {
+            "ret_24h": 0.0,
+            "ret_72h": 0.0,
+            "range_24h": 0.0,
+            "range_72h": 0.0,
+            "close_position_72h": 0.5,
+        }
+    recent_24h = history_1h.iloc[-24:]
+    recent_72h = history_1h.iloc[-72:]
+    close = float(history_1h.close.iloc[-1])
+    open_24h = float(recent_24h.open.iloc[0])
+    open_72h = float(recent_72h.open.iloc[0])
+    high_24h = float(recent_24h.high.max())
+    low_24h = float(recent_24h.low.min())
+    high_72h = float(recent_72h.high.max())
+    low_72h = float(recent_72h.low.min())
+    return {
+        "ret_24h": (close - open_24h) / open_24h if open_24h else 0.0,
+        "ret_72h": (close - open_72h) / open_72h if open_72h else 0.0,
+        "range_24h": (high_24h - low_24h) / close if close else 0.0,
+        "range_72h": (high_72h - low_72h) / close if close else 0.0,
+        "close_position_72h": (close - low_72h) / (high_72h - low_72h) if high_72h > low_72h else 0.5,
+    }
+
+
+def classify_directional_breakout(
+    features: dict[str, float],
+    ema20_1h: float,
+    ema60_1h: float,
+) -> Regime | None:
+    ret_24h = features["ret_24h"]
+    ret_72h = features["ret_72h"]
+    close_position = features["close_position_72h"]
+    if not directional_breakout_active(features):
+        return None
+    if ret_72h > 0 and ret_24h > -0.01 and ema20_1h >= ema60_1h and close_position >= 0.55:
+        return Regime.SHOCK_TREND_UP
+    if ret_72h < 0 and ret_24h < 0.01 and ema20_1h <= ema60_1h and close_position <= 0.45:
+        return Regime.SHOCK_TREND_DOWN
+    return None
+
+
+def directional_breakout_active(features: dict[str, float]) -> bool:
+    wide_directional = abs(features["ret_72h"]) >= 0.04 and features["range_72h"] >= 0.07
+    short_directional = abs(features["ret_24h"]) >= 0.03 and features["range_24h"] >= 0.035
+    return wide_directional or short_directional
 
 
 def count_4h_direction_changes(frame: pd.DataFrame) -> int:
@@ -605,10 +834,24 @@ def build_signal(
 
     if regime == Regime.TREND_LONG and price >= float(ema20_5m.iloc[-1]) and 45 <= float(rsi_5m.iloc[-1]) <= 55 and crossed_up:
         stop = max(float(history_5m.low.iloc[-12:].min()), price - 1.2 * features["atr_1h"])
-        return {"side": PositionSide.LONG, "regime": regime, "entry": price, "stop": stop, "take_profit": price + 2.5 * (price - stop)}
+        stop = cap_stop(price, stop, PositionSide.LONG, config)
+        return {
+            "side": PositionSide.LONG,
+            "regime": regime,
+            "entry": price,
+            "stop": stop,
+            "take_profit": price + signal_reward(price, stop, 2.5, config),
+        }
     if regime == Regime.TREND_SHORT and price <= float(ema20_5m.iloc[-1]) and 45 <= float(rsi_5m.iloc[-1]) <= 55 and crossed_down:
         stop = min(float(history_5m.high.iloc[-12:].max()), price + 1.2 * features["atr_1h"])
-        return {"side": PositionSide.SHORT, "regime": regime, "entry": price, "stop": stop, "take_profit": price - 2.5 * (stop - price)}
+        stop = cap_stop(price, stop, PositionSide.SHORT, config)
+        return {
+            "side": PositionSide.SHORT,
+            "regime": regime,
+            "entry": price,
+            "stop": stop,
+            "take_profit": price - signal_reward(price, stop, 2.5, config),
+        }
 
     atr_5m = float(atr(history_5m.high, history_5m.low, history_5m.close).iloc[-1]) or features["atr_1h"]
     rsi_5m_value = float(rsi_5m.iloc[-1])
@@ -663,8 +906,30 @@ def build_user_rule_signal(
     previous = history_5m.iloc[-2]
     current = history_5m.iloc[-1]
     macd_line, signal_line, _ = macd(history_5m.close)
+    ema20_5m = ema(history_5m.close, 20)
+    rsi_5m = rsi(history_5m.close, 14)
+    last_rsi_5m = float(rsi_5m.iloc[-1])
+    ema20_5m_value = float(ema20_5m.iloc[-1])
+    ema20_5m_prev = float(ema20_5m.iloc[-4])
     crossed_up = bool(macd_line.iloc[-2] < signal_line.iloc[-2] and macd_line.iloc[-1] >= signal_line.iloc[-1])
     crossed_down = bool(macd_line.iloc[-2] > signal_line.iloc[-2] and macd_line.iloc[-1] <= signal_line.iloc[-1])
+    recent_pullback_down = bool((history_5m.close.iloc[-4:-1] < history_5m.open.iloc[-4:-1]).any())
+    recent_pullback_up = bool((history_5m.close.iloc[-4:-1] > history_5m.open.iloc[-4:-1]).any())
+    directional_breakout = directional_breakout_active(features)
+    trend_up_aligned = multi_timeframe_aligned(history_5m, PositionSide.LONG)
+    trend_down_aligned = multi_timeframe_aligned(history_5m, PositionSide.SHORT)
+    volatility_policy = build_volatility_policy(
+        price=price,
+        atr_1h=features["atr_1h"],
+        base_min_stop_loss_pct=config.min_stop_loss_pct,
+        high_vol_min_stop_loss_pct=config.high_vol_min_stop_loss_pct,
+        extreme_vol_min_stop_loss_pct=config.extreme_vol_min_stop_loss_pct,
+        ret_24h=features.get("ret_24h", 0.0),
+        range_24h=features.get("range_24h", 0.0),
+        range_72h=features.get("range_72h", 0.0),
+    )
+    trend_long_still_near_breakout = price >= features["high_42"] - volatility_policy.breakout_retrace_atr * features["atr_1h"]
+    trend_short_still_near_breakout = price <= features["low_42"] + volatility_policy.breakout_retrace_atr * features["atr_1h"]
 
     if regime == Regime.SHOCK:
         if price < features["midpoint"] and crossed_up:
@@ -690,67 +955,176 @@ def build_user_rule_signal(
                 "risk_multiplier": config.defensive_risk_multiplier,
             }
 
-    if regime == Regime.TREND_LONG and float(current.close) < float(current.open):
-        stop = cap_stop(price, float(features["previous_1h_low"]), PositionSide.LONG, config)
+    if (
+        regime == Regime.TREND_LONG
+        and (not volatility_policy.require_multi_timeframe or trend_up_aligned)
+        and (not volatility_policy.require_near_breakout or trend_long_still_near_breakout)
+        and recent_pullback_down
+        and float(current.close) > float(current.open)
+        and price >= float(ema20_5m.iloc[-1]) * 0.998
+        and 40 <= last_rsi_5m <= 62
+        and crossed_up
+    ):
+        raw_stop = trend_stop(price, float(features["previous_1h_low"]), features["atr_1h"], PositionSide.LONG, volatility_policy)
+        stop = cap_stop(price, raw_stop, PositionSide.LONG, config, volatility_policy)
+        reward = signal_reward(price, stop, config.trend_reward_risk, config)
         return {
             "side": PositionSide.LONG,
             "regime": regime,
             "entry": price,
             "stop": stop,
-            "take_profit": price + config.trend_reward_risk * abs(price - stop),
+            "take_profit": price + reward,
             "trailing_gap_pct": config.trailing_gap_pct,
+            "risk_multiplier": config.trend_long_risk_multiplier * volatility_policy.risk_multiplier,
+            "volatility_tier": volatility_policy.tier,
         }
     if (
         config.enable_trend_short
         and regime == Regime.TREND_SHORT
+        and (not volatility_policy.require_multi_timeframe or trend_down_aligned)
+        and (not volatility_policy.require_near_breakout or trend_short_still_near_breakout)
         and features["ema20_1h"] < features["ema60_1h"]
         and features["last_4h_close"] < features["prev_4h_close"]
         and features["last_4h_close"] <= features["low_42"] * 1.01
         and price < features["low_42"] * 1.003
-        and float(current.close) > float(current.open)
+        and recent_pullback_up
+        and float(current.close) < float(current.open)
+        and price <= float(ema20_5m.iloc[-1]) * 1.002
+        and 38 <= last_rsi_5m <= 60
         and crossed_down
     ):
-        stop = cap_stop(price, float(features["previous_1h_high"]), PositionSide.SHORT, config)
+        raw_stop = trend_stop(price, float(features["previous_1h_high"]), features["atr_1h"], PositionSide.SHORT, volatility_policy)
+        stop = cap_stop(price, raw_stop, PositionSide.SHORT, config, volatility_policy)
+        reward = signal_reward(price, stop, config.trend_reward_risk, config)
         return {
             "side": PositionSide.SHORT,
             "regime": regime,
             "entry": price,
             "stop": stop,
-            "take_profit": price - config.trend_reward_risk * abs(stop - price),
+            "take_profit": price - reward,
             "trailing_gap_pct": config.trailing_gap_pct,
-            "risk_multiplier": config.trend_short_risk_multiplier,
+            "risk_multiplier": config.trend_short_risk_multiplier * volatility_policy.risk_multiplier,
+            "volatility_tier": volatility_policy.tier,
         }
 
-    if regime == Regime.SHOCK_TREND_UP and crossed_up:
+    if (
+        regime == Regime.SHOCK_TREND_UP
+        and not directional_breakout
+        and trend_up_aligned
+        and features["ema20_1h"] >= features["ema60_1h"]
+        and price >= features["ema20_1h"] * 0.998
+        and features["last_4h_close"] > features["prev_4h_close"]
+        and recent_pullback_down
+        and float(current.close) > float(current.open)
+        and crossed_up
+        and price >= ema20_5m_value
+        and ema20_5m_value >= ema20_5m_prev
+        and 45 <= last_rsi_5m <= 62
+    ):
         stop = cap_stop(price, float(features["current_4h_low"]), PositionSide.LONG, config)
+        reward = signal_reward(price, stop, config.trend_reward_risk, config)
         return {
             "side": PositionSide.LONG,
             "regime": regime,
             "entry": price,
             "stop": stop,
-            "take_profit": price + config.trend_reward_risk * abs(price - stop),
+            "take_profit": price + reward,
             "trailing_gap_pct": config.trailing_gap_pct,
             "risk_multiplier": config.shock_trend_risk_multiplier,
         }
-    if regime == Regime.SHOCK_TREND_DOWN and crossed_down:
+    if (
+        regime == Regime.SHOCK_TREND_DOWN
+        and not directional_breakout
+        and trend_down_aligned
+        and features["ema20_1h"] <= features["ema60_1h"]
+        and price <= features["ema20_1h"] * 1.002
+        and features["last_4h_close"] < features["prev_4h_close"]
+        and recent_pullback_up
+        and float(current.close) < float(current.open)
+        and crossed_down
+        and price <= ema20_5m_value
+        and ema20_5m_value <= ema20_5m_prev
+        and 38 <= last_rsi_5m <= 55
+    ):
         stop = cap_stop(price, float(features["current_4h_high"]), PositionSide.SHORT, config)
+        reward = signal_reward(price, stop, config.trend_reward_risk, config)
         return {
             "side": PositionSide.SHORT,
             "regime": regime,
             "entry": price,
             "stop": stop,
-            "take_profit": price - config.trend_reward_risk * abs(stop - price),
+            "take_profit": price - reward,
             "trailing_gap_pct": config.trailing_gap_pct,
             "risk_multiplier": config.shock_trend_down_risk_multiplier,
         }
     return None
 
 
-def cap_stop(price: float, raw_stop: float, side: PositionSide, config: BacktestConfig) -> float:
+def multi_timeframe_aligned(history_5m: pd.DataFrame, side: PositionSide) -> bool:
+    frame_15m = resample_history(history_5m, "15min")
+    frame_1h = resample_history(history_5m, "1h")
+    return timeframe_aligned(history_5m, side, min_bars=30) and timeframe_aligned(
+        frame_15m, side, min_bars=12
+    ) and timeframe_aligned(frame_1h, side, min_bars=6)
+
+
+def resample_history(history: pd.DataFrame, rule: str) -> pd.DataFrame:
+    if not isinstance(history.index, pd.DatetimeIndex):
+        return history
+    return history.resample(rule).agg(
+        {
+            "ts": "last",
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+    ).dropna()
+
+
+def timeframe_aligned(frame: pd.DataFrame, side: PositionSide, min_bars: int) -> bool:
+    if len(frame) < min_bars:
+        return False
+    closes = frame.close.astype(float)
+    ema_line = ema(closes, min(20, max(3, len(closes) // 2)))
+    ema_now = float(ema_line.iloc[-1])
+    ema_prev = float(ema_line.iloc[-min(4, len(ema_line))])
+    last_close = float(closes.iloc[-1])
+    recent_return = (last_close - float(closes.iloc[-min(4, len(closes))])) / float(closes.iloc[-min(4, len(closes))])
+    if side == PositionSide.LONG:
+        return last_close >= ema_now and ema_now >= ema_prev and recent_return >= -0.003
+    return last_close <= ema_now and ema_now <= ema_prev and recent_return <= 0.003
+
+
+def trend_stop(price: float, raw_stop: float, atr_1h: float, side: PositionSide, volatility_policy) -> float:
+    if volatility_policy.stop_buffer_atr > 0:
+        buffer = volatility_policy.stop_buffer_atr * atr_1h
+        if side == PositionSide.LONG:
+            return min(raw_stop - buffer, price - buffer)
+        return max(raw_stop + buffer, price + buffer)
+    return raw_stop
+
+
+def cap_stop(
+    price: float,
+    raw_stop: float,
+    side: PositionSide,
+    config: BacktestConfig,
+    volatility_policy=None,
+) -> float:
+    min_stop_loss_pct = volatility_policy.min_stop_loss_pct if volatility_policy else config.min_stop_loss_pct
+    min_distance = price * min_stop_loss_pct
     max_distance = price * config.max_stop_loss_pct
     if side == PositionSide.LONG:
-        return max(raw_stop, price - max_distance)
-    return min(raw_stop, price + max_distance)
+        stop = min(raw_stop, price - min_distance)
+        return max(stop, price - max_distance)
+    stop = max(raw_stop, price + min_distance)
+    return min(stop, price + max_distance)
+
+
+def signal_reward(price: float, stop: float, reward_risk: float, config: BacktestConfig) -> float:
+    return max(price * config.min_take_profit_pct, reward_risk * abs(price - stop))
 
 
 def maybe_exit(position: dict[str, Any], row: pd.Series) -> tuple[float | None, str]:
@@ -849,6 +1223,18 @@ def evaluate_regime_hit(
     else:
         correct = abs(ret) <= max(0.01, atr_pct)
     return RegimeHit(symbol=symbol, timestamp=now, regime=regime, correct=correct)
+
+
+def optimization_score(result: BacktestResult) -> float:
+    trade_count = len(result.trades)
+    low_trade_penalty = max(0, 20 - trade_count) * 20.0
+    win_rate_penalty = max(0.0, 0.50 - result.win_rate) * 1000.0
+    avg_loss_penalty = max(0.0, abs(result.avg_loss) - result.avg_win) if result.avg_win else 0.0
+    return result.total_pnl - low_trade_penalty - win_rate_penalty - avg_loss_penalty
+
+
+def symbol_to_filename(symbol: str) -> str:
+    return symbol.replace("/", "_").replace(":", "_")
 
 
 def asyncio_run_review(reviewer: LLMRegimeReviewer, item: RegimeReviewInput):

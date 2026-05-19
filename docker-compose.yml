@@ -1,4 +1,62 @@
 services:
+  app:
+    build: .
+    environment:
+      POSTGRES_DSN: postgresql+asyncpg://postgres:postgres@postgres:5432/trading
+      REDIS_URL: redis://redis:6379/0
+      DRY_RUN: ${DRY_RUN:-true}
+    secrets:
+      - app_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["run", "--no-dry-run", "--with-store", "--with-redis"]
+    restart: unless-stopped
+
+  init-db:
+    build: .
+    environment:
+      POSTGRES_DSN: postgresql+asyncpg://postgres:postgres@postgres:5432/trading
+    secrets:
+      - app_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["init-db"]
+    profiles: ["tools"]
+
+  backtest:
+    build: .
+    command: ["backtest", "--days", "${BACKTEST_DAYS:-90}", "--classifier-mode", "user_4h"]
+    secrets:
+      - app_env
+    volumes:
+      - ./reports:/app/reports
+      - ohlcv_cache:/app/.cache/okx_ohlcv
+    profiles: ["tools"]
+
+  dashboard:
+    build: .
+    environment:
+      POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/trading
+      DRY_RUN: ${DRY_RUN:-true}
+      OKX_DEMO: ${OKX_DEMO:-true}
+      SYMBOLS: ${SYMBOLS:-BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT}
+      LLM_REGIME_REVIEW_ENABLED: ${LLM_REGIME_REVIEW_ENABLED:-false}
+      LLM_REGIME_PROVIDER: ${LLM_REGIME_PROVIDER:-}
+      LLM_REGIME_MODEL: ${LLM_REGIME_MODEL:-}
+      LLM_REGIME_REVIEW_CACHE_TTL_SECONDS: ${LLM_REGIME_REVIEW_CACHE_TTL_SECONDS:-900}
+      LLM_REGIME_REVIEW_MIN_INTERVAL_SECONDS: ${LLM_REGIME_REVIEW_MIN_INTERVAL_SECONDS:-120}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "uvicorn", "trading_system.dashboard:app", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "18080:8080"
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -9,12 +67,24 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trading"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   postgres_data:
+  ohlcv_cache:
 
+secrets:
+  app_env:
+    file: .env

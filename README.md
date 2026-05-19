@@ -25,18 +25,34 @@ okx-quant run --dry-run
 - `trading_system.position_manager`: 趋势持仓 ATR 追踪止盈。
 - `trading_system.foresight`: 15m 爆仓与 OI 5 日/4 小时前瞻因子聚合。
 - `trading_system.llm_regime`: 可选 LLM 行情复核，基于 `knowledge/regime_rules.md`，默认关闭。
+- `trading_system.volatility`: 基于 ATR/动量/区间波动自适应选择过滤强度，避免按单个 symbol 写死策略。
 - `trading_system.exchange`: 交易所适配器，含 dry-run 适配器。
 
 ## 常用命令
 
 ```bash
-docker compose up -d
-okx-quant init-db
-okx-quant run --dry-run --once --with-store --with-redis
+cp .env.example .env
+docker compose --profile tools run --rm init-db
+docker compose up -d app
 ```
+
+Compose 通过 Docker secret 挂载 `.env`，不要把 `docker compose config` 的输出贴到公开位置；如果你曾经把真实 key 输出到日志或聊天记录，应立刻在 OKX/DeepSeek 后台轮换。
 
 `--with-store` 会启用 `order_tracks` 与 `account_snapshots`，启动时从最新快照恢复状态机。
 `--with-redis` 会缓存当前持仓、未成交订单与锁仓状态，Redis 不可用时会降级继续运行。
+
+回测：
+
+```bash
+BACKTEST_DAYS=90 docker compose --profile tools run --rm backtest
+```
+
+本地直接运行：
+
+```bash
+okx-quant init-db
+okx-quant run --dry-run --once --with-store --with-redis
+```
 
 ## LLM 行情复核
 
@@ -50,6 +66,8 @@ OPENAI_API_KEY=
 ```
 
 启用后，LLM 只做规则复核，不直接替代规则引擎。知识库在 `knowledge/regime_rules.md`，输出必须是固定结构化结果；低置信度不能覆盖规则结果，`TREND_SHORT` 需要更高置信度，否则禁止交易或降风险。
+
+LLM 不会每根 K 线都调用。系统先用 `ATR_1H / price`、24h 动量、24h/72h 区间波动给出 `NORMAL/HIGH/EXTREME` 分层；只有 HIGH/EXTREME 且规则判断为 `TREND_LONG/TREND_SHORT/SHOCK_TREND_UP/SHOCK_TREND_DOWN` 时才复核。
 
 DeepSeek 兼容模式：
 

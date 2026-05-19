@@ -78,6 +78,10 @@ def backtest(
             shock_stop_atr=shock_stop_atr,
             shock_take_profit_atr=shock_take_profit_atr,
             classifier_mode=classifier_mode,
+            min_stop_loss_pct=settings.min_stop_loss_pct,
+            high_vol_min_stop_loss_pct=settings.high_vol_min_stop_loss_pct,
+            extreme_vol_min_stop_loss_pct=settings.extreme_vol_min_stop_loss_pct,
+            min_take_profit_pct=settings.min_take_profit_pct,
             llm_regime_review_enabled=llm_review,
             llm_regime_provider=llm_provider or settings.llm_regime_provider,
             llm_regime_model=llm_model or settings.llm_regime_model,
@@ -91,6 +95,44 @@ def backtest(
     typer.echo(f"win_rate: {result.win_rate:.2%}")
     typer.echo(f"total_pnl: {result.total_pnl:.2f} USDT")
     typer.echo(f"regime_accuracy: {result.regime_accuracy:.2%}")
+
+
+@app.command()
+def optimize_params(
+    symbol: str = typer.Option(..., help="Single OKX swap symbol, e.g. SOL/USDT:USDT."),
+    days: int = typer.Option(30, help="Optimization lookback window in calendar days."),
+    classifier_mode: str = typer.Option("user_4h", help="Regime classifier mode: dev or user_4h."),
+    top_n: int = typer.Option(10, help="Number of top parameter sets to report."),
+) -> None:
+    configure_logging(logging.INFO)
+    settings = Settings()
+    top, report_path = OKXBacktester(
+        BacktestConfig(
+            symbols=[symbol],
+            days=days,
+            classifier_mode=classifier_mode,
+            min_stop_loss_pct=settings.min_stop_loss_pct,
+            high_vol_min_stop_loss_pct=settings.high_vol_min_stop_loss_pct,
+            extreme_vol_min_stop_loss_pct=settings.extreme_vol_min_stop_loss_pct,
+            min_take_profit_pct=settings.min_take_profit_pct,
+        )
+    ).optimize_symbol(
+        symbol=symbol,
+        min_stop_loss_pcts=[0.002, 0.004],
+        min_take_profit_pcts=[0.004, 0.008],
+        defensive_risk_multipliers=[0.35, 0.7],
+        shock_trend_risk_multipliers=[0.0, 0.1],
+        shock_trend_down_risk_multipliers=[0.0, 0.1],
+        top_n=top_n,
+    )
+    best = top[0] if top else None
+    typer.echo(f"report: {report_path}")
+    if best:
+        typer.echo(f"best_score: {best.score:.2f}")
+        typer.echo(f"best_pnl: {best.result.total_pnl:.2f} USDT")
+        typer.echo(f"best_win_rate: {best.result.win_rate:.2%}")
+        typer.echo(f"best_trades: {len(best.result.trades)}")
+        typer.echo(f"best_params: {best.params}")
 
 
 if __name__ == "__main__":
