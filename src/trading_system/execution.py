@@ -41,7 +41,7 @@ class ExecutionEngine:
             decision.size,
             price,
             {
-                "ordType": "ioc" if reduce_only else "postOnly",
+                "ordType": "ioc" if reduce_only else "post_only",
                 "posSide": signal.position_side.value,
                 "reduceOnly": reduce_only,
             },
@@ -66,7 +66,7 @@ class ExecutionEngine:
             signal.side,
             amount,
             price,
-            {"ordType": "postOnly" if post_only else "ioc", "posSide": signal.position_side.value},
+            {"ordType": "post_only" if post_only else "ioc", "posSide": signal.position_side.value},
         )
         if post_only:
             task = asyncio.create_task(self.track_and_twap(order, signal))

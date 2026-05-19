@@ -124,7 +124,7 @@ class DryRunExchange(ExchangeClient):
     ) -> OrderResult:
         order_id = f"dry-{next(self._ids)}"
         position_side = PositionSide(params.get("posSide", "long"))
-        filled = 0.0 if params.get("ordType") == "postOnly" else amount
+        filled = 0.0 if params.get("ordType") == "post_only" else amount
         status = "open" if filled == 0 else "closed"
         result = OrderResult(order_id, symbol, side, position_side, amount, price, status, filled, amount - filled)
         self.orders[order_id] = result

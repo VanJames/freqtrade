@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from logging import getLogger
 
 from trading_system.cache import StateCache
@@ -71,6 +72,7 @@ class OKXQuantEngine:
             for symbol in settings.symbols
         }
         self._applied_leverage_limit = settings.trend_symbol_leverage_limit
+        self.symbol_status: dict[str, dict[str, object]] = {}
         self.running = False
 
     async def initialize(self, init_store: bool = True) -> None:
@@ -170,6 +172,12 @@ class OKXQuantEngine:
             else self.llm_reviewer.default_review(regime)
         )
         regime = review.proposed_regime
+        latest_price = float(self.klines[symbol]["5m"][-1][4]) if self.klines[symbol]["5m"] else features.close_1h
+        self.symbol_status[symbol] = {
+            "price": latest_price,
+            "regime": regime.value,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
         if not review.allow_trade:
             return []
         positions = await self.exchange.fetch_positions(symbol)
@@ -282,12 +290,14 @@ class OKXQuantEngine:
                 "risk_percent": self.settings.risk_percent,
                 "same_direction_risk_limit": self.settings.same_direction_risk_limit,
                 "daily_drawdown_limit": self.settings.daily_drawdown_limit,
-                    "shock_leverage_limit": self.settings.shock_leverage_limit,
-                    "trend_symbol_leverage_limit": self.settings.trend_symbol_leverage_limit,
-                    "max_signal_risk_multiplier": self.settings.max_signal_risk_multiplier,
-                    "confirmation_position_sizing": self.settings.confirmation_position_sizing,
-                    "confirmation_max_risk_multiplier": self.settings.confirmation_max_risk_multiplier,
-                },
+                "shock_leverage_limit": self.settings.shock_leverage_limit,
+                "trend_symbol_leverage_limit": self.settings.trend_symbol_leverage_limit,
+                "max_signal_risk_multiplier": self.settings.max_signal_risk_multiplier,
+                "confirmation_position_sizing": self.settings.confirmation_position_sizing,
+                "confirmation_max_risk_multiplier": self.settings.confirmation_max_risk_multiplier,
+            },
+            "prices": {symbol: status.get("price") for symbol, status in self.symbol_status.items()},
+            "regime_checked_at": {symbol: status.get("checked_at") for symbol, status in self.symbol_status.items()},
             "symbol_locks": {symbol: until.isoformat() for symbol, until in self.risk.symbol_locks.items()},
             "hedge_locks": {
                 symbol: {

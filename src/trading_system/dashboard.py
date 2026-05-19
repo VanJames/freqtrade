@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from html import escape
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
 from fastapi import Body, FastAPI, HTTPException
@@ -16,6 +17,14 @@ from trading_system.runtime_config import RUNTIME_FIELDS, runtime_defaults, vali
 
 
 app = FastAPI(title="OKX Quant Dashboard")
+
+
+def dashboard_tz() -> ZoneInfo:
+    name = os.getenv("DASHBOARD_TIMEZONE", "Asia/Shanghai")
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
 
 
 def dsn() -> str:
@@ -58,6 +67,7 @@ async def fetch_dashboard_data() -> dict[str, Any]:
 
     return {
         "now": datetime.now(timezone.utc).isoformat(),
+        "local_now": format_local_time(datetime.now(timezone.utc).isoformat()),
         "mode": {
             "dry_run": os.getenv("DRY_RUN", ""),
             "okx_demo": os.getenv("OKX_DEMO", ""),
@@ -150,6 +160,8 @@ def render_page(data: dict[str, Any]) -> str:
     snapshot = data["latest_snapshot"] or {}
     memory = snapshot.get("serialized_memory") or {}
     regimes = memory.get("regimes", {}) if isinstance(memory, dict) else {}
+    prices = memory.get("prices", {}) if isinstance(memory, dict) else {}
+    regime_checked_at = memory.get("regime_checked_at", {}) if isinstance(memory, dict) else {}
     hedge_locks = memory.get("hedge_locks", {}) if isinstance(memory, dict) else {}
     risk = memory.get("risk", {}) if isinstance(memory, dict) else {}
     orders = data["orders"]
@@ -197,7 +209,7 @@ def render_page(data: dict[str, Any]) -> str:
   <header>
     <div>
       <h1>OKX Quant Dashboard</h1>
-      <div class="muted">UTC {escape(str(data["now"]))} · 每 10 秒自动刷新</div>
+      <div class="muted">本地时间 {escape(str(data["local_now"]))} · 每 10 秒自动刷新</div>
     </div>
     <div>{mode_badge(mode)}</div>
   </header>
@@ -212,7 +224,7 @@ def render_page(data: dict[str, Any]) -> str:
   <section class="cards">
     <div class="panel">
       <h2>当前行情</h2>
-      {dict_table(regimes)}
+      {market_table(mode, regimes, prices, regime_checked_at)}
     </div>
     <div class="panel">
       <h2>风控状态</h2>
@@ -289,6 +301,63 @@ def fmt(value: Any, unit: str = "") -> str:
     if isinstance(value, float):
         return f"{value:.2f} {unit}".strip()
     return f"{value} {unit}".strip()
+
+
+def format_local_time(value: Any) -> str:
+    if not value:
+        return "-"
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value)
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return raw
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(dashboard_tz()).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def market_table(
+    mode: dict[str, Any],
+    regimes: dict[str, Any],
+    prices: dict[str, Any],
+    regime_checked_at: dict[str, Any],
+) -> str:
+    symbols = [item.strip() for item in str(mode.get("symbols") or "").split(",") if item.strip()]
+    if not symbols:
+        symbols = sorted(set(regimes) | set(prices) | set(regime_checked_at))
+    if not symbols:
+        return '<div class="muted">暂无数据</div>'
+    rows = ""
+    for symbol in symbols:
+        rows += (
+            "<tr>"
+            f"<td>{escape(symbol)}</td>"
+            f"<td>{escape(format_price(prices.get(symbol)))}</td>"
+            f"<td>{escape(str(regimes.get(symbol, '-')))}</td>"
+            f"<td>{escape(format_local_time(regime_checked_at.get(symbol)))}</td>"
+            "</tr>"
+        )
+    return (
+        "<table><thead><tr><th>品种</th><th>实时价格</th><th>行情判断</th><th>最近判断时间</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
+
+
+def format_price(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if price >= 1000:
+        return f"{price:.2f}"
+    if price >= 10:
+        return f"{price:.4f}"
+    return f"{price:.6f}"
 
 
 def dict_table(values: dict[str, Any]) -> str:
