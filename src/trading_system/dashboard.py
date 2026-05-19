@@ -8,8 +8,11 @@ from html import escape
 from typing import Any
 
 import asyncpg
-from fastapi import FastAPI
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
+
+from trading_system.config import Settings
+from trading_system.runtime_config import RUNTIME_FIELDS, runtime_defaults, validate_runtime_config
 
 
 app = FastAPI(title="OKX Quant Dashboard")
@@ -21,6 +24,8 @@ def dsn() -> str:
 
 
 async def fetch_dashboard_data() -> dict[str, Any]:
+    settings = Settings()
+    defaults = runtime_defaults(settings)
     conn = await asyncpg.connect(dsn())
     try:
         latest_snapshot = await conn.fetchrow(
@@ -41,8 +46,15 @@ async def fetch_dashboard_data() -> dict[str, Any]:
             """
         )
         order_count = await conn.fetchval("select count(*) from order_tracks")
+        runtime_rows = await conn.fetch("select setting_key, setting_value, updated_at from runtime_settings")
     finally:
         await conn.close()
+
+    runtime_config = defaults | {
+        str(row["setting_key"]): float(row["setting_value"])
+        for row in runtime_rows
+        if str(row["setting_key"]) in defaults
+    }
 
     return {
         "now": datetime.now(timezone.utc).isoformat(),
@@ -59,6 +71,18 @@ async def fetch_dashboard_data() -> dict[str, Any]:
         "latest_snapshot": normalize_row(latest_snapshot),
         "orders": [normalize_row(row) for row in orders],
         "order_count": int(order_count or 0),
+        "runtime_config": runtime_config,
+        "runtime_fields": [
+            {
+                "key": field.key,
+                "label": field.label,
+                "min": field.min_value,
+                "max": field.max_value,
+                "step": field.step,
+                "percent": field.percent,
+            }
+            for field in RUNTIME_FIELDS
+        ],
     }
 
 
@@ -90,6 +114,31 @@ async def api_status() -> JSONResponse:
     return JSONResponse(await fetch_dashboard_data())
 
 
+@app.post("/api/runtime-config")
+async def api_update_runtime_config(payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    try:
+        values = validate_runtime_config(payload, Settings())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    conn = await asyncpg.connect(dsn())
+    try:
+        async with conn.transaction():
+            for key, value in values.items():
+                await conn.execute(
+                    """
+                    insert into runtime_settings(setting_key, setting_value, updated_at)
+                    values($1, $2, now())
+                    on conflict(setting_key)
+                    do update set setting_value = excluded.setting_value, updated_at = excluded.updated_at
+                    """,
+                    key,
+                    str(value),
+                )
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "runtime_config": values})
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     data = await fetch_dashboard_data()
@@ -104,6 +153,8 @@ def render_page(data: dict[str, Any]) -> str:
     risk = memory.get("risk", {}) if isinstance(memory, dict) else {}
     orders = data["orders"]
     mode = data["mode"]
+    runtime_config = data["runtime_config"]
+    runtime_fields = data["runtime_fields"]
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -131,8 +182,13 @@ def render_page(data: dict[str, Any]) -> str:
     th, td {{ border-bottom:1px solid var(--line); padding:9px 8px; text-align:left; white-space:normal; overflow-wrap:anywhere; word-break:break-word; }}
     th {{ color:var(--muted); font-weight:600; }}
     .cards {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }}
+    .form-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
+    label {{ display:flex; flex-direction:column; gap:6px; color:var(--muted); font-size:13px; }}
+    input {{ width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; background:#10131a; color:var(--text); padding:10px 11px; font-size:14px; }}
+    button {{ border:1px solid #3c76ff; background:#2258d4; color:white; border-radius:6px; padding:10px 14px; font-weight:700; cursor:pointer; }}
+    .actions {{ display:flex; align-items:center; gap:12px; margin-top:14px; }}
     pre {{ overflow:auto; margin:0; font-size:12px; color:#c8d1dc; }}
-    @media (max-width:900px) {{ .grid,.cards {{ grid-template-columns:1fr; }} header {{ flex-direction:column; }} }}
+    @media (max-width:900px) {{ .grid,.cards,.form-grid {{ grid-template-columns:1fr; }} header {{ flex-direction:column; }} }}
   </style>
 </head>
 <body>
@@ -168,6 +224,11 @@ def render_page(data: dict[str, Any]) -> str:
     {orders_table(orders)}
   </section>
 
+  <section class="panel" style="margin-bottom:16px">
+    <h2>动态风控配置</h2>
+    {runtime_config_form(runtime_fields, runtime_config)}
+  </section>
+
   <section class="cards">
     <div class="panel">
       <h2>锁仓状态</h2>
@@ -179,6 +240,28 @@ def render_page(data: dict[str, Any]) -> str:
     </div>
   </section>
 </main>
+<script>
+  const form = document.getElementById("runtime-config-form");
+  if (form) {{
+    form.addEventListener("submit", async (event) => {{
+      event.preventDefault();
+      const status = document.getElementById("runtime-config-status");
+      const payload = Object.fromEntries(new FormData(form).entries());
+      status.textContent = "保存中...";
+      const response = await fetch("/api/runtime-config", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify(payload)
+      }});
+      if (response.ok) {{
+        status.textContent = "已保存，实盘引擎下一轮自动应用";
+      }} else {{
+        const data = await response.json().catch(() => ({{detail: "保存失败"}}));
+        status.textContent = data.detail || "保存失败";
+      }}
+    }});
+  }}
+</script>
 </body>
 </html>"""
 
@@ -212,6 +295,29 @@ def dict_table(values: dict[str, Any]) -> str:
         for key, value in values.items()
     )
     return f"<table>{rows}</table>"
+
+
+def runtime_config_form(fields: list[dict[str, Any]], values: dict[str, Any]) -> str:
+    controls = []
+    for field in fields:
+        key = str(field["key"])
+        hint = f"{field['min']} - {field['max']}"
+        if field.get("percent"):
+            hint += "，0.01=1%"
+        controls.append(
+            "<label>"
+            f"<span>{escape(str(field['label']))} <span class=\"muted\">{escape(hint)}</span></span>"
+            f"<input name=\"{escape(key)}\" type=\"number\" min=\"{field['min']}\" max=\"{field['max']}\" "
+            f"step=\"{field['step']}\" value=\"{escape(str(values.get(key, '')))}\">"
+            "</label>"
+        )
+    return (
+        '<form id="runtime-config-form">'
+        f'<div class="form-grid">{"".join(controls)}</div>'
+        '<div class="actions"><button type="submit">保存配置</button>'
+        '<span id="runtime-config-status" class="muted">修改后约 1 分钟内应用到实盘</span></div>'
+        "</form>"
+    )
 
 
 def short_value(value: Any) -> str:

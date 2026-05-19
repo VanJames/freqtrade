@@ -6,6 +6,7 @@ from typing import Any
 
 import orjson
 from sqlalchemy import Boolean, Column, DateTime, MetaData, Numeric, String, Table, Text, desc, insert, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -35,6 +36,14 @@ account_snapshots = Table(
     Column("total_equity", Numeric(18, 4), nullable=False),
     Column("active_hedging", Boolean, nullable=False, default=False),
     Column("serialized_memory", Text, nullable=False),
+)
+
+runtime_settings = Table(
+    "runtime_settings",
+    metadata,
+    Column("setting_key", String(64), primary_key=True),
+    Column("setting_value", Text, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
 
@@ -95,6 +104,31 @@ class StateStore:
         if row is None:
             return None
         return orjson.loads(row.serialized_memory)
+
+    async def save_runtime_settings(self, values: dict[str, float]) -> None:
+        now = datetime.now(timezone.utc)
+        async with self.engine.begin() as conn:
+            for key, value in values.items():
+                stmt = (
+                    pg_insert(runtime_settings)
+                    .values(setting_key=key, setting_value=str(value), updated_at=now)
+                    .on_conflict_do_update(
+                        index_elements=[runtime_settings.c.setting_key],
+                        set_={"setting_value": str(value), "updated_at": now},
+                    )
+                )
+                await conn.execute(stmt)
+
+    async def load_runtime_settings(self) -> dict[str, float]:
+        async with self.engine.begin() as conn:
+            rows = await conn.execute(select(runtime_settings.c.setting_key, runtime_settings.c.setting_value))
+        result: dict[str, float] = {}
+        for key, value in rows:
+            try:
+                result[str(key)] = float(value)
+            except (TypeError, ValueError):
+                logger.warning("ignored invalid runtime setting key=%s value=%s", key, value)
+        return result
 
     async def close(self) -> None:
         await self.engine.dispose()

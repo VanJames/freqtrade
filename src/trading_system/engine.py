@@ -14,6 +14,7 @@ from trading_system.portfolio import AlphaFilter, GridPlanner
 from trading_system.position_manager import PositionManager
 from trading_system.regime import MarketRegimeClassifier
 from trading_system.risk import RiskManager
+from trading_system.runtime_config import apply_runtime_config
 from trading_system.store import StateStore
 from trading_system.strategy import StrategyEngine
 from trading_system.volatility import build_volatility_policy, needs_llm_review
@@ -69,12 +70,14 @@ class OKXQuantEngine:
             symbol: {"5m": [], "1h": [], "4h": []}
             for symbol in settings.symbols
         }
+        self._applied_leverage_limit = settings.trend_symbol_leverage_limit
         self.running = False
 
     async def initialize(self, init_store: bool = True) -> None:
         await self.exchange.initialize()
         if self.store and init_store:
             await self.store.initialize()
+            await self._apply_runtime_settings(update_exchange_leverage=False)
             await self._restore_latest_snapshot()
         if self.cache:
             await self.cache.ping()
@@ -210,6 +213,7 @@ class OKXQuantEngine:
     async def _execute_signals(self, signals: list[TradeSignal]) -> None:
         if not signals:
             return
+        await self._apply_runtime_settings()
         equity = await self.exchange.fetch_balance_equity()
         if self.risk.update_equity(equity):
             logger.critical("risk fuse active; skipping orders")
@@ -256,6 +260,7 @@ class OKXQuantEngine:
     async def _monitor_loop(self) -> None:
         while self.running and not self.risk.fused():
             try:
+                await self._apply_runtime_settings()
                 equity = await self.exchange.fetch_balance_equity()
                 if self.risk.update_equity(equity):
                     await self.exchange.close_all_positions()
@@ -273,6 +278,14 @@ class OKXQuantEngine:
         memory = {
             "regimes": {symbol: regime.value for symbol, regime in self.regime_classifier.regimes.items()},
             "direction_risk": {side.value: value for side, value in self.risk.direction_risk.items()},
+            "risk": {
+                "risk_percent": self.settings.risk_percent,
+                "same_direction_risk_limit": self.settings.same_direction_risk_limit,
+                "daily_drawdown_limit": self.settings.daily_drawdown_limit,
+                "shock_leverage_limit": self.settings.shock_leverage_limit,
+                "trend_symbol_leverage_limit": self.settings.trend_symbol_leverage_limit,
+                "max_signal_risk_multiplier": self.settings.max_signal_risk_multiplier,
+            },
             "symbol_locks": {symbol: until.isoformat() for symbol, until in self.risk.symbol_locks.items()},
             "hedge_locks": {
                 symbol: {
@@ -315,6 +328,20 @@ class OKXQuantEngine:
             return
         await self.cache.set_positions(await self.exchange.fetch_positions())
         await self.cache.set_hedge_locks(self.hedge_locks)
+
+    async def _apply_runtime_settings(self, update_exchange_leverage: bool = True) -> None:
+        if not self.store:
+            return
+        values = await self.store.load_runtime_settings()
+        if not values:
+            return
+        previous_leverage = self.settings.trend_symbol_leverage_limit
+        apply_runtime_config(self.settings, values)
+        if update_exchange_leverage and self.settings.trend_symbol_leverage_limit != previous_leverage:
+            for symbol in self.settings.symbols:
+                await self.exchange.set_leverage(symbol, self.settings.trend_symbol_leverage_limit)
+            self._applied_leverage_limit = self.settings.trend_symbol_leverage_limit
+            logger.info("runtime leverage updated leverage=%s", self.settings.trend_symbol_leverage_limit)
 
     async def shutdown(self) -> None:
         self.running = False

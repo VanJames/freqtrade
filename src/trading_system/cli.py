@@ -59,9 +59,13 @@ def backtest(
     days: int = typer.Option(30, help="Backtest lookback window in calendar days."),
     symbols: Optional[str] = typer.Option(None, help="Comma-separated OKX swap symbols. Defaults to .env SYMBOLS."),
     initial_equity: float = typer.Option(10_000.0, help="Initial equity in USDT."),
+    risk_percent: Optional[float] = typer.Option(None, help="Base risk per trade, e.g. 0.01 means 1%."),
     shock_stop_atr: float = typer.Option(1.0, help="SHOCK stop distance in ATR."),
     shock_take_profit_atr: float = typer.Option(1.8, help="SHOCK take-profit distance in ATR."),
     classifier_mode: str = typer.Option("dev", help="Regime classifier mode: dev or user_4h."),
+    shock_leverage_limit: Optional[float] = typer.Option(None, help="Maximum leverage for SHOCK grid trades."),
+    trend_leverage_limit: Optional[float] = typer.Option(None, help="Maximum leverage for trend/shock-trend trades."),
+    max_signal_risk_multiplier: Optional[float] = typer.Option(None, help="Maximum per-signal risk multiplier."),
     llm_review: bool = typer.Option(False, help="Enable LLM regime review during backtest."),
     llm_provider: Optional[str] = typer.Option(None, help="LLM provider: openai or deepseek."),
     llm_model: Optional[str] = typer.Option(None, help="LLM model name."),
@@ -75,6 +79,14 @@ def backtest(
             symbols=selected_symbols,
             days=days,
             initial_equity=initial_equity,
+            risk_percent=risk_percent if risk_percent is not None else settings.risk_percent,
+            shock_leverage_limit=shock_leverage_limit if shock_leverage_limit is not None else settings.shock_leverage_limit,
+            trend_symbol_leverage_limit=trend_leverage_limit if trend_leverage_limit is not None else settings.trend_symbol_leverage_limit,
+            max_signal_risk_multiplier=(
+                max_signal_risk_multiplier
+                if max_signal_risk_multiplier is not None
+                else settings.max_signal_risk_multiplier
+            ),
             shock_stop_atr=shock_stop_atr,
             shock_take_profit_atr=shock_take_profit_atr,
             classifier_mode=classifier_mode,

@@ -29,6 +29,9 @@ class BacktestConfig:
     warmup_days: int = 10
     initial_equity: float = 10_000.0
     risk_percent: float = 0.01
+    shock_leverage_limit: float = 3.0
+    trend_symbol_leverage_limit: float = 5.0
+    max_signal_risk_multiplier: float = 1.5
     fee_rate: float = 0.0002
     slippage_rate: float = 0.0001
     output_dir: Path = Path("reports")
@@ -372,8 +375,18 @@ class OKXBacktester:
             stop_distance = abs(signal["entry"] - signal["stop"])
             if stop_distance <= 0:
                 continue
-            risk_percent = self.config.risk_percent * float(signal.get("risk_multiplier", 1.0))
+            risk_multiplier = max(
+                0.0,
+                min(float(signal.get("risk_multiplier", 1.0)), self.config.max_signal_risk_multiplier),
+            )
+            risk_percent = self.config.risk_percent * risk_multiplier
             qty = (equity * risk_percent) / stop_distance
+            leverage_limit = (
+                self.config.shock_leverage_limit
+                if regime == Regime.SHOCK
+                else self.config.trend_symbol_leverage_limit
+            )
+            qty = min(qty, (equity * leverage_limit) / signal["entry"])
             open_position = {
                 **signal,
                 "qty": qty,
@@ -418,6 +431,7 @@ class OKXBacktester:
             f"- 回测区间: `{result.started_at.isoformat()}` 至 `{result.ended_at.isoformat()}`",
             f"- 初始权益: `{self.config.initial_equity:.2f} USDT`",
             f"- 品种: `{', '.join(self.config.symbols)}`",
+            f"- 杠杆限制: shock `{self.config.shock_leverage_limit:.1f}x`, trend `{self.config.trend_symbol_leverage_limit:.1f}x`, signal risk cap `{self.config.max_signal_risk_multiplier:.1f}x`",
             f"- 手续费假设: maker `{self.config.fee_rate:.4%}` 每边，滑点 `{self.config.slippage_rate:.4%}` 每边",
             f"- SHOCK 参数: stop `{self.config.shock_stop_atr} ATR`, take_profit `{self.config.shock_take_profit_atr} ATR`, "
             f"long zone `{self.config.shock_long_zone_min:.0%}-{self.config.shock_long_zone_max:.0%}`, "

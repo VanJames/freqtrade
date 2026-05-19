@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     daily_drawdown_limit: float = 0.05
     shock_leverage_limit: float = 3.0
     trend_symbol_leverage_limit: float = 5.0
+    max_signal_risk_multiplier: float = 1.5
     funding_block_threshold: float = 0.001
     spike_amplitude_threshold: float = 0.035
     spike_lock_seconds: int = 7200

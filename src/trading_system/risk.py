@@ -104,10 +104,9 @@ class RiskManager:
     def reserve_risk(self, side: PositionSide, risk_multiplier: float = 1.0) -> None:
         self.direction_risk[side] = self.direction_risk.get(side, 0.0) + self.settings.risk_percent * risk_multiplier
 
-    @staticmethod
-    def signal_risk_multiplier(signal: TradeSignal) -> float:
+    def signal_risk_multiplier(self, signal: TradeSignal) -> float:
         try:
             value = float(signal.metadata.get("risk_multiplier", 1.0))
         except (TypeError, ValueError):
             return 1.0
-        return max(0.0, min(value, 1.5))
+        return max(0.0, min(value, self.settings.max_signal_risk_multiplier))
