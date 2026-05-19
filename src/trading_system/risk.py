@@ -7,6 +7,7 @@ from logging import getLogger
 from trading_system.config import Settings
 from trading_system.indicators import ohlcv_frame
 from trading_system.models import PositionSide, Regime, SignalType, TradeSignal
+from trading_system.position_sizing import adjusted_risk_multiplier
 
 logger = getLogger(__name__)
 
@@ -105,8 +106,4 @@ class RiskManager:
         self.direction_risk[side] = self.direction_risk.get(side, 0.0) + self.settings.risk_percent * risk_multiplier
 
     def signal_risk_multiplier(self, signal: TradeSignal) -> float:
-        try:
-            value = float(signal.metadata.get("risk_multiplier", 1.0))
-        except (TypeError, ValueError):
-            return 1.0
-        return max(0.0, min(value, self.settings.max_signal_risk_multiplier))
+        return adjusted_risk_multiplier(signal, self.settings)

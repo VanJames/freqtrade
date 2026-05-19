@@ -15,6 +15,7 @@ class RuntimeField:
     max_value: float
     step: float
     percent: bool = False
+    boolean: bool = False
 
 
 RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
@@ -24,6 +25,8 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
     RuntimeField("shock_leverage_limit", "震荡最大杠杆", 3.0, 0.1, 20.0, 0.1),
     RuntimeField("trend_symbol_leverage_limit", "趋势最大杠杆", 5.0, 0.1, 20.0, 0.1),
     RuntimeField("max_signal_risk_multiplier", "信号风险倍数上限", 1.5, 0.1, 20.0, 0.1),
+    RuntimeField("confirmation_position_sizing", "启用确认级别动态仓位", 0.0, 0.0, 1.0, 1.0, boolean=True),
+    RuntimeField("confirmation_max_risk_multiplier", "确认级别最大风险倍数", 3.0, 0.1, 20.0, 0.1),
 )
 
 
@@ -36,10 +39,13 @@ def validate_runtime_config(values: dict[str, Any], settings: Settings | None = 
     result: dict[str, float] = {}
     for field in RUNTIME_FIELDS:
         raw = values.get(field.key, base[field.key])
-        try:
-            value = float(raw)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{field.key} must be numeric") from exc
+        if field.boolean:
+            value = 1.0 if str(raw).lower() in {"1", "true", "on", "yes"} else 0.0
+        else:
+            try:
+                value = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{field.key} must be numeric") from exc
         if value < field.min_value or value > field.max_value:
             raise ValueError(f"{field.key} must be between {field.min_value} and {field.max_value}")
         result[field.key] = value
@@ -48,4 +54,7 @@ def validate_runtime_config(values: dict[str, Any], settings: Settings | None = 
 
 def apply_runtime_config(settings: Settings, values: dict[str, float]) -> None:
     for key, value in validate_runtime_config(values, settings).items():
-        setattr(settings, key, value)
+        if key == "confirmation_position_sizing":
+            setattr(settings, key, bool(value))
+        else:
+            setattr(settings, key, value)

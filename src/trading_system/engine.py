@@ -282,10 +282,12 @@ class OKXQuantEngine:
                 "risk_percent": self.settings.risk_percent,
                 "same_direction_risk_limit": self.settings.same_direction_risk_limit,
                 "daily_drawdown_limit": self.settings.daily_drawdown_limit,
-                "shock_leverage_limit": self.settings.shock_leverage_limit,
-                "trend_symbol_leverage_limit": self.settings.trend_symbol_leverage_limit,
-                "max_signal_risk_multiplier": self.settings.max_signal_risk_multiplier,
-            },
+                    "shock_leverage_limit": self.settings.shock_leverage_limit,
+                    "trend_symbol_leverage_limit": self.settings.trend_symbol_leverage_limit,
+                    "max_signal_risk_multiplier": self.settings.max_signal_risk_multiplier,
+                    "confirmation_position_sizing": self.settings.confirmation_position_sizing,
+                    "confirmation_max_risk_multiplier": self.settings.confirmation_max_risk_multiplier,
+                },
             "symbol_locks": {symbol: until.isoformat() for symbol, until in self.risk.symbol_locks.items()},
             "hedge_locks": {
                 symbol: {

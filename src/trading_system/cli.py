@@ -66,6 +66,8 @@ def backtest(
     shock_leverage_limit: Optional[float] = typer.Option(None, help="Maximum leverage for SHOCK grid trades."),
     trend_leverage_limit: Optional[float] = typer.Option(None, help="Maximum leverage for trend/shock-trend trades."),
     max_signal_risk_multiplier: Optional[float] = typer.Option(None, help="Maximum per-signal risk multiplier."),
+    confirmation_position_sizing: bool = typer.Option(False, help="Boost position size only for highly confirmed signals."),
+    confirmation_max_risk_multiplier: float = typer.Option(3.0, help="Maximum boosted risk multiplier for confirmed signals."),
     llm_review: bool = typer.Option(False, help="Enable LLM regime review during backtest."),
     llm_provider: Optional[str] = typer.Option(None, help="LLM provider: openai or deepseek."),
     llm_model: Optional[str] = typer.Option(None, help="LLM model name."),
@@ -87,6 +89,8 @@ def backtest(
                 if max_signal_risk_multiplier is not None
                 else settings.max_signal_risk_multiplier
             ),
+            confirmation_position_sizing=confirmation_position_sizing,
+            confirmation_max_risk_multiplier=confirmation_max_risk_multiplier,
             shock_stop_atr=shock_stop_atr,
             shock_take_profit_atr=shock_take_profit_atr,
             classifier_mode=classifier_mode,

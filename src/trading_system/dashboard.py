@@ -80,6 +80,7 @@ async def fetch_dashboard_data() -> dict[str, Any]:
                 "max": field.max_value,
                 "step": field.step,
                 "percent": field.percent,
+                "boolean": field.boolean,
             }
             for field in RUNTIME_FIELDS
         ],
@@ -247,6 +248,9 @@ def render_page(data: dict[str, Any]) -> str:
       event.preventDefault();
       const status = document.getElementById("runtime-config-status");
       const payload = Object.fromEntries(new FormData(form).entries());
+      form.querySelectorAll('input[type="checkbox"]').forEach((input) => {{
+        payload[input.name] = input.checked ? "1" : "0";
+      }});
       status.textContent = "保存中...";
       const response = await fetch("/api/runtime-config", {{
         method: "POST",
@@ -304,11 +308,14 @@ def runtime_config_form(fields: list[dict[str, Any]], values: dict[str, Any]) ->
         hint = f"{field['min']} - {field['max']}"
         if field.get("percent"):
             hint += "，0.01=1%"
+        input_type = "checkbox" if field.get("boolean") else "number"
+        checked = " checked" if field.get("boolean") and float(values.get(key, 0.0) or 0.0) >= 1.0 else ""
+        value_attr = " value=\"1\"" if field.get("boolean") else f" value=\"{escape(str(values.get(key, '')))}\""
+        number_attrs = "" if field.get("boolean") else f" min=\"{field['min']}\" max=\"{field['max']}\" step=\"{field['step']}\""
         controls.append(
             "<label>"
             f"<span>{escape(str(field['label']))} <span class=\"muted\">{escape(hint)}</span></span>"
-            f"<input name=\"{escape(key)}\" type=\"number\" min=\"{field['min']}\" max=\"{field['max']}\" "
-            f"step=\"{field['step']}\" value=\"{escape(str(values.get(key, '')))}\">"
+            f"<input name=\"{escape(key)}\" type=\"{input_type}\"{number_attrs}{value_attr}{checked}>"
             "</label>"
         )
     return (

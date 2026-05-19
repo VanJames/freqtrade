@@ -14,6 +14,7 @@ from trading_system.indicators import atr, directional_indicators, ema, macd, oh
 from trading_system.llm_regime import LLMRegimeReviewer, RegimeReviewInput
 from trading_system.models import PositionSide, Regime
 from trading_system.opportunity import opportunity_metadata, score_opportunity, sol_structure_stop, sol_trade_allowed
+from trading_system.position_sizing import adjusted_risk_multiplier
 from trading_system.volatility import build_volatility_policy, needs_llm_review
 
 
@@ -32,6 +33,8 @@ class BacktestConfig:
     shock_leverage_limit: float = 3.0
     trend_symbol_leverage_limit: float = 5.0
     max_signal_risk_multiplier: float = 1.5
+    confirmation_position_sizing: bool = False
+    confirmation_max_risk_multiplier: float = 3.0
     fee_rate: float = 0.0002
     slippage_rate: float = 0.0001
     output_dir: Path = Path("reports")
@@ -375,10 +378,8 @@ class OKXBacktester:
             stop_distance = abs(signal["entry"] - signal["stop"])
             if stop_distance <= 0:
                 continue
-            risk_multiplier = max(
-                0.0,
-                min(float(signal.get("risk_multiplier", 1.0)), self.config.max_signal_risk_multiplier),
-            )
+            risk_multiplier = adjusted_risk_multiplier(signal, self.config)
+            signal["risk_multiplier"] = risk_multiplier
             risk_percent = self.config.risk_percent * risk_multiplier
             qty = (equity * risk_percent) / stop_distance
             leverage_limit = (
@@ -432,6 +433,7 @@ class OKXBacktester:
             f"- 初始权益: `{self.config.initial_equity:.2f} USDT`",
             f"- 品种: `{', '.join(self.config.symbols)}`",
             f"- 杠杆限制: shock `{self.config.shock_leverage_limit:.1f}x`, trend `{self.config.trend_symbol_leverage_limit:.1f}x`, signal risk cap `{self.config.max_signal_risk_multiplier:.1f}x`",
+            f"- 确认级别动态仓位: `{self.config.confirmation_position_sizing}`, max risk `{self.config.confirmation_max_risk_multiplier:.1f}x`",
             f"- 手续费假设: maker `{self.config.fee_rate:.4%}` 每边，滑点 `{self.config.slippage_rate:.4%}` 每边",
             f"- SHOCK 参数: stop `{self.config.shock_stop_atr} ATR`, take_profit `{self.config.shock_take_profit_atr} ATR`, "
             f"long zone `{self.config.shock_long_zone_min:.0%}-{self.config.shock_long_zone_max:.0%}`, "
