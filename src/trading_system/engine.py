@@ -23,6 +23,13 @@ from trading_system.strategy import StrategyEngine
 from trading_system.volatility import build_volatility_policy, needs_llm_review
 
 logger = getLogger(__name__)
+ENGINE_DIAGNOSTICS_VERSION = "live-diagnostics-20260520"
+TRANSIENT_ENTRY_SUMMARIES = {
+    "waiting_live_check",
+    "waiting_market_data",
+    "waiting_positions",
+    "waiting_llm_review",
+}
 
 
 class OKXQuantEngine:
@@ -120,7 +127,12 @@ class OKXQuantEngine:
                 )
             equity = await self.exchange.fetch_balance_equity()
             self.risk.update_equity(equity)
-            logger.info("engine initialized dry_run=%s symbols=%s", self.settings.dry_run, self.settings.symbols)
+            logger.info(
+                "engine initialized dry_run=%s symbols=%s diagnostics_version=%s",
+                self.settings.dry_run,
+                self.settings.symbols,
+                ENGINE_DIAGNOSTICS_VERSION,
+            )
         except Exception:
             logger.exception("engine initialization failed")
             await self.shutdown()
@@ -290,20 +302,23 @@ class OKXQuantEngine:
             )
         regime = review.proposed_regime
         latest_price = float(self.klines[symbol]["5m"][-1][4]) if self.klines[symbol]["5m"] else features.close_1h
-        self.symbol_status[symbol] = {
-            "price": latest_price,
-            "regime": regime.value,
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-            "llm_review": {
-                "action": review.action,
-                "allow_trade": review.allow_trade,
-                "confidence": review.confidence,
-                "reasons": review.reasons,
-                "missing_evidence": review.missing_evidence,
-            },
-        }
+        status = self.symbol_status.setdefault(symbol, {})
+        status.update(
+            {
+                "price": latest_price,
+                "regime": regime.value,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "llm_review": {
+                    "action": review.action,
+                    "allow_trade": review.allow_trade,
+                    "confidence": review.confidence,
+                    "reasons": review.reasons,
+                    "missing_evidence": review.missing_evidence,
+                },
+            }
+        )
         if not review.allow_trade:
-            self.symbol_status[symbol]["entry_diagnostics"] = {
+            diagnostics = {
                 "action": "llm_review",
                 "summary": "llm_rejected",
                 "requirements": [
@@ -322,6 +337,8 @@ class OKXQuantEngine:
                 ],
                 "metrics": {"regime": regime.value, "price": latest_price, "llm_confidence": review.confidence},
             }
+            self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
+            self._log_entry_diagnostics(symbol, diagnostics)
             return []
         self._set_entry_status(
             symbol,
@@ -344,7 +361,7 @@ class OKXQuantEngine:
             self.klines[symbol]["5m"],
             positions,
         )
-        self.symbol_status[symbol]["entry_diagnostics"] = diagnostics
+        self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
         self._log_entry_diagnostics(symbol, diagnostics)
         release_signals = self.strategy.hedge_release_signals(
             symbol,
@@ -354,11 +371,12 @@ class OKXQuantEngine:
         )
         if release_signals:
             self.symbol_status[symbol]["last_signal"] = self._signal_status(release_signals[0])
-            self.symbol_status[symbol]["entry_diagnostics"] = {
+            diagnostics = {
                 **diagnostics,
                 "summary": "release_hedge_signal_ready",
                 "signal_reason": release_signals[0].reason,
             }
+            self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
             return release_signals
         exit_signals = self.position_manager.exit_signals(
             symbol,
@@ -368,11 +386,12 @@ class OKXQuantEngine:
         )
         if exit_signals:
             self.symbol_status[symbol]["last_signal"] = self._signal_status(exit_signals[0])
-            self.symbol_status[symbol]["entry_diagnostics"] = {
+            diagnostics = {
                 **diagnostics,
                 "summary": "exit_signal_ready",
                 "signal_reason": exit_signals[0].reason,
             }
+            self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
             return exit_signals
         signals = self.strategy.build_signals(
             symbol,
@@ -385,11 +404,12 @@ class OKXQuantEngine:
         if not signals:
             return []
         self.symbol_status[symbol]["last_signal"] = self._signal_status(signals[0])
-        self.symbol_status[symbol]["entry_diagnostics"] = {
+        diagnostics = {
             **diagnostics,
             "summary": "signal_ready",
             "signal_reason": signals[0].reason,
         }
+        self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
         for signal in signals:
             if signal.signal_type == SignalType.HEDGE_TRANSITION:
                 grid_side = PositionSide.SHORT if signal.position_side == PositionSide.LONG else PositionSide.LONG
@@ -439,13 +459,15 @@ class OKXQuantEngine:
                     blocker = {"code": f"risk_{decision.reason}", "passed": False}
                     requirements = [*previous_diagnostics.get("requirements", []), blocker]
                     blockers = [*previous_diagnostics.get("blockers", []), blocker]
-                    status["entry_diagnostics"] = {
+                    diagnostics = {
                         **previous_diagnostics,
                         "summary": "risk_rejected",
                         "requirements": requirements,
                         "blockers": blockers,
                         "risk_rejection": decision.reason,
                     }
+                    status["entry_diagnostics"] = diagnostics
+                    status["last_completed_entry_diagnostics"] = diagnostics
                 continue
             if signal.signal_type == SignalType.ENTER_GRID:
                 orders = []
@@ -497,12 +519,14 @@ class OKXQuantEngine:
             )
             previous_diagnostics = status.get("entry_diagnostics")
             if isinstance(previous_diagnostics, dict):
-                status["entry_diagnostics"] = {
+                diagnostics = {
                     **previous_diagnostics,
                     "summary": "order_submitted",
                     "order_id": order.id,
                     "signal_reason": signal.reason,
                 }
+                status["entry_diagnostics"] = diagnostics
+                status["last_completed_entry_diagnostics"] = diagnostics
             if self.store:
                 await self.store.record_order(order, signal.regime)
 
@@ -525,20 +549,54 @@ class OKXQuantEngine:
         summary: str,
         blockers: list[dict[str, object]],
     ) -> None:
+        checked_at = datetime.now(timezone.utc).isoformat()
         requirements = [dict(item) for item in blockers]
-        self.symbol_status[symbol] = {
-            "price": price,
-            "regime": regime.value,
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-            "entry_diagnostics": {
-                "action": action,
-                "summary": summary,
-                "requirements": requirements,
-                "blockers": blockers,
-                "metrics": {"regime": regime.value, "price": price},
-            },
+        diagnostics = {
+            "action": action,
+            "summary": summary,
+            "requirements": requirements,
+            "blockers": blockers,
+            "metrics": {"regime": regime.value, "price": price},
+            "checked_at": checked_at,
         }
+        status = self.symbol_status.setdefault(symbol, {})
+        status.update(
+            {
+                "price": price,
+                "regime": regime.value,
+                "checked_at": checked_at,
+                "entry_diagnostics": diagnostics,
+            }
+        )
         self._log_diagnostic_status(symbol, action, summary, regime.value, price, blockers)
+
+    def _set_completed_entry_diagnostics(
+        self,
+        symbol: str,
+        diagnostics: dict[str, Any],
+        *,
+        price: float | None = None,
+        regime: Regime | None = None,
+    ) -> None:
+        checked_at = datetime.now(timezone.utc).isoformat()
+        metrics = diagnostics.get("metrics") if isinstance(diagnostics.get("metrics"), dict) else {}
+        if price is None:
+            price = self._float_metric(metrics.get("price"), self._latest_price(symbol))
+        if regime is not None:
+            regime_value = regime.value
+        else:
+            regime_value = str(metrics.get("regime") or self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN).value)
+        completed = {**diagnostics, "checked_at": checked_at}
+        status = self.symbol_status.setdefault(symbol, {})
+        status.update(
+            {
+                "price": price,
+                "regime": regime_value,
+                "checked_at": checked_at,
+                "entry_diagnostics": completed,
+                "last_completed_entry_diagnostics": completed,
+            }
+        )
 
     async def _await_exchange_step(
         self,
@@ -605,7 +663,7 @@ class OKXQuantEngine:
     ) -> None:
         blocker_text = self._format_blockers(blockers)
         extra_text = self._format_extra(extra or {})
-        fingerprint = f"{summary}|{regime}|{blocker_text}|{extra_text}"
+        fingerprint = f"{summary}|{regime}|{self._format_blocker_codes(blockers)}"
         key = (symbol, action)
         now = time.monotonic()
         previous = self._diagnostic_log_state.get(key)
@@ -634,6 +692,10 @@ class OKXQuantEngine:
             else:
                 values.append(code)
         return ",".join(values)
+
+    @staticmethod
+    def _format_blocker_codes(blockers: list[dict[str, object]]) -> str:
+        return ",".join(str(item.get("code") or "unknown") for item in blockers)
 
     @staticmethod
     def _format_extra(values: dict[str, object]) -> str:
@@ -680,6 +742,7 @@ class OKXQuantEngine:
         if not self.store:
             return
         equity = await self.exchange.fetch_balance_equity()
+        snapshot_time = datetime.now(timezone.utc)
         regimes = {symbol: regime.value for symbol, regime in self.regime_classifier.regimes.items()}
         regimes.update(
             {
@@ -688,7 +751,18 @@ class OKXQuantEngine:
                 if status.get("regime") is not None
             }
         )
+        display_entry_diagnostics = {}
+        current_entry_diagnostics = {}
+        for symbol, status in self.symbol_status.items():
+            current = status.get("entry_diagnostics")
+            if current is not None:
+                current_entry_diagnostics[symbol] = current
+            display = self._display_entry_diagnostics(status)
+            if display is not None:
+                display_entry_diagnostics[symbol] = display
         memory = {
+            "engine_version": ENGINE_DIAGNOSTICS_VERSION,
+            "snapshot_saved_at": snapshot_time.isoformat(),
             "regimes": regimes,
             "direction_risk": {side.value: value for side, value in self.risk.direction_risk.items()},
             "risk": {
@@ -708,11 +782,8 @@ class OKXQuantEngine:
             },
             "prices": {symbol: status.get("price") for symbol, status in self.symbol_status.items()},
             "regime_checked_at": {symbol: status.get("checked_at") for symbol, status in self.symbol_status.items()},
-            "entry_diagnostics": {
-                symbol: status.get("entry_diagnostics")
-                for symbol, status in self.symbol_status.items()
-                if status.get("entry_diagnostics") is not None
-            },
+            "entry_diagnostics": display_entry_diagnostics,
+            "current_entry_diagnostics": current_entry_diagnostics,
             "last_signal": {
                 symbol: status.get("last_signal")
                 for symbol, status in self.symbol_status.items()
@@ -744,6 +815,19 @@ class OKXQuantEngine:
             task for task in self.execution.background_tasks if not task.done()
         )
         await self.store.save_snapshot(equity, active_hedging, memory)
+
+    def _display_entry_diagnostics(self, status: dict[str, object]) -> dict[str, Any] | None:
+        current = status.get("entry_diagnostics")
+        completed = status.get("last_completed_entry_diagnostics")
+        if isinstance(current, dict) and not self._entry_diagnostics_transient(current):
+            return current
+        if isinstance(completed, dict):
+            return completed
+        return current if isinstance(current, dict) else None
+
+    @staticmethod
+    def _entry_diagnostics_transient(diagnostics: dict[str, Any]) -> bool:
+        return str(diagnostics.get("summary") or "") in TRANSIENT_ENTRY_SUMMARIES
 
     @staticmethod
     def _signal_status(signal: TradeSignal) -> dict[str, object]:

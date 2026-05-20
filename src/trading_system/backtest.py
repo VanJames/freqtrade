@@ -961,7 +961,6 @@ def build_signal(
 
     atr_5m = float(atr(history_5m.high, history_5m.low, history_5m.close).iloc[-1]) or features["atr_1h"]
     rsi_5m_value = float(rsi_5m.iloc[-1])
-    ema60_5m = ema(history_5m.close, 60)
     midpoint = (features["high_42"] + features["low_42"]) / 2
     range_width = features["high_42"] - features["low_42"]
     long_zone_low = features["low_42"] + config.shock_long_zone_min * range_width
@@ -1487,7 +1486,6 @@ def signal_reward(price: float, stop: float, reward_risk: float, config: Backtes
 def maybe_exit(position: dict[str, Any], row: pd.Series) -> tuple[float | None, str]:
     high = float(row.high)
     low = float(row.low)
-    close = float(row.close)
     if position["side"] == PositionSide.LONG:
         position["highest"] = max(float(position["highest"]), high)
         trailing = None
@@ -1599,7 +1597,7 @@ def symbol_to_filename(symbol: str) -> str:
 
 def asyncio_run_review(reviewer: LLMRegimeReviewer, item: RegimeReviewInput):
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(reviewer.review(item))
     raise RuntimeError("backtest LLM review cannot run inside an active event loop")

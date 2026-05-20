@@ -286,6 +286,8 @@ def render_page(data: dict[str, Any]) -> str:
     entry_diagnostics = memory.get("entry_diagnostics", {}) if isinstance(memory, dict) else {}
     hedge_locks = memory.get("hedge_locks", {}) if isinstance(memory, dict) else {}
     risk = memory.get("risk", {}) if isinstance(memory, dict) else {}
+    engine_version = memory.get("engine_version", "-") if isinstance(memory, dict) else "-"
+    snapshot_saved_at = memory.get("snapshot_saved_at") if isinstance(memory, dict) else None
     orders = data["orders"]
     mode = data["mode"]
     runtime_config = data["runtime_config"]
@@ -297,6 +299,8 @@ def render_page(data: dict[str, Any]) -> str:
         f'{metric("订单总数", data["order_count"])}'
         f'{metric("对冲状态", "ON" if snapshot.get("active_hedging") else "OFF")}'
         f'{metric("交易品种", str(mode.get("symbols") or "-"))}'
+        f'{metric("快照时间", format_local_time(snapshot_saved_at or snapshot.get("snapshot_time")))}'
+        f'{metric("引擎版本", str(engine_version or "-"))}'
         "</section>"
     )
     hedge_body = f'<pre>{escape(json.dumps(hedge_locks, ensure_ascii=False, indent=2))}</pre>'

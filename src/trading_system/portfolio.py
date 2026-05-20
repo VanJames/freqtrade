@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from trading_system.indicators import ohlcv_frame
-from trading_system.models import PositionSide, Regime, SignalType, TradeSignal
+from trading_system.models import PositionSide, SignalType, TradeSignal
 
 
 class AlphaFilter:
@@ -66,4 +66,3 @@ class GridPlanner:
                 price = signal.price + distance
             planned.append((price, base_size * float(ratio)))
         return planned
-
