@@ -84,20 +84,25 @@ class OKXQuantEngine:
         self.running = False
 
     async def initialize(self, init_store: bool = True) -> None:
-        await self.exchange.initialize()
-        if self.store and init_store:
-            await self.store.initialize()
-            await self._apply_runtime_settings(update_exchange_leverage=False)
-            await self._restore_latest_snapshot()
-        if self.cache:
-            await self.cache.ping()
-        for symbol in self.settings.symbols:
-            await self.exchange.set_leverage(symbol, self.settings.trend_symbol_leverage_limit)
-            for timeframe, limit in {"5m": 150, "1h": 120, "4h": 100}.items():
-                self.klines[symbol][timeframe] = await self.exchange.fetch_ohlcv(symbol, timeframe, limit)
-        equity = await self.exchange.fetch_balance_equity()
-        self.risk.update_equity(equity)
-        logger.info("engine initialized dry_run=%s symbols=%s", self.settings.dry_run, self.settings.symbols)
+        try:
+            await self.exchange.initialize()
+            if self.store and init_store:
+                await self.store.initialize()
+                await self._apply_runtime_settings(update_exchange_leverage=False)
+                await self._restore_latest_snapshot()
+            if self.cache:
+                await self.cache.ping()
+            for symbol in self.settings.symbols:
+                await self.exchange.set_leverage(symbol, self.settings.trend_symbol_leverage_limit)
+                for timeframe, limit in {"5m": 150, "1h": 120, "4h": 100}.items():
+                    self.klines[symbol][timeframe] = await self.exchange.fetch_ohlcv(symbol, timeframe, limit)
+            equity = await self.exchange.fetch_balance_equity()
+            self.risk.update_equity(equity)
+            logger.info("engine initialized dry_run=%s symbols=%s", self.settings.dry_run, self.settings.symbols)
+        except Exception:
+            logger.exception("engine initialization failed")
+            await self.shutdown()
+            raise
 
     async def run(self) -> None:
         self.running = True
@@ -381,7 +386,10 @@ class OKXQuantEngine:
             for symbol in self.settings.symbols:
                 await self.exchange.set_leverage(symbol, self.settings.trend_symbol_leverage_limit)
             self._applied_leverage_limit = self.settings.trend_symbol_leverage_limit
-            logger.info("runtime leverage updated leverage=%s", self.settings.trend_symbol_leverage_limit)
+            logger.info(
+                "runtime leverage update requested leverage=%s",
+                self.settings.trend_symbol_leverage_limit,
+            )
 
     def _apply_llm_runtime_settings(self, previous: tuple[object, ...]) -> None:
         provider = self.settings.llm_regime_provider.lower()
@@ -424,4 +432,7 @@ class OKXQuantEngine:
             await self.store.close()
         if self.cache:
             await self.cache.close()
-        await self.exchange.close()
+        try:
+            await self.exchange.close()
+        except Exception:
+            logger.exception("exchange close failed")

@@ -194,7 +194,17 @@ class CcxtOkxExchange(ExchangeClient):
         import ccxt.pro as ccxtpro
 
         self.exchange = ccxtpro.okx(self.config)
-        await self.exchange.set_position_mode(True)
+        try:
+            await self.exchange.set_position_mode(True)
+        except Exception as exc:
+            if okx_setting_blocked(exc):
+                logger.warning(
+                    "okx position mode setup skipped: cancel open orders, close positions, "
+                    "and stop OKX trading bots before changing position mode"
+                )
+                return
+            await self.close()
+            raise
 
     @property
     def api(self) -> Any:
@@ -331,7 +341,25 @@ class CcxtOkxExchange(ExchangeClient):
         return float(funding.get("fundingRate") or funding.get("info", {}).get("fundingRate") or 0.0)
 
     async def set_leverage(self, symbol: str, leverage: float) -> None:
-        await self.api.set_leverage(int(leverage), symbol, {"mgnMode": "cross"})
+        try:
+            await self.api.set_leverage(int(leverage), symbol, {"mgnMode": "cross"})
+        except Exception as exc:
+            if okx_setting_blocked(exc):
+                logger.warning(
+                    "okx leverage setup skipped symbol=%s leverage=%s: cancel open orders, "
+                    "close positions, and stop OKX trading bots before changing leverage",
+                    symbol,
+                    leverage,
+                )
+                return
+            raise
 
     async def close(self) -> None:
-        await self.api.close()
+        if self.exchange is not None:
+            await self.exchange.close()
+            self.exchange = None
+
+
+def okx_setting_blocked(exc: Exception) -> bool:
+    text = str(exc)
+    return "59000" in text or "Cancel any open orders, close positions, and stop trading bots first" in text
