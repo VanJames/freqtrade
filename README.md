@@ -160,6 +160,12 @@ docker volume rm trading_postgres_data
 docker compose up -d --build init-db app dashboard
 ```
 
+也可以直接执行封装脚本：
+
+```bash
+sh scripts/reset_postgres_volume.sh --force
+```
+
 如果需要恢复导出的表：
 
 ```bash
