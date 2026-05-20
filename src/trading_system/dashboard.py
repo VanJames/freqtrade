@@ -19,6 +19,7 @@ from trading_system.runtime_config import RUNTIME_FIELDS, runtime_defaults, vali
 
 app = FastAPI(title="OKX Quant Dashboard")
 FAVICON_PATH = Path(__file__).with_name("assets") / "favicon.ico"
+REPORTS_DIR = Path(os.getenv("REPORTS_DIR", "reports"))
 
 
 def dashboard_tz() -> ZoneInfo:
@@ -135,6 +136,7 @@ async def fetch_dashboard_data() -> dict[str, Any]:
             }
             for field in RUNTIME_FIELDS
         ],
+        "latest_tuning_report": latest_tuning_report(),
     }
 
 
@@ -203,6 +205,16 @@ async def favicon() -> FileResponse:
     return FileResponse(FAVICON_PATH, media_type="image/x-icon")
 
 
+@app.get("/reports/{name}", include_in_schema=False)
+async def report_file(name: str) -> FileResponse:
+    if "/" in name or "\\" in name or not name.endswith(".md"):
+        raise HTTPException(status_code=404, detail="report not found")
+    path = REPORTS_DIR / name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="report not found")
+    return FileResponse(path, media_type="text/markdown; charset=utf-8")
+
+
 def render_page(data: dict[str, Any]) -> str:
     snapshot = data["latest_snapshot"] or {}
     memory = snapshot.get("serialized_memory") or {}
@@ -215,6 +227,7 @@ def render_page(data: dict[str, Any]) -> str:
     mode = data["mode"]
     runtime_config = data["runtime_config"]
     runtime_fields = data["runtime_fields"]
+    latest_tuning = data["latest_tuning_report"]
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -290,6 +303,11 @@ def render_page(data: dict[str, Any]) -> str:
   <section class="panel" style="margin-bottom:16px">
     <h2>动态风控配置</h2>
     {runtime_config_form(runtime_fields, runtime_config)}
+  </section>
+
+  <section class="panel" style="margin-bottom:16px">
+    <h2>自动调参建议</h2>
+    {tuning_report_panel(latest_tuning)}
   </section>
 
   <section class="cards">
@@ -408,6 +426,73 @@ def format_price(value: Any) -> str:
     if price >= 10:
         return f"{price:.4f}"
     return f"{price:.6f}"
+
+
+def latest_tuning_report() -> dict[str, Any] | None:
+    reports = sorted(REPORTS_DIR.glob("runtime_tuning_*.md"), key=lambda item: item.stat().st_mtime, reverse=True)
+    if not reports:
+        return None
+    path = reports[0]
+    text = path.read_text(encoding="utf-8")
+    return {
+        "name": path.name,
+        "mtime": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+        "current": extract_report_metric(text, "## 当前参数"),
+        "recommended": extract_report_metric(text, "## 推荐参数"),
+        "reason": extract_report_reason(text),
+    }
+
+
+def extract_report_metric(text: str, section: str) -> dict[str, str]:
+    lines = text.splitlines()
+    try:
+        start = lines.index(section)
+    except ValueError:
+        return {}
+    result: dict[str, str] = {}
+    for line in lines[start + 1 :]:
+        if line.startswith("## "):
+            break
+        if line.startswith("- ") and ": `" in line:
+            key, value = line[2:].split(": `", 1)
+            result[key.strip()] = value.rstrip("`")
+    return result
+
+
+def extract_report_reason(text: str) -> str:
+    lines = text.splitlines()
+    try:
+        start = lines.index("## 推荐原因")
+    except ValueError:
+        return ""
+    for line in lines[start + 1 :]:
+        if line.startswith("## "):
+            return ""
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def tuning_report_panel(report: dict[str, Any] | None) -> str:
+    if not report:
+        return '<div class="muted">暂无调参报告</div>'
+    current = report.get("current") or {}
+    recommended = report.get("recommended") or {}
+    rows = (
+        f"<tr><th>当前实盘参数回测</th><td>{escape(str(current.get('candidate', '-')))}</td>"
+        f"<td>{escape(str(current.get('pnl', '-')))}</td><td>{escape(str(current.get('win_rate', '-')))}</td>"
+        f"<td>{escape(str(current.get('trades', '-')))}</td></tr>"
+        f"<tr><th>推荐参数回测</th><td>{escape(str(recommended.get('candidate', '-')))}</td>"
+        f"<td>{escape(str(recommended.get('pnl', '-')))}</td><td>{escape(str(recommended.get('win_rate', '-')))}</td>"
+        f"<td>{escape(str(recommended.get('trades', '-')))}</td></tr>"
+    )
+    return (
+        f'<div class="muted">最近生成：{escape(format_local_time(report.get("mtime")))} · '
+        f'<a href="/reports/{escape(str(report.get("name")))}" target="_blank">打开完整报告</a></div>'
+        '<table style="margin-top:10px"><thead><tr><th>类型</th><th>参数档</th><th>收益</th><th>胜率</th><th>交易次数</th></tr></thead>'
+        f"<tbody>{rows}</tbody></table>"
+        f'<div class="muted" style="margin-top:10px">{escape(str(report.get("reason") or ""))}</div>'
+    )
 
 
 def dict_table(values: dict[str, Any]) -> str:

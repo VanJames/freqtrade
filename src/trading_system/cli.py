@@ -12,6 +12,13 @@ from trading_system.logging import configure_logging
 from trading_system.cache import StateCache
 from trading_system.backtest import BacktestConfig, OKXBacktester
 from trading_system.store import StateStore
+from trading_system.tuner import (
+    RuntimeTuningCandidate,
+    build_backtest_config_from_settings,
+    run_runtime_tuning,
+    run_runtime_tuning_loop,
+    runtime_tuning_candidates,
+)
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -175,6 +182,85 @@ def optimize_params(
         typer.echo(f"best_win_rate: {best.result.win_rate:.2%}")
         typer.echo(f"best_trades: {len(best.result.trades)}")
         typer.echo(f"best_params: {best.params}")
+
+
+@app.command("tune-runtime")
+def tune_runtime(
+    days: int = typer.Option(30, help="Backtest lookback window in calendar days."),
+    symbols: Optional[str] = typer.Option(None, help="Comma-separated OKX swap symbols. Defaults to .env SYMBOLS."),
+    initial_equity: float = typer.Option(10_000.0, help="Initial equity in USDT."),
+    llm_review: bool = typer.Option(False, "--llm-review/--no-llm-review", help="Enable LLM review while tuning."),
+    llm_max_calls: int = typer.Option(20, help="Maximum LLM review calls per candidate."),
+    confirmation_position_sizing: bool = typer.Option(
+        True,
+        "--confirmation-position-sizing/--no-confirmation-position-sizing",
+        help="Use confirmation-level dynamic sizing for the current-parameter baseline.",
+    ),
+) -> None:
+    configure_logging(logging.INFO)
+    settings = Settings()
+    selected_symbols = [item.strip() for item in symbols.split(",") if item.strip()] if symbols else settings.symbols
+    base = build_backtest_config_from_settings(
+        settings=settings,
+        days=days,
+        symbols=selected_symbols,
+        initial_equity=initial_equity,
+        confirmation_position_sizing=confirmation_position_sizing,
+        llm_review=llm_review,
+        llm_max_calls=llm_max_calls,
+    )
+    candidates: list[RuntimeTuningCandidate] = runtime_tuning_candidates(base)
+    results, report_path = run_runtime_tuning(candidates, progress=typer.echo)
+    current = next((item for item in results if item.candidate.name == "current"), results[0])
+    recommended = results[0]
+    typer.echo(f"report: {report_path}")
+    typer.echo(
+        f"current: pnl={current.result.total_pnl:.2f} USDT "
+        f"win_rate={current.result.win_rate:.2%} trades={len(current.result.trades)} score={current.score:.2f}"
+    )
+    typer.echo(
+        f"recommended: {recommended.candidate.name} pnl={recommended.result.total_pnl:.2f} USDT "
+        f"win_rate={recommended.result.win_rate:.2%} trades={len(recommended.result.trades)} score={recommended.score:.2f}"
+    )
+    typer.echo(f"recommended_params: {recommended.candidate.params}")
+
+
+@app.command("tune-runtime-loop")
+def tune_runtime_loop(
+    days: int = typer.Option(30, help="Backtest lookback window in calendar days."),
+    interval_hours: float = typer.Option(48.0, help="Run one tuning cycle every N hours."),
+    symbols: Optional[str] = typer.Option(None, help="Comma-separated OKX swap symbols. Defaults to .env SYMBOLS."),
+    initial_equity: float = typer.Option(10_000.0, help="Initial equity in USDT."),
+    llm_review: bool = typer.Option(False, "--llm-review/--no-llm-review", help="Enable LLM regime review in backtests."),
+    llm_propose: bool = typer.Option(False, "--llm-propose/--no-llm-propose", help="Let LLM propose bounded extra candidates."),
+    max_iterations: int = typer.Option(1, help="Maximum tuning iterations in one cycle."),
+    min_improvement_score: float = typer.Option(0.0, help="Minimum score improvement over current params."),
+    llm_max_calls: int = typer.Option(20, help="Maximum LLM regime review calls per candidate."),
+    once: bool = typer.Option(False, help="Run one loop cycle and exit."),
+) -> None:
+    configure_logging(logging.INFO)
+    settings = Settings()
+    selected_symbols = [item.strip() for item in symbols.split(",") if item.strip()] if symbols else settings.symbols
+    base = build_backtest_config_from_settings(
+        settings=settings,
+        days=days,
+        symbols=selected_symbols,
+        initial_equity=initial_equity,
+        confirmation_position_sizing=True,
+        llm_review=llm_review,
+        llm_max_calls=llm_max_calls,
+    )
+    asyncio.run(
+        run_runtime_tuning_loop(
+            base,
+            interval_seconds=max(1, int(interval_hours * 3600)),
+            llm_propose=llm_propose,
+            max_iterations=max_iterations,
+            min_improvement_score=min_improvement_score,
+            progress=typer.echo,
+            once=once,
+        )
+    )
 
 
 if __name__ == "__main__":

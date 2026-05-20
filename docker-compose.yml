@@ -2,7 +2,7 @@ services:
   app:
     build: .
     environment:
-      POSTGRES_DSN: postgresql+asyncpg://postgres:postgres@postgres:5432/trading
+      POSTGRES_DSN: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trading
       REDIS_URL: redis://redis:6379/0
       DRY_RUN: ${DRY_RUN:-true}
     secrets:
@@ -18,7 +18,7 @@ services:
   init-db:
     build: .
     environment:
-      POSTGRES_DSN: postgresql+asyncpg://postgres:postgres@postgres:5432/trading
+      POSTGRES_DSN: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trading
     secrets:
       - app_env
     depends_on:
@@ -37,10 +37,32 @@ services:
       - ohlcv_cache:/app/.cache/okx_ohlcv
     profiles: ["tools"]
 
+  runtime-tuner:
+    build: .
+    command:
+      [
+        "tune-runtime-loop",
+        "--days",
+        "${TUNER_DAYS:-30}",
+        "--interval-hours",
+        "${TUNER_INTERVAL_HOURS:-48}",
+        "--max-iterations",
+        "${TUNER_MAX_ITERATIONS:-1}",
+        "--min-improvement-score",
+        "${TUNER_MIN_IMPROVEMENT_SCORE:-0}",
+      ]
+    secrets:
+      - app_env
+    volumes:
+      - ./reports:/app/reports
+      - ohlcv_cache:/app/.cache/okx_ohlcv
+    profiles: ["tools"]
+    restart: unless-stopped
+
   dashboard:
     build: .
     environment:
-      POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/trading
+      POSTGRES_DSN: postgresql://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trading
       DRY_RUN: ${DRY_RUN:-true}
       OKX_DEMO: ${OKX_DEMO:-true}
       SYMBOLS: ${SYMBOLS:-BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT}
@@ -55,20 +77,20 @@ services:
     command: ["python", "-m", "uvicorn", "trading_system.dashboard:app", "--host", "0.0.0.0", "--port", "8080"]
     ports:
       - "18080:8080"
+    volumes:
+      - ./reports:/app/reports:ro
     restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: trading
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trading"]
       interval: 5s
       timeout: 5s
       retries: 10
