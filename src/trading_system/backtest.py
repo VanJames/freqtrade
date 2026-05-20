@@ -406,6 +406,7 @@ class OKXBacktester:
                     equity += trade.pnl
                     trades.append(trade)
                     curve.append((now, equity))
+                    risk.release_risk(open_position["side"], float(open_position.get("risk_multiplier", 1.0)))
                     open_position = None
                 continue
 
@@ -437,6 +438,7 @@ class OKXBacktester:
             exit_price = float(df5.close.iloc[-1])
             trade = close_position(symbol, open_position, now, exit_price, "end_of_backtest", equity, self.config)
             trades.append(trade)
+            risk.release_risk(open_position["side"], float(open_position.get("risk_multiplier", 1.0)))
 
         return trades, hits, curve, regime_counts
 

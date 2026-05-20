@@ -99,7 +99,7 @@ async def fetch_dashboard_data() -> dict[str, Any]:
         await conn.close()
 
     runtime_config = defaults | {
-        str(row["setting_key"]): float(row["setting_value"])
+        str(row["setting_key"]): str(row["setting_value"])
         for row in runtime_rows
         if str(row["setting_key"]) in defaults
     }
@@ -130,6 +130,8 @@ async def fetch_dashboard_data() -> dict[str, Any]:
                 "step": field.step,
                 "percent": field.percent,
                 "boolean": field.boolean,
+                "text": field.text,
+                "description": field.description,
             }
             for field in RUNTIME_FIELDS
         ],
@@ -243,6 +245,8 @@ def render_page(data: dict[str, Any]) -> str:
     .cards {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }}
     .form-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
     label {{ display:flex; flex-direction:column; gap:6px; color:var(--muted); font-size:13px; }}
+    .field-title {{ color:var(--text); font-weight:600; }}
+    .field-note {{ min-height:34px; line-height:1.45; color:var(--muted); font-size:12px; }}
     input {{ width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; background:#10131a; color:var(--text); padding:10px 11px; font-size:14px; }}
     button {{ border:1px solid #3c76ff; background:#2258d4; color:white; border-radius:6px; padding:10px 14px; font-weight:700; cursor:pointer; }}
     .actions {{ display:flex; align-items:center; gap:12px; margin-top:14px; }}
@@ -423,14 +427,19 @@ def runtime_config_form(fields: list[dict[str, Any]], values: dict[str, Any]) ->
         hint = f"{field['min']} - {field['max']}"
         if field.get("percent"):
             hint += "，0.01=1%"
-        input_type = "checkbox" if field.get("boolean") else "number"
+        input_type = "checkbox" if field.get("boolean") else "text" if field.get("text") else "number"
         checked = " checked" if field.get("boolean") and float(values.get(key, 0.0) or 0.0) >= 1.0 else ""
         value_attr = " value=\"1\"" if field.get("boolean") else f" value=\"{escape(str(values.get(key, '')))}\""
-        number_attrs = "" if field.get("boolean") else f" min=\"{field['min']}\" max=\"{field['max']}\" step=\"{field['step']}\""
+        number_attrs = (
+            ""
+            if field.get("boolean") or field.get("text")
+            else f" min=\"{field['min']}\" max=\"{field['max']}\" step=\"{field['step']}\""
+        )
         controls.append(
             "<label>"
-            f"<span>{escape(str(field['label']))} <span class=\"muted\">{escape(hint)}</span></span>"
+            f"<span class=\"field-title\">{escape(str(field['label']))} <span class=\"muted\">{escape(hint)}</span></span>"
             f"<input name=\"{escape(key)}\" type=\"{input_type}\"{number_attrs}{value_attr}{checked}>"
+            f"<span class=\"field-note\">{escape(str(field.get('description') or ''))}</span>"
             "</label>"
         )
     return (

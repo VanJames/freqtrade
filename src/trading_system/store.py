@@ -112,7 +112,7 @@ class StateStore:
             return None
         return orjson.loads(row.serialized_memory)
 
-    async def save_runtime_settings(self, values: dict[str, float]) -> None:
+    async def save_runtime_settings(self, values: dict[str, Any]) -> None:
         await self.ensure_schema()
         now = datetime.now(timezone.utc)
         async with self.engine.begin() as conn:
@@ -127,16 +127,13 @@ class StateStore:
                 )
                 await conn.execute(stmt)
 
-    async def load_runtime_settings(self) -> dict[str, float]:
+    async def load_runtime_settings(self) -> dict[str, str]:
         await self.ensure_schema()
         async with self.engine.begin() as conn:
             rows = await conn.execute(select(runtime_settings.c.setting_key, runtime_settings.c.setting_value))
-        result: dict[str, float] = {}
+        result: dict[str, str] = {}
         for key, value in rows:
-            try:
-                result[str(key)] = float(value)
-            except (TypeError, ValueError):
-                logger.warning("ignored invalid runtime setting key=%s value=%s", key, value)
+            result[str(key)] = str(value)
         return result
 
     async def close(self) -> None:

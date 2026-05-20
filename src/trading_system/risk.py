@@ -105,5 +105,10 @@ class RiskManager:
     def reserve_risk(self, side: PositionSide, risk_multiplier: float = 1.0) -> None:
         self.direction_risk[side] = self.direction_risk.get(side, 0.0) + self.settings.risk_percent * risk_multiplier
 
+    def release_risk(self, side: PositionSide, risk_multiplier: float = 1.0) -> None:
+        current = self.direction_risk.get(side, 0.0)
+        released = self.settings.risk_percent * risk_multiplier
+        self.direction_risk[side] = max(0.0, current - released)
+
     def signal_risk_multiplier(self, signal: TradeSignal) -> float:
         return adjusted_risk_multiplier(signal, self.settings)

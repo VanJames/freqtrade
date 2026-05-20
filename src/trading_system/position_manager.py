@@ -25,6 +25,7 @@ class PositionManager:
             take_profit=signal.take_profit,
             trailing_gap_pct=signal.metadata.get("trailing_gap_pct"),
             min_trailing_activate_r=float(signal.metadata.get("min_trailing_activate_r", 1.0)),
+            risk_multiplier=float(signal.metadata.get("risk_multiplier", 1.0)),
             highest_price=signal.price,
             lowest_price=signal.price,
         )
@@ -48,6 +49,7 @@ class PositionManager:
                     atr=atr_value,
                     stop_loss=pos.metadata.get("stop_loss", 0.0),
                     take_profit=pos.metadata.get("take_profit"),
+                    risk_multiplier=float(pos.metadata.get("risk_multiplier", 1.0)),
                     highest_price=pos.entry_price,
                     lowest_price=pos.entry_price,
                 )
@@ -65,9 +67,9 @@ class PositionManager:
                     state.stop_loss = max(state.stop_loss, state.highest_price - 1.5 * state.atr)
                 if state.stop_loss > 0 and price <= state.stop_loss:
                     reason = "long_trailing_stop" if state.active else "long_stop_loss"
-                    signals.append(self._exit_signal(symbol, Side.SELL, PositionSide.LONG, price, pos.contracts, reason))
+                    signals.append(self._exit_signal(symbol, Side.SELL, PositionSide.LONG, price, pos.contracts, reason, state.risk_multiplier))
                 elif state.take_profit is not None and price >= state.take_profit:
-                    signals.append(self._exit_signal(symbol, Side.SELL, PositionSide.LONG, price, pos.contracts, "long_take_profit"))
+                    signals.append(self._exit_signal(symbol, Side.SELL, PositionSide.LONG, price, pos.contracts, "long_take_profit", state.risk_multiplier))
             else:
                 state.lowest_price = min(state.lowest_price or price, price)
                 if state.trailing_gap_pct and state.stop_loss > 0:
@@ -80,9 +82,9 @@ class PositionManager:
                     state.stop_loss = min(state.stop_loss, state.lowest_price + 1.5 * state.atr)
                 if state.stop_loss > 0 and price >= state.stop_loss:
                     reason = "short_trailing_stop" if state.active else "short_stop_loss"
-                    signals.append(self._exit_signal(symbol, Side.BUY, PositionSide.SHORT, price, pos.contracts, reason))
+                    signals.append(self._exit_signal(symbol, Side.BUY, PositionSide.SHORT, price, pos.contracts, reason, state.risk_multiplier))
                 elif state.take_profit is not None and price <= state.take_profit:
-                    signals.append(self._exit_signal(symbol, Side.BUY, PositionSide.SHORT, price, pos.contracts, "short_take_profit"))
+                    signals.append(self._exit_signal(symbol, Side.BUY, PositionSide.SHORT, price, pos.contracts, "short_take_profit", state.risk_multiplier))
         return signals
 
     def _exit_signal(
@@ -93,6 +95,7 @@ class PositionManager:
         price: float,
         contracts: float,
         reason: str,
+        risk_multiplier: float,
     ) -> TradeSignal:
         return TradeSignal(
             symbol=symbol,
@@ -103,5 +106,5 @@ class PositionManager:
             price=price,
             stop_loss=price,
             reason=reason,
-            metadata={"contracts": contracts, "reduce_only": True},
+            metadata={"contracts": contracts, "reduce_only": True, "risk_multiplier": risk_multiplier},
         )

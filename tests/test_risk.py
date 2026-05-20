@@ -37,6 +37,29 @@ def test_directional_risk_limit_blocks_fourth_one_percent_trade() -> None:
     assert decision.reason == "same_direction_risk_limit"
 
 
+def test_directional_risk_release_reopens_capacity() -> None:
+    risk = RiskManager(Settings(dry_run=True))
+    risk.reserve_risk(PositionSide.LONG, 1.5)
+    risk.reserve_risk(PositionSide.LONG, 1.5)
+
+    blocked = risk.assess(signal(), equity=10_000.0, funding_rate=0.0)
+    risk.release_risk(PositionSide.LONG, 1.5)
+    allowed = risk.assess(signal(), equity=10_000.0, funding_rate=0.0)
+
+    assert not blocked.allowed
+    assert blocked.reason == "same_direction_risk_limit"
+    assert allowed.allowed
+    assert risk.direction_risk[PositionSide.LONG] == 0.015
+
+
+def test_directional_risk_release_does_not_go_negative() -> None:
+    risk = RiskManager(Settings(dry_run=True))
+
+    risk.release_risk(PositionSide.SHORT, 3.0)
+
+    assert risk.direction_risk[PositionSide.SHORT] == 0.0
+
+
 def test_grid_blocked_when_funding_too_expensive() -> None:
     grid_signal = signal(SignalType.ENTER_GRID)
     grid_signal.regime = Regime.SHOCK

@@ -141,6 +141,7 @@ class TrailingState:
     take_profit: float | None = None
     trailing_gap_pct: float | None = None
     min_trailing_activate_r: float = 1.0
+    risk_multiplier: float = 1.0
     highest_price: float = 0.0
     lowest_price: float = 0.0
     active: bool = False

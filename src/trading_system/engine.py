@@ -254,6 +254,12 @@ class OKXQuantEngine:
                 lock = self.hedge_locks.get(signal.symbol)
                 if lock:
                     lock.active = False
+            if signal.signal_type in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
+                self.risk.release_risk(
+                    signal.position_side,
+                    float(signal.metadata.get("risk_multiplier", 1.0)),
+                )
+                self.position_manager.trailing.pop((signal.symbol, signal.position_side), None)
             if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
                 self.position_manager.register_entry(signal, abs(signal.price - signal.stop_loss))
             if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
@@ -303,6 +309,11 @@ class OKXQuantEngine:
                 "max_signal_risk_multiplier": self.settings.max_signal_risk_multiplier,
                 "confirmation_position_sizing": self.settings.confirmation_position_sizing,
                 "confirmation_max_risk_multiplier": self.settings.confirmation_max_risk_multiplier,
+                "llm_regime_review_enabled": self.settings.llm_regime_review_enabled,
+                "llm_regime_provider": self.settings.llm_regime_provider,
+                "llm_regime_model": self.settings.llm_regime_model,
+                "llm_regime_review_cache_ttl_seconds": self.settings.llm_regime_review_cache_ttl_seconds,
+                "llm_regime_review_min_interval_seconds": self.settings.llm_regime_review_min_interval_seconds,
             },
             "prices": {symbol: status.get("price") for symbol, status in self.symbol_status.items()},
             "regime_checked_at": {symbol: status.get("checked_at") for symbol, status in self.symbol_status.items()},
@@ -356,12 +367,55 @@ class OKXQuantEngine:
         if not values:
             return
         previous_leverage = self.settings.trend_symbol_leverage_limit
+        previous_llm = (
+            self.llm_reviewer.provider,
+            self.llm_reviewer.model,
+            self.llm_reviewer.base_url,
+            self.llm_reviewer.enabled,
+            self.llm_reviewer.cache_ttl_seconds,
+            self.llm_reviewer.min_interval_seconds,
+        )
         apply_runtime_config(self.settings, values)
+        self._apply_llm_runtime_settings(previous_llm)
         if update_exchange_leverage and self.settings.trend_symbol_leverage_limit != previous_leverage:
             for symbol in self.settings.symbols:
                 await self.exchange.set_leverage(symbol, self.settings.trend_symbol_leverage_limit)
             self._applied_leverage_limit = self.settings.trend_symbol_leverage_limit
             logger.info("runtime leverage updated leverage=%s", self.settings.trend_symbol_leverage_limit)
+
+    def _apply_llm_runtime_settings(self, previous: tuple[object, ...]) -> None:
+        provider = self.settings.llm_regime_provider.lower()
+        base_url = self.settings.llm_regime_base_url or (
+            "https://api.deepseek.com" if provider == "deepseek" else None
+        )
+        api_key_env = self.settings.llm_regime_api_key_env or (
+            "DEEPSEEK_API_KEY" if provider == "deepseek" else "OPENAI_API_KEY"
+        )
+        self.llm_reviewer.provider = provider
+        self.llm_reviewer.model = self.settings.llm_regime_model
+        self.llm_reviewer.base_url = base_url
+        self.llm_reviewer.api_key_env = api_key_env
+        self.llm_reviewer.enabled = self.settings.llm_regime_review_enabled
+        self.llm_reviewer.cache_ttl_seconds = self.settings.llm_regime_review_cache_ttl_seconds
+        self.llm_reviewer.min_interval_seconds = self.settings.llm_regime_review_min_interval_seconds
+        current = (
+            self.llm_reviewer.provider,
+            self.llm_reviewer.model,
+            self.llm_reviewer.base_url,
+            self.llm_reviewer.enabled,
+            self.llm_reviewer.cache_ttl_seconds,
+            self.llm_reviewer.min_interval_seconds,
+        )
+        if current != previous:
+            self.llm_reviewer._review_cache.clear()
+            logger.info(
+                "runtime llm settings updated enabled=%s provider=%s model=%s cache_ttl=%s min_interval=%s",
+                self.llm_reviewer.enabled,
+                self.llm_reviewer.provider,
+                self.llm_reviewer.model,
+                self.llm_reviewer.cache_ttl_seconds,
+                self.llm_reviewer.min_interval_seconds,
+            )
 
     async def shutdown(self) -> None:
         self.running = False
