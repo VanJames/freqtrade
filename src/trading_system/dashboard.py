@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import hmac
+import hashlib
 from datetime import datetime, timezone
 from decimal import Decimal
 from html import escape
 from pathlib import Path
+from urllib.parse import parse_qs
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
-from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from trading_system.config import Settings
 from trading_system.runtime_config import RUNTIME_FIELDS, runtime_defaults, validate_runtime_config
@@ -20,6 +23,30 @@ from trading_system.runtime_config import RUNTIME_FIELDS, runtime_defaults, vali
 app = FastAPI(title="OKX Quant Dashboard")
 FAVICON_PATH = Path(__file__).with_name("assets") / "favicon.ico"
 REPORTS_DIR = Path(os.getenv("REPORTS_DIR", "reports"))
+DASHBOARD_SESSION_COOKIE = "okx_quant_dashboard_session"
+
+
+def dashboard_password() -> str:
+    return os.getenv("DASHBOARD_PASSWORD", "9527")
+
+
+def dashboard_session_secret() -> str:
+    return os.getenv("DASHBOARD_SESSION_SECRET", dashboard_password())
+
+
+def dashboard_session_token() -> str:
+    payload = f"dashboard:{dashboard_password()}".encode("utf-8")
+    return hmac.new(dashboard_session_secret().encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+
+def dashboard_authenticated(request: Request) -> bool:
+    token = request.cookies.get(DASHBOARD_SESSION_COOKIE, "")
+    return hmac.compare_digest(token, dashboard_session_token())
+
+
+def require_dashboard_auth(request: Request) -> None:
+    if not dashboard_authenticated(request):
+        raise HTTPException(status_code=401, detail="dashboard login required")
 
 
 def dashboard_tz() -> ZoneInfo:
@@ -164,12 +191,14 @@ def parse_memory(value: str) -> Any:
 
 
 @app.get("/api/status")
-async def api_status() -> JSONResponse:
+async def api_status(request: Request) -> JSONResponse:
+    require_dashboard_auth(request)
     return JSONResponse(await fetch_dashboard_data())
 
 
 @app.post("/api/runtime-config")
-async def api_update_runtime_config(payload: dict[str, Any] = Body(...)) -> JSONResponse:
+async def api_update_runtime_config(request: Request, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    require_dashboard_auth(request)
     try:
         values = validate_runtime_config(payload, Settings())
     except ValueError as exc:
@@ -194,8 +223,40 @@ async def api_update_runtime_config(payload: dict[str, Any] = Body(...)) -> JSON
     return JSONResponse({"ok": True, "runtime_config": values})
 
 
+@app.get("/login", response_class=HTMLResponse)
+async def login() -> str:
+    return render_login_page()
+
+
+@app.post("/login")
+async def login_submit(request: Request) -> Response:
+    body = (await request.body()).decode("utf-8")
+    values = parse_qs(body)
+    password = values.get("password", [""])[0]
+    if not hmac.compare_digest(password, dashboard_password()):
+        return HTMLResponse(render_login_page("密码错误"), status_code=401)
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        DASHBOARD_SESSION_COOKIE,
+        dashboard_session_token(),
+        max_age=7 * 24 * 60 * 60,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.post("/logout")
+async def logout() -> RedirectResponse:
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(DASHBOARD_SESSION_COOKIE)
+    return response
+
+
 @app.get("/", response_class=HTMLResponse)
-async def index() -> str:
+async def index(request: Request):
+    if not dashboard_authenticated(request):
+        return RedirectResponse("/login", status_code=303)
     data = await fetch_dashboard_data()
     return render_page(data)
 
@@ -206,7 +267,8 @@ async def favicon() -> FileResponse:
 
 
 @app.get("/reports/{name}", include_in_schema=False)
-async def report_file(name: str) -> FileResponse:
+async def report_file(request: Request, name: str) -> FileResponse:
+    require_dashboard_auth(request)
     if "/" in name or "\\" in name or not name.endswith(".md"):
         raise HTTPException(status_code=404, detail="report not found")
     path = REPORTS_DIR / name
@@ -228,6 +290,15 @@ def render_page(data: dict[str, Any]) -> str:
     runtime_config = data["runtime_config"]
     runtime_fields = data["runtime_fields"]
     latest_tuning = data["latest_tuning_report"]
+    overview_body = (
+        '<section class="grid">'
+        f'{metric("账户权益", fmt(snapshot.get("total_equity"), "USDT"))}'
+        f'{metric("订单总数", data["order_count"])}'
+        f'{metric("对冲状态", "ON" if snapshot.get("active_hedging") else "OFF")}'
+        f'{metric("交易品种", str(mode.get("symbols") or "-"))}'
+        "</section>"
+    )
+    hedge_body = f'<pre>{escape(json.dumps(hedge_locks, ensure_ascii=False, indent=2))}</pre>'
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -243,9 +314,18 @@ def render_page(data: dict[str, Any]) -> str:
     main {{ max-width:1180px; margin:0 auto; padding:24px; }}
     header {{ display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:20px; }}
     h1 {{ margin:0; font-size:24px; letter-spacing:0; }}
-    h2 {{ margin:0 0 12px; font-size:16px; color:var(--muted); font-weight:600; }}
-    .grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:16px; }}
-    .panel {{ min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; }}
+    h2 {{ margin:0; font-size:16px; color:var(--text); font-weight:700; }}
+    .top-actions {{ display:flex; align-items:center; gap:10px; }}
+    .grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }}
+    .panel {{ min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:8px; }}
+    details.panel {{ overflow:hidden; margin-bottom:16px; }}
+    details.panel > summary {{ list-style:none; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px; cursor:pointer; user-select:none; }}
+    details.panel > summary::-webkit-details-marker {{ display:none; }}
+    .panel-body {{ padding:0 16px 16px; }}
+    .chevron {{ color:var(--muted); font-size:13px; }}
+    details[open] .chevron::before {{ content:"收起"; }}
+    details:not([open]) .chevron::before {{ content:"展开"; }}
+    .metric-tile {{ min-width:0; background:#11151d; border:1px solid var(--line); border-radius:8px; padding:16px; }}
     .metric {{ min-width:0; font-size:22px; font-weight:700; line-height:1.25; margin-top:6px; overflow-wrap:anywhere; word-break:break-word; }}
     .muted {{ color:var(--muted); font-size:13px; }}
     .status {{ display:inline-flex; padding:4px 8px; border-radius:999px; border:1px solid var(--line); font-size:12px; }}
@@ -262,6 +342,7 @@ def render_page(data: dict[str, Any]) -> str:
     .field-note {{ min-height:34px; line-height:1.45; color:var(--muted); font-size:12px; }}
     input {{ width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; background:#10131a; color:var(--text); padding:10px 11px; font-size:14px; }}
     button {{ border:1px solid #3c76ff; background:#2258d4; color:white; border-radius:6px; padding:10px 14px; font-weight:700; cursor:pointer; }}
+    .ghost-button {{ border-color:var(--line); background:#10131a; color:var(--text); }}
     .actions {{ display:flex; align-items:center; gap:12px; margin-top:14px; }}
     pre {{ overflow:auto; margin:0; font-size:12px; color:#c8d1dc; }}
     @media (max-width:900px) {{ .grid,.cards,.form-grid {{ grid-template-columns:1fr; }} header {{ flex-direction:column; }} }}
@@ -274,54 +355,35 @@ def render_page(data: dict[str, Any]) -> str:
       <h1>OKX Quant Dashboard</h1>
       <div class="muted">本地时间 {escape(str(data["local_now"]))} · 每 10 秒自动刷新</div>
     </div>
-    <div>{mode_badge(mode)}</div>
+    <div class="top-actions">{mode_badge(mode)}<form method="post" action="/logout"><button class="ghost-button" type="submit">退出</button></form></div>
   </header>
 
-  <section class="grid">
-    {metric("账户权益", fmt(snapshot.get("total_equity"), "USDT"))}
-    {metric("订单总数", data["order_count"])}
-    {metric("对冲状态", "ON" if snapshot.get("active_hedging") else "OFF")}
-    {metric("交易品种", escape(str(mode.get("symbols") or "-")))}
-  </section>
+  {collapsible_panel("概览", overview_body, "dashboard-panel-overview")}
 
   <section class="cards">
-    <div class="panel">
-      <h2>当前行情</h2>
-      {market_table(mode, regimes, prices, regime_checked_at)}
-    </div>
-    <div class="panel">
-      <h2>风控状态</h2>
-      {dict_table(risk)}
-    </div>
+    {collapsible_panel("当前行情", market_table(mode, regimes, prices, regime_checked_at), "dashboard-panel-market")}
+    {collapsible_panel("风控状态", dict_table(risk), "dashboard-panel-risk")}
   </section>
 
-  <section class="panel" style="margin-bottom:16px">
-    <h2>最近订单</h2>
-    {orders_table(orders)}
-  </section>
+  {collapsible_panel("最近订单", orders_table(orders), "dashboard-panel-orders")}
 
-  <section class="panel" style="margin-bottom:16px">
-    <h2>动态风控配置</h2>
-    {runtime_config_form(runtime_fields, runtime_config)}
-  </section>
+  {collapsible_panel("动态风控配置", runtime_config_form(runtime_fields, runtime_config), "dashboard-panel-runtime")}
 
-  <section class="panel" style="margin-bottom:16px">
-    <h2>自动调参建议</h2>
-    {tuning_report_panel(latest_tuning)}
-  </section>
+  {collapsible_panel("自动调参建议", tuning_report_panel(latest_tuning), "dashboard-panel-tuning")}
 
   <section class="cards">
-    <div class="panel">
-      <h2>锁仓状态</h2>
-      <pre>{escape(json.dumps(hedge_locks, ensure_ascii=False, indent=2))}</pre>
-    </div>
-    <div class="panel">
-      <h2>运行配置</h2>
-      {dict_table(mode)}
-    </div>
+    {collapsible_panel("锁仓状态", hedge_body, "dashboard-panel-hedge")}
+    {collapsible_panel("运行配置", dict_table(mode), "dashboard-panel-mode")}
   </section>
 </main>
 <script>
+  document.querySelectorAll("details[data-panel-id]").forEach((panel) => {{
+    const key = "dashboard:" + panel.dataset.panelId + ":open";
+    panel.open = localStorage.getItem(key) === "1";
+    panel.addEventListener("toggle", () => {{
+      localStorage.setItem(key, panel.open ? "1" : "0");
+    }});
+  }});
   const form = document.getElementById("runtime-config-form");
   if (form) {{
     form.addEventListener("submit", async (event) => {{
@@ -350,6 +412,51 @@ def render_page(data: dict[str, Any]) -> str:
 </html>"""
 
 
+def render_login_page(error: str = "") -> str:
+    error_html = f'<div class="error">{escape(error)}</div>' if error else ""
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.ico" sizes="32x32">
+  <title>OKX Quant Dashboard Login</title>
+  <style>
+    :root {{ color-scheme: dark; --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e8eaed; --muted:#9aa4b2; --bad:#ff6b6b; }}
+    body {{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }}
+    .login {{ width:min(360px, calc(100vw - 32px)); background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:22px; box-sizing:border-box; }}
+    h1 {{ margin:0 0 6px; font-size:22px; letter-spacing:0; }}
+    .muted {{ color:var(--muted); font-size:13px; margin-bottom:18px; }}
+    label {{ display:flex; flex-direction:column; gap:8px; color:var(--muted); font-size:13px; }}
+    input {{ width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; background:#10131a; color:var(--text); padding:11px; font-size:16px; }}
+    button {{ width:100%; margin-top:14px; border:1px solid #3c76ff; background:#2258d4; color:white; border-radius:6px; padding:11px 14px; font-weight:700; cursor:pointer; }}
+    .error {{ margin-bottom:12px; color:var(--bad); font-size:13px; }}
+  </style>
+</head>
+<body>
+  <form class="login" method="post" action="/login">
+    <h1>OKX Quant Dashboard</h1>
+    <div class="muted">请输入访问密码</div>
+    {error_html}
+    <label>
+      <span>密码</span>
+      <input name="password" type="password" inputmode="numeric" autocomplete="current-password" autofocus>
+    </label>
+    <button type="submit">进入</button>
+  </form>
+</body>
+</html>"""
+
+
+def collapsible_panel(title: str, body: str, panel_id: str) -> str:
+    return (
+        f'<details class="panel" data-panel-id="{escape(panel_id)}">'
+        f'<summary><h2>{escape(title)}</h2><span class="chevron" aria-hidden="true"></span></summary>'
+        f'<div class="panel-body">{body}</div>'
+        "</details>"
+    )
+
+
 def mode_badge(mode: dict[str, Any]) -> str:
     if str(mode.get("dry_run")).lower() == "false" and str(mode.get("okx_demo")).lower() == "false":
         return '<span class="status live">REAL TRADING</span>'
@@ -360,7 +467,7 @@ def mode_badge(mode: dict[str, Any]) -> str:
 
 def metric(label: str, value: Any, unit: str = "") -> str:
     suffix = f" {escape(unit)}" if unit else ""
-    return f'<div class="panel"><div class="muted">{escape(label)}</div><div class="metric">{escape(str(value))}{suffix}</div></div>'
+    return f'<div class="metric-tile"><div class="muted">{escape(label)}</div><div class="metric">{escape(str(value))}{suffix}</div></div>'
 
 
 def fmt(value: Any, unit: str = "") -> str:
