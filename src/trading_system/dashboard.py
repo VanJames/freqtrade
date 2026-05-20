@@ -283,6 +283,7 @@ def render_page(data: dict[str, Any]) -> str:
     regimes = memory.get("regimes", {}) if isinstance(memory, dict) else {}
     prices = memory.get("prices", {}) if isinstance(memory, dict) else {}
     regime_checked_at = memory.get("regime_checked_at", {}) if isinstance(memory, dict) else {}
+    entry_diagnostics = memory.get("entry_diagnostics", {}) if isinstance(memory, dict) else {}
     hedge_locks = memory.get("hedge_locks", {}) if isinstance(memory, dict) else {}
     risk = memory.get("risk", {}) if isinstance(memory, dict) else {}
     orders = data["orders"]
@@ -340,12 +341,23 @@ def render_page(data: dict[str, Any]) -> str:
     label {{ display:flex; flex-direction:column; gap:6px; color:var(--muted); font-size:13px; }}
     .field-title {{ color:var(--text); font-weight:600; }}
     .field-note {{ min-height:34px; line-height:1.45; color:var(--muted); font-size:12px; }}
+    .diag-list {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
+    .diag-card {{ min-width:0; border:1px solid var(--line); border-radius:8px; padding:12px; background:#11151d; }}
+    .diag-head {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:8px; }}
+    .diag-title {{ font-weight:700; overflow-wrap:anywhere; }}
+    .diag-action {{ color:var(--muted); font-size:12px; margin-top:2px; }}
+    .diag-summary {{ display:inline-flex; border:1px solid var(--line); border-radius:999px; padding:3px 8px; font-size:12px; color:var(--warn); white-space:nowrap; }}
+    .diag-summary.ready {{ color:var(--good); }}
+    .diag-summary.blocked {{ color:var(--bad); }}
+    .diag-blockers {{ margin:8px 0 0; padding-left:18px; color:#d9dee8; font-size:13px; line-height:1.55; }}
+    .diag-metrics {{ display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }}
+    .diag-metric {{ border:1px solid var(--line); border-radius:999px; padding:3px 7px; color:var(--muted); font-size:12px; }}
     input {{ width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; background:#10131a; color:var(--text); padding:10px 11px; font-size:14px; }}
     button {{ border:1px solid #3c76ff; background:#2258d4; color:white; border-radius:6px; padding:10px 14px; font-weight:700; cursor:pointer; }}
     .ghost-button {{ border-color:var(--line); background:#10131a; color:var(--text); }}
     .actions {{ display:flex; align-items:center; gap:12px; margin-top:14px; }}
     pre {{ overflow:auto; margin:0; font-size:12px; color:#c8d1dc; }}
-    @media (max-width:900px) {{ .grid,.cards,.form-grid {{ grid-template-columns:1fr; }} header {{ flex-direction:column; }} }}
+    @media (max-width:900px) {{ .grid,.cards,.form-grid,.diag-list {{ grid-template-columns:1fr; }} header {{ flex-direction:column; }} }}
   </style>
 </head>
 <body>
@@ -364,6 +376,8 @@ def render_page(data: dict[str, Any]) -> str:
     {collapsible_panel("当前行情", market_table(mode, regimes, prices, regime_checked_at), "dashboard-panel-market")}
     {collapsible_panel("风控状态", dict_table(risk), "dashboard-panel-risk")}
   </section>
+
+  {collapsible_panel("未下单原因", entry_diagnostics_panel(mode, entry_diagnostics), "dashboard-panel-entry-diagnostics")}
 
   {collapsible_panel("最近订单", orders_table(orders), "dashboard-panel-orders")}
 
@@ -519,6 +533,176 @@ def market_table(
         "<table><thead><tr><th>品种</th><th>实时价格</th><th>行情判断</th><th>最近判断时间</th></tr></thead>"
         f"<tbody>{rows}</tbody></table>"
     )
+
+
+def entry_diagnostics_panel(mode: dict[str, Any], diagnostics: dict[str, Any]) -> str:
+    symbols = [item.strip() for item in str(mode.get("symbols") or "").split(",") if item.strip()]
+    if not symbols:
+        symbols = sorted(diagnostics)
+    if not symbols:
+        return '<div class="muted">暂无诊断数据，等待实盘引擎保存下一次快照</div>'
+
+    cards = ""
+    for symbol in symbols:
+        raw = diagnostics.get(symbol) if isinstance(diagnostics, dict) else None
+        if not isinstance(raw, dict):
+            cards += (
+                '<div class="diag-card">'
+                f'<div class="diag-head"><div><div class="diag-title">{escape(symbol)}</div>'
+                '<div class="diag-action">等待下一轮策略检查</div></div>'
+                '<span class="diag-summary">暂无数据</span></div>'
+                '<div class="muted">引擎还没有写入该品种的入场诊断。</div>'
+                "</div>"
+            )
+            continue
+
+        summary = str(raw.get("summary") or "")
+        blockers = raw.get("blockers") if isinstance(raw.get("blockers"), list) else []
+        metrics = raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}
+        blocker_items = ""
+        if blockers:
+            blocker_items = "".join(
+                f"<li>{escape(condition_text(item))}</li>"
+                for item in blockers
+                if isinstance(item, dict)
+            )
+            blocker_html = f'<ul class="diag-blockers">{blocker_items}</ul>'
+        else:
+            blocker_html = '<div class="muted">当前入场条件已满足，等待风控、交易执行或下一轮检查。</div>'
+        metric_html = "".join(
+            f'<span class="diag-metric">{escape(metric_label(key))}: {escape(format_metric_value(value))}</span>'
+            for key, value in metrics.items()
+            if key in {
+                "price",
+                "rsi_5m",
+                "opportunity_score",
+                "min_score",
+                "close_position_72h",
+                "ret_24h",
+                "ret_72h",
+                "volatility_tier",
+            }
+        )
+        metric_body = metric_html or '<span class="diag-metric">暂无指标</span>'
+        cards += (
+            '<div class="diag-card">'
+            '<div class="diag-head">'
+            f'<div><div class="diag-title">{escape(symbol)}</div>'
+            f'<div class="diag-action">{escape(action_label(str(raw.get("action") or "-")))}</div></div>'
+            f'<span class="diag-summary {escape(summary_class(summary))}">{escape(summary_label(summary))}</span>'
+            '</div>'
+            f'{blocker_html}'
+            f'<div class="diag-metrics">{metric_body}</div>'
+            '</div>'
+        )
+    return f'<div class="diag-list">{cards}</div>'
+
+
+def condition_text(item: dict[str, Any]) -> str:
+    code = str(item.get("code") or "unknown")
+    label = condition_label(code)
+    if "value" not in item:
+        return label
+    return f"{label}，当前值 {format_metric_value(item.get('value'))}"
+
+
+def condition_label(code: str) -> str:
+    labels = {
+        "regime_known": "行情判断不是 UNKNOWN",
+        "supported_regime": "支持该行情类型",
+        "enough_5m_candles": "5m K 线数量足够",
+        "atr_ready": "ATR 波动率已计算",
+        "llm_review_allow_trade": "LLM 复核允许交易",
+        "trend_short_enabled": "空头策略启用",
+        "opportunity_score": "机会评分达标",
+        "multi_timeframe": "5m/15m/1h 方向一致",
+        "one_hour_trend": "1h 趋势同向",
+        "one_hour_bullish": "1h EMA20 在 EMA60 上方",
+        "one_hour_bearish": "1h EMA20 在 EMA60 下方",
+        "four_hour_bullish": "4h 收盘方向向上",
+        "four_hour_bearish": "4h 收盘方向向下",
+        "near_breakout": "价格靠近 4h 突破位",
+        "near_4h_low": "价格靠近 4h 低位",
+        "pullback_down": "最近 5m 出现回调阴线",
+        "pullback_up": "最近 5m 出现反弹阳线",
+        "bullish_candle": "当前 5m 阳线确认",
+        "bearish_candle": "当前 5m 阴线确认",
+        "macd_cross_up": "5m MACD 金叉",
+        "macd_cross_down": "5m MACD 死叉",
+        "price_below_midpoint": "震荡区间价格在中线下方",
+        "price_above_midpoint": "震荡区间价格在中线上方",
+        "price_above_ema20_5m": "价格站上 5m EMA20",
+        "price_below_ema20_5m": "价格压在 5m EMA20 下方",
+        "price_above_ema20_1h": "价格站上 1h EMA20",
+        "price_below_ema20_1h": "价格压在 1h EMA20 下方",
+        "ema_slope_up": "5m EMA20 斜率向上",
+        "ema_slope_down": "5m EMA20 斜率向下",
+        "rsi_40_66": "5m RSI 在 40-66",
+        "rsi_34_60": "5m RSI 在 34-60",
+        "rsi_42_66": "5m RSI 在 42-66",
+        "rsi_35_58": "5m RSI 在 35-58",
+        "range_position_not_chasing": "72h 区间位置未追高",
+        "range_position_short_room": "72h 区间还有做空空间",
+        "down_momentum": "短线下跌动量达标",
+        "sol_filter": "SOL 专属过滤通过",
+    }
+    if code.startswith("risk_"):
+        return f"风控允许下单：{code.removeprefix('risk_')}"
+    return labels.get(code, code)
+
+
+def action_label(action: str) -> str:
+    return {
+        "none": "不下单",
+        "data_wait": "等待数据",
+        "llm_review": "LLM 复核",
+        "shock_long": "震荡逢低做多",
+        "shock_short": "震荡逢高做空",
+        "trend_long": "单边上涨回调做多",
+        "trend_short": "单边下跌反弹做空",
+        "shock_trend_up": "震荡上行回调做多",
+        "shock_trend_down": "震荡下行反弹做空",
+    }.get(action, action)
+
+
+def summary_label(summary: str) -> str:
+    return {
+        "waiting_for_conditions": "等待条件",
+        "entry_conditions_met": "条件满足",
+        "signal_ready": "信号已触发",
+        "release_hedge_signal_ready": "解锁信号",
+        "exit_signal_ready": "退出信号",
+        "risk_rejected": "风控拒单",
+        "order_submitted": "已提交订单",
+        "llm_rejected": "LLM 拒绝",
+    }.get(summary, summary or "-")
+
+
+def summary_class(summary: str) -> str:
+    if summary in {"entry_conditions_met", "signal_ready", "release_hedge_signal_ready", "exit_signal_ready", "order_submitted"}:
+        return "ready"
+    if summary in {"risk_rejected", "llm_rejected"}:
+        return "blocked"
+    return ""
+
+
+def metric_label(key: str) -> str:
+    return {
+        "price": "价格",
+        "rsi_5m": "RSI",
+        "opportunity_score": "评分",
+        "min_score": "最低分",
+        "close_position_72h": "72h位置",
+        "ret_24h": "24h涨跌",
+        "ret_72h": "72h涨跌",
+        "volatility_tier": "波动级别",
+    }.get(str(key), str(key))
+
+
+def format_metric_value(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.4f}".rstrip("0").rstrip(".")
+    return str(value)
 
 
 def format_price(value: Any) -> str:

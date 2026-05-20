@@ -190,10 +190,44 @@ class OKXQuantEngine:
             "price": latest_price,
             "regime": regime.value,
             "checked_at": datetime.now(timezone.utc).isoformat(),
+            "llm_review": {
+                "action": review.action,
+                "allow_trade": review.allow_trade,
+                "confidence": review.confidence,
+                "reasons": review.reasons,
+                "missing_evidence": review.missing_evidence,
+            },
         }
         if not review.allow_trade:
+            self.symbol_status[symbol]["entry_diagnostics"] = {
+                "action": "llm_review",
+                "summary": "llm_rejected",
+                "requirements": [
+                    {
+                        "code": "llm_review_allow_trade",
+                        "passed": False,
+                        "value": ",".join(review.reasons) or review.action,
+                    }
+                ],
+                "blockers": [
+                    {
+                        "code": "llm_review_allow_trade",
+                        "passed": False,
+                        "value": ",".join(review.reasons) or review.action,
+                    }
+                ],
+                "metrics": {"regime": regime.value, "price": latest_price, "llm_confidence": review.confidence},
+            }
             return []
         positions = await self.exchange.fetch_positions(symbol)
+        diagnostics = self.strategy.entry_diagnostics(
+            symbol,
+            regime,
+            features,
+            self.klines[symbol]["5m"],
+            positions,
+        )
+        self.symbol_status[symbol]["entry_diagnostics"] = diagnostics
         release_signals = self.strategy.hedge_release_signals(
             symbol,
             self.hedge_locks.get(symbol),
@@ -201,6 +235,12 @@ class OKXQuantEngine:
             positions,
         )
         if release_signals:
+            self.symbol_status[symbol]["last_signal"] = self._signal_status(release_signals[0])
+            self.symbol_status[symbol]["entry_diagnostics"] = {
+                **diagnostics,
+                "summary": "release_hedge_signal_ready",
+                "signal_reason": release_signals[0].reason,
+            }
             return release_signals
         exit_signals = self.position_manager.exit_signals(
             symbol,
@@ -209,6 +249,12 @@ class OKXQuantEngine:
             positions,
         )
         if exit_signals:
+            self.symbol_status[symbol]["last_signal"] = self._signal_status(exit_signals[0])
+            self.symbol_status[symbol]["entry_diagnostics"] = {
+                **diagnostics,
+                "summary": "exit_signal_ready",
+                "signal_reason": exit_signals[0].reason,
+            }
             return exit_signals
         signals = self.strategy.build_signals(
             symbol,
@@ -220,6 +266,12 @@ class OKXQuantEngine:
         )
         if not signals:
             return []
+        self.symbol_status[symbol]["last_signal"] = self._signal_status(signals[0])
+        self.symbol_status[symbol]["entry_diagnostics"] = {
+            **diagnostics,
+            "summary": "signal_ready",
+            "signal_reason": signals[0].reason,
+        }
         for signal in signals:
             if signal.signal_type == SignalType.HEDGE_TRANSITION:
                 grid_side = PositionSide.SHORT if signal.position_side == PositionSide.LONG else PositionSide.LONG
@@ -246,6 +298,24 @@ class OKXQuantEngine:
             decision = self.risk.assess(signal, equity, funding)
             if not decision.allowed:
                 logger.warning("signal rejected symbol=%s reason=%s", signal.symbol, decision.reason)
+                status = self.symbol_status.setdefault(signal.symbol, {})
+                status["last_risk_rejection"] = {
+                    "reason": decision.reason,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                    "signal_reason": signal.reason,
+                }
+                previous_diagnostics = status.get("entry_diagnostics")
+                if isinstance(previous_diagnostics, dict):
+                    blocker = {"code": f"risk_{decision.reason}", "passed": False}
+                    requirements = [*previous_diagnostics.get("requirements", []), blocker]
+                    blockers = [*previous_diagnostics.get("blockers", []), blocker]
+                    status["entry_diagnostics"] = {
+                        **previous_diagnostics,
+                        "summary": "risk_rejected",
+                        "requirements": requirements,
+                        "blockers": blockers,
+                        "risk_rejection": decision.reason,
+                    }
                 continue
             if signal.signal_type == SignalType.ENTER_GRID:
                 orders = []
@@ -272,6 +342,25 @@ class OKXQuantEngine:
                     signal.position_side,
                     self.risk.signal_risk_multiplier(signal),
                 )
+            status = self.symbol_status.setdefault(signal.symbol, {})
+            status["last_order"] = {
+                "id": order.id,
+                "status": order.status,
+                "side": order.side.value,
+                "position_side": order.position_side.value,
+                "amount": order.amount,
+                "price": order.price,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "signal_reason": signal.reason,
+            }
+            previous_diagnostics = status.get("entry_diagnostics")
+            if isinstance(previous_diagnostics, dict):
+                status["entry_diagnostics"] = {
+                    **previous_diagnostics,
+                    "summary": "order_submitted",
+                    "order_id": order.id,
+                    "signal_reason": signal.reason,
+                }
             if self.store:
                 await self.store.record_order(order, signal.regime)
 
@@ -302,8 +391,16 @@ class OKXQuantEngine:
         if not self.store:
             return
         equity = await self.exchange.fetch_balance_equity()
+        regimes = {symbol: regime.value for symbol, regime in self.regime_classifier.regimes.items()}
+        regimes.update(
+            {
+                symbol: str(status.get("regime"))
+                for symbol, status in self.symbol_status.items()
+                if status.get("regime") is not None
+            }
+        )
         memory = {
-            "regimes": {symbol: regime.value for symbol, regime in self.regime_classifier.regimes.items()},
+            "regimes": regimes,
             "direction_risk": {side.value: value for side, value in self.risk.direction_risk.items()},
             "risk": {
                 "risk_percent": self.settings.risk_percent,
@@ -322,6 +419,26 @@ class OKXQuantEngine:
             },
             "prices": {symbol: status.get("price") for symbol, status in self.symbol_status.items()},
             "regime_checked_at": {symbol: status.get("checked_at") for symbol, status in self.symbol_status.items()},
+            "entry_diagnostics": {
+                symbol: status.get("entry_diagnostics")
+                for symbol, status in self.symbol_status.items()
+                if status.get("entry_diagnostics") is not None
+            },
+            "last_signal": {
+                symbol: status.get("last_signal")
+                for symbol, status in self.symbol_status.items()
+                if status.get("last_signal") is not None
+            },
+            "last_risk_rejection": {
+                symbol: status.get("last_risk_rejection")
+                for symbol, status in self.symbol_status.items()
+                if status.get("last_risk_rejection") is not None
+            },
+            "last_order": {
+                symbol: status.get("last_order")
+                for symbol, status in self.symbol_status.items()
+                if status.get("last_order") is not None
+            },
             "symbol_locks": {symbol: until.isoformat() for symbol, until in self.risk.symbol_locks.items()},
             "hedge_locks": {
                 symbol: {
@@ -338,6 +455,20 @@ class OKXQuantEngine:
             task for task in self.execution.background_tasks if not task.done()
         )
         await self.store.save_snapshot(equity, active_hedging, memory)
+
+    @staticmethod
+    def _signal_status(signal: TradeSignal) -> dict[str, object]:
+        return {
+            "type": signal.signal_type.value,
+            "side": signal.side.value,
+            "position_side": signal.position_side.value,
+            "regime": signal.regime.value,
+            "price": signal.price,
+            "stop_loss": signal.stop_loss,
+            "take_profit": signal.take_profit,
+            "reason": signal.reason,
+            "created_at": signal.created_at.isoformat(),
+        }
 
     async def _restore_latest_snapshot(self) -> None:
         if not self.store:
