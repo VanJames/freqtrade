@@ -3,7 +3,10 @@
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+.cache/
 *.pyc
 *.sqlite3
 logs/
-
+reports/okx_backtest_*.md
+reports/okx_optimize_*.md
+reports/runtime_tuning_*.md
