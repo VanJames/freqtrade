@@ -652,6 +652,9 @@ def condition_label(code: str) -> str:
         "down_momentum": "短线下跌动量达标",
         "sol_filter": "SOL 专属过滤通过",
     }
+    if code.endswith("_timeout"):
+        base_label = labels.get(code.removesuffix("_timeout"), code.removesuffix("_timeout"))
+        return f"{base_label}超时"
     if code.startswith("risk_"):
         return f"风控允许下单：{code.removeprefix('risk_')}"
     return labels.get(code, code)

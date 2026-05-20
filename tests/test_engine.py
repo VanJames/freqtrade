@@ -36,6 +36,25 @@ async def test_engine_run_once_records_entry_diagnostics_for_all_symbols() -> No
     assert "entry_diagnostics" in engine.symbol_status["ETH/USDT:USDT"]
 
 
+@pytest.mark.asyncio
+async def test_engine_records_timeout_when_live_ohlcv_hangs() -> None:
+    settings = Settings(
+        dry_run=True,
+        symbols=["ETH/USDT:USDT"],
+        live_ohlcv_timeout_seconds=0.01,
+    )
+    engine = OKXQuantEngine(settings)
+
+    await engine.initialize(init_store=False)
+    with pytest.raises(TimeoutError):
+        await engine._build_symbol_signals("ETH/USDT:USDT")
+    await engine.shutdown()
+
+    diagnostics = engine.symbol_status["ETH/USDT:USDT"]["entry_diagnostics"]
+    assert diagnostics["summary"] == "symbol_loop_error"
+    assert diagnostics["blockers"][0]["code"] == "live_5m_ohlcv_timeout"
+
+
 def test_okx_setting_blocked_detects_error_59000() -> None:
     exc = Exception('okx {"code":"59000","msg":"Setting failed. Cancel any open orders, close positions, and stop trading bots first."}')
 

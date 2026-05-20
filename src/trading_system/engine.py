@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from logging import getLogger
+import time
+from typing import Any
 
 from trading_system.cache import StateCache
 from trading_system.config import Settings
@@ -81,6 +83,7 @@ class OKXQuantEngine:
         }
         self._applied_leverage_limit = settings.trend_symbol_leverage_limit
         self.symbol_status: dict[str, dict[str, object]] = {}
+        self._diagnostic_log_state: dict[tuple[str, str], tuple[str, float]] = {}
         self.running = False
 
     async def initialize(self, init_store: bool = True) -> None:
@@ -180,7 +183,12 @@ class OKXQuantEngine:
             summary="waiting_market_data",
             blockers=[{"code": "live_5m_ohlcv", "passed": False}],
         )
-        latest = await self.exchange.watch_ohlcv(symbol, "5m")
+        latest = await self._await_exchange_step(
+            symbol,
+            "live_5m_ohlcv",
+            self.exchange.watch_ohlcv(symbol, "5m"),
+            self.settings.live_ohlcv_timeout_seconds,
+        )
         if not latest:
             self._set_entry_status(
                 symbol,
@@ -200,9 +208,19 @@ class OKXQuantEngine:
             summary="waiting_market_data",
             blockers=[{"code": "snapshot_1h_ohlcv", "passed": False}],
         )
-        self.klines[symbol]["1h"] = await self.exchange.fetch_ohlcv(symbol, "1h", 120)
+        self.klines[symbol]["1h"] = await self._await_exchange_step(
+            symbol,
+            "snapshot_1h_ohlcv",
+            self.exchange.fetch_ohlcv(symbol, "1h", 120),
+            self.settings.exchange_request_timeout_seconds,
+        )
         if len(self.klines[symbol]["4h"]) < 100 or self._timeframe_stale(symbol, "4h", 14_400_000):
-            self.klines[symbol]["4h"] = await self.exchange.fetch_ohlcv(symbol, "4h", 100)
+            self.klines[symbol]["4h"] = await self._await_exchange_step(
+                symbol,
+                "snapshot_4h_ohlcv",
+                self.exchange.fetch_ohlcv(symbol, "4h", 100),
+                self.settings.exchange_request_timeout_seconds,
+            )
 
         self.risk.inspect_spike(symbol, self.klines[symbol]["5m"])
         previous = self.regime_classifier.regimes.get(symbol)
@@ -246,6 +264,12 @@ class OKXQuantEngine:
                 summary="waiting_llm_review",
                 blockers=[{"code": "llm_review_pending", "passed": False}],
             )
+            logger.info(
+                "llm review requested symbol=%s regime=%s volatility_tier=%s",
+                symbol,
+                regime.value,
+                volatility_policy.tier,
+            )
         review = (
             await self.llm_reviewer.review(
                 RegimeReviewInput(symbol=symbol, rule_regime=regime, features=review_features)
@@ -253,6 +277,17 @@ class OKXQuantEngine:
             if llm_review_required
             else self.llm_reviewer.default_review(regime)
         )
+        if llm_review_required:
+            logger.info(
+                "llm review completed symbol=%s action=%s proposed_regime=%s allow_trade=%s "
+                "confidence=%.2f reasons=%s",
+                symbol,
+                review.action,
+                review.proposed_regime.value,
+                review.allow_trade,
+                review.confidence,
+                ",".join(review.reasons),
+            )
         regime = review.proposed_regime
         latest_price = float(self.klines[symbol]["5m"][-1][4]) if self.klines[symbol]["5m"] else features.close_1h
         self.symbol_status[symbol] = {
@@ -296,7 +331,12 @@ class OKXQuantEngine:
             summary="waiting_positions",
             blockers=[{"code": "fetch_positions", "passed": False}],
         )
-        positions = await self.exchange.fetch_positions(symbol)
+        positions = await self._await_exchange_step(
+            symbol,
+            "fetch_positions",
+            self.exchange.fetch_positions(symbol),
+            self.settings.exchange_request_timeout_seconds,
+        )
         diagnostics = self.strategy.entry_diagnostics(
             symbol,
             regime,
@@ -305,6 +345,7 @@ class OKXQuantEngine:
             positions,
         )
         self.symbol_status[symbol]["entry_diagnostics"] = diagnostics
+        self._log_entry_diagnostics(symbol, diagnostics)
         release_signals = self.strategy.hedge_release_signals(
             symbol,
             self.hedge_locks.get(symbol),
@@ -374,7 +415,19 @@ class OKXQuantEngine:
             funding = await self.exchange.fetch_funding_rate(signal.symbol)
             decision = self.risk.assess(signal, equity, funding)
             if not decision.allowed:
-                logger.warning("signal rejected symbol=%s reason=%s", signal.symbol, decision.reason)
+                logger.warning(
+                    "signal rejected symbol=%s regime=%s side=%s reason=%s signal_reason=%s "
+                    "price=%.8f stop=%.8f take_profit=%s funding=%.6f",
+                    signal.symbol,
+                    signal.regime.value,
+                    signal.position_side.value,
+                    decision.reason,
+                    signal.reason,
+                    signal.price,
+                    signal.stop_loss,
+                    signal.take_profit,
+                    funding,
+                )
                 status = self.symbol_status.setdefault(signal.symbol, {})
                 status["last_risk_rejection"] = {
                     "reason": decision.reason,
@@ -430,6 +483,18 @@ class OKXQuantEngine:
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "signal_reason": signal.reason,
             }
+            logger.info(
+                "order submitted symbol=%s order_id=%s status=%s regime=%s side=%s amount=%.8f "
+                "price=%.8f signal_reason=%s",
+                signal.symbol,
+                order.id,
+                order.status,
+                signal.regime.value,
+                signal.position_side.value,
+                order.amount,
+                order.price,
+                signal.reason,
+            )
             previous_diagnostics = status.get("entry_diagnostics")
             if isinstance(previous_diagnostics, dict):
                 status["entry_diagnostics"] = {
@@ -473,6 +538,118 @@ class OKXQuantEngine:
                 "metrics": {"regime": regime.value, "price": price},
             },
         }
+        self._log_diagnostic_status(symbol, action, summary, regime.value, price, blockers)
+
+    async def _await_exchange_step(
+        self,
+        symbol: str,
+        stage: str,
+        awaitable,
+        timeout_seconds: float,
+    ):
+        try:
+            return await asyncio.wait_for(awaitable, timeout=max(0.01, timeout_seconds))
+        except TimeoutError:
+            self._set_entry_status(
+                symbol,
+                price=self._latest_price(symbol),
+                regime=self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN),
+                action=stage,
+                summary="symbol_loop_error",
+                blockers=[
+                    {
+                        "code": f"{stage}_timeout",
+                        "passed": False,
+                        "value": f">{timeout_seconds:.0f}s",
+                    }
+                ],
+            )
+            logger.warning(
+                "exchange step timeout symbol=%s stage=%s timeout=%.1fs",
+                symbol,
+                stage,
+                timeout_seconds,
+            )
+            raise
+
+    def _log_entry_diagnostics(self, symbol: str, diagnostics: dict[str, Any]) -> None:
+        metrics = diagnostics.get("metrics") if isinstance(diagnostics.get("metrics"), dict) else {}
+        blockers = diagnostics.get("blockers") if isinstance(diagnostics.get("blockers"), list) else []
+        price = self._float_metric(metrics.get("price"), self._latest_price(symbol))
+        regime = str(metrics.get("regime") or self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN).value)
+        extra = {
+            "score": metrics.get("opportunity_score"),
+            "min_score": metrics.get("min_score"),
+            "rsi_5m": metrics.get("rsi_5m"),
+            "close_position_72h": metrics.get("close_position_72h"),
+        }
+        self._log_diagnostic_status(
+            symbol,
+            f"entry:{diagnostics.get('action', 'unknown')}",
+            str(diagnostics.get("summary") or ""),
+            regime,
+            price,
+            blockers,
+            extra,
+        )
+
+    def _log_diagnostic_status(
+        self,
+        symbol: str,
+        action: str,
+        summary: str,
+        regime: str,
+        price: float,
+        blockers: list[dict[str, object]],
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        blocker_text = self._format_blockers(blockers)
+        extra_text = self._format_extra(extra or {})
+        fingerprint = f"{summary}|{regime}|{blocker_text}|{extra_text}"
+        key = (symbol, action)
+        now = time.monotonic()
+        previous = self._diagnostic_log_state.get(key)
+        log_interval = max(0.1, self.settings.diagnostics_log_interval_seconds)
+        if previous and previous[0] == fingerprint and now - previous[1] < log_interval:
+            return
+        self._diagnostic_log_state[key] = (fingerprint, now)
+        logger.info(
+            "entry diagnostic symbol=%s action=%s summary=%s regime=%s price=%.8f blockers=%s%s",
+            symbol,
+            action,
+            summary,
+            regime,
+            price,
+            blocker_text or "-",
+            f" {extra_text}" if extra_text else "",
+        )
+
+    @staticmethod
+    def _format_blockers(blockers: list[dict[str, object]]) -> str:
+        values = []
+        for item in blockers:
+            code = str(item.get("code") or "unknown")
+            if "value" in item:
+                values.append(f"{code}:{item.get('value')}")
+            else:
+                values.append(code)
+        return ",".join(values)
+
+    @staticmethod
+    def _format_extra(values: dict[str, object]) -> str:
+        parts = [
+            f"{key}={value}"
+            for key, value in values.items()
+            if value is not None
+        ]
+        return " ".join(parts)
+
+    @staticmethod
+    def _float_metric(value: object, fallback: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback
 
     def _latest_price(self, symbol: str) -> float:
         candles = self.klines.get(symbol, {}).get("5m", [])
