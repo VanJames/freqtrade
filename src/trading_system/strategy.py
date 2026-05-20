@@ -434,6 +434,12 @@ class StrategyEngine:
         volatility_policy,
     ) -> TradeSignal | None:
         shock_trend_up_rsi_quality = 42 <= last_rsi <= 66
+        recent_5h_position = self._recent_range_position(df, price, bars=60)
+        shock_trend_up_risk_throttle = 1.0
+        if features.close_position_72h >= 0.75 and features.ret_72h <= 0:
+            shock_trend_up_risk_throttle *= 0.70
+        if recent_5h_position >= 0.90 and features.ret_24h < 0.003:
+            shock_trend_up_risk_throttle *= 0.70
         shock_trend_up_opportunity = score_opportunity(
             symbol=symbol,
             regime=regime,
@@ -496,6 +502,7 @@ class StrategyEngine:
                 {
                     "trailing_gap_pct": self.trailing_gap_pct,
                     "min_trailing_activate_r": self.min_trailing_activate_r,
+                    "risk_throttle": shock_trend_up_risk_throttle,
                     **opportunity_metadata(shock_trend_up_opportunity),
                     "risk_multiplier": max(
                         self.shock_trend_risk_multiplier,
@@ -505,7 +512,16 @@ class StrategyEngine:
                 },
             )
 
-        shock_trend_down_rsi_quality = 34 <= last_rsi <= 58
+        shock_trend_down_rsi_quality = 35 <= last_rsi <= 58
+        shock_trend_down_range_ok = features.close_position_72h >= (
+            0.18 if symbol.startswith("SOL/") else 0.08
+        )
+        shock_trend_down_momentum_ok = (
+            features.ret_24h <= -0.003 or features.close_position_72h >= 0.30
+            if symbol.startswith("SOL/")
+            else True
+        )
+        shock_trend_down_risk_throttle = 0.70 if features.close_position_72h <= 0.32 else 1.0
         shock_trend_down_opportunity = score_opportunity(
             symbol=symbol,
             regime=regime,
@@ -523,22 +539,23 @@ class StrategyEngine:
                 "ema_slope": ema_now <= ema_prev,
                 "rsi_quality": shock_trend_down_rsi_quality,
                 "not_chasing": last_rsi >= 24,
-                "range_position": features.close_position_72h >= 0.08,
+                "range_position": shock_trend_down_range_ok,
             },
             penalties={
                 "directional_conflict": self._directional_breakout_active(features)
                 and not (features.ret_72h < 0 and features.ret_24h < 0.01),
                 "rsi_extreme": last_rsi < 20,
                 "counter_ema": features.ema20_1h > features.ema60_1h,
-                "overextended": features.close_position_72h < 0.04,
+                "overextended": features.close_position_72h < (0.18 if symbol.startswith("SOL/") else 0.04),
             },
             reward_risk=self.trend_reward_risk,
             volatility_tier=volatility_policy.tier,
-            min_score=88,
+            min_score=96,
         )
         if (
             regime == Regime.SHOCK_TREND_DOWN
             and shock_trend_down_opportunity.allow_trade
+            and shock_trend_down_opportunity.score >= 96
             and trend_down_aligned
             and features.ema20_1h <= features.ema60_1h
             and price <= features.ema20_1h * 1.003
@@ -549,6 +566,8 @@ class StrategyEngine:
             and price <= ema_now * 1.002
             and ema_now <= ema_prev
             and shock_trend_down_rsi_quality
+            and shock_trend_down_range_ok
+            and shock_trend_down_momentum_ok
             and self._sol_allowed(symbol, PositionSide.SHORT, regime, shock_trend_down_opportunity.score, features)
         ):
             stop = self._cap_stop(price, features.current_4h_high, PositionSide.SHORT)
@@ -571,7 +590,8 @@ class StrategyEngine:
                 "user_4h_shock_trend_down_pullback_confirmed",
                 {
                     "trailing_gap_pct": self.trailing_gap_pct,
-                    "min_trailing_activate_r": self.min_trailing_activate_r,
+                    "min_trailing_activate_r": max(self.min_trailing_activate_r, 1.5),
+                    "risk_throttle": shock_trend_down_risk_throttle,
                     **opportunity_metadata(shock_trend_down_opportunity),
                     "risk_multiplier": max(
                         self.shock_trend_down_risk_multiplier,
@@ -581,6 +601,17 @@ class StrategyEngine:
                 },
             )
         return None
+
+    @staticmethod
+    def _recent_range_position(df, price: float, bars: int) -> float:
+        recent = df.tail(bars)
+        if recent.empty:
+            return 0.5
+        high = float(recent.high.max())
+        low = float(recent.low.min())
+        if high <= low:
+            return 0.5
+        return (price - low) / (high - low)
 
     def _entry_signal(
         self,

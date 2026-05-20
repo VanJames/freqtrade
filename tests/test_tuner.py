@@ -8,6 +8,7 @@ from trading_system.models import PositionSide, Regime
 from trading_system.tuner import (
     RuntimeTuningCandidate,
     RuntimeTuningResult,
+    backtest_quality,
     build_backtest_config_from_settings,
     has_clear_improvement,
     run_tuning_agent_once,
@@ -93,6 +94,51 @@ def test_runtime_tuning_score_penalizes_symbol_loss() -> None:
     )
 
     assert score_runtime_result(profitable, 10_000.0) > score_runtime_result(uneven, 10_000.0)
+
+
+def test_backtest_quality_calculates_drawdown_and_profit_factor() -> None:
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    ended_at = datetime(2026, 1, 31, tzinfo=timezone.utc)
+    result = BacktestResult(
+        started_at=started_at,
+        ended_at=ended_at,
+        trades=[
+            SimTrade(
+                symbol="BTC/USDT:USDT",
+                side=PositionSide.LONG,
+                regime=Regime.SHOCK_TREND_UP,
+                entry_time=started_at,
+                exit_time=started_at,
+                entry_price=100.0,
+                exit_price=110.0,
+                qty=1.0,
+                pnl=500.0,
+                pnl_pct_equity=0.05,
+                reason="take_profit",
+            ),
+            SimTrade(
+                symbol="BTC/USDT:USDT",
+                side=PositionSide.LONG,
+                regime=Regime.SHOCK_TREND_UP,
+                entry_time=started_at,
+                exit_time=ended_at,
+                entry_price=100.0,
+                exit_price=90.0,
+                qty=1.0,
+                pnl=-300.0,
+                pnl_pct_equity=-0.03,
+                reason="stop_loss",
+            ),
+        ],
+    )
+
+    quality = backtest_quality(result, 10_000.0)
+
+    assert quality.gross_profit == 500.0
+    assert quality.gross_loss == 300.0
+    assert round(quality.profit_factor, 3) == 1.667
+    assert quality.max_drawdown == 300.0
+    assert round(quality.max_drawdown_pct, 4) == 0.0286
 
 
 def test_build_backtest_config_from_settings_preserves_runtime_values() -> None:

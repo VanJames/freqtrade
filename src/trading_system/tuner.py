@@ -46,6 +46,16 @@ class RuntimeTuningResult:
     score: float
 
 
+@dataclass(frozen=True, slots=True)
+class BacktestQuality:
+    gross_profit: float
+    gross_loss: float
+    profit_factor: float
+    max_drawdown: float
+    max_drawdown_pct: float
+    worst_trade: float
+
+
 class TuningAgentState(TypedDict):
     candidates: list[RuntimeTuningCandidate]
     results: NotRequired[list[RuntimeTuningResult]]
@@ -121,6 +131,7 @@ def candidate_from_llm_proposal(base: BacktestConfig, proposal: LLMParameterCand
 
 def score_runtime_result(result: BacktestResult, initial_equity: float) -> float:
     trade_count = len(result.trades)
+    quality = backtest_quality(result, initial_equity)
     score = result.total_pnl
     score -= max(0, 20 - trade_count) * 40.0
     score -= max(0.0, 0.58 - result.win_rate) * initial_equity * 0.25
@@ -132,8 +143,9 @@ def score_runtime_result(result: BacktestResult, initial_equity: float) -> float
     for pnl in pnl_by_regime(result.trades).values():
         if pnl < 0:
             score += pnl * 0.75
-    worst = min((trade.pnl for trade in result.trades), default=0.0)
-    score -= max(0.0, abs(worst) - initial_equity * 0.015) * 2.0
+    score -= max(0.0, abs(quality.worst_trade) - initial_equity * 0.015) * 2.0
+    score -= max(0.0, quality.max_drawdown_pct - 0.08) * initial_equity * 2.0
+    score -= max(0.0, 1.35 - quality.profit_factor) * initial_equity * 0.15
     return score
 
 
@@ -336,7 +348,7 @@ def propose_llm_candidates(
 
 def tuning_result_summary(item: RuntimeTuningResult) -> dict[str, Any]:
     trades = item.result.trades
-    worst = min((trade.pnl for trade in trades), default=0.0)
+    quality = backtest_quality(item.result, item.candidate.config.initial_equity)
     return {
         "candidate": item.candidate.name,
         "score": round(item.score, 2),
@@ -345,7 +357,10 @@ def tuning_result_summary(item: RuntimeTuningResult) -> dict[str, Any]:
         "trades": len(trades),
         "avg_win": round(item.result.avg_win, 2),
         "avg_loss": round(item.result.avg_loss, 2),
-        "worst_trade": round(worst, 2),
+        "worst_trade": round(quality.worst_trade, 2),
+        "profit_factor": round(quality.profit_factor, 3),
+        "max_drawdown": round(quality.max_drawdown, 2),
+        "max_drawdown_pct": round(quality.max_drawdown_pct, 4),
         "pnl_by_symbol": {symbol: round(pnl, 2) for symbol, pnl in pnl_by_symbol(trades).items()},
         "pnl_by_regime": {regime: round(pnl, 2) for regime, pnl in pnl_by_regime(trades).items()},
         "params": item.candidate.params,
@@ -369,22 +384,23 @@ def write_runtime_tuning_report(results: list[RuntimeTuningResult], end_ms: int)
         f"- 初始权益: `{current_config.initial_equity:.2f} USDT`",
         f"- 品种: `{', '.join(current_config.symbols)}`",
         f"- LLM 复核: `{current_config.llm_regime_review_enabled}`；本报告只对比参数，不会写入实盘运行时配置。",
-        "- 评分: `总盈利 - 低交易数惩罚 - 低胜率惩罚 - 盈亏比惩罚 - 分品种/分行情亏损惩罚 - 单笔大亏惩罚`",
+        "- 评分: `总盈利 - 低交易数惩罚 - 低胜率惩罚 - 盈亏比惩罚 - 分品种/分行情亏损惩罚 - 单笔大亏惩罚 - 最大回撤惩罚 - profit factor 惩罚`",
         "",
         "## 参数对比",
         "",
-        "| rank | candidate | score | pnl | win_rate | trades | avg_gap_h | avg_win | avg_loss | worst | avg_risk | BTC | ETH | SOL | report |",
-        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| rank | candidate | score | pnl | win_rate | trades | max_dd | max_dd_pct | profit_factor | avg_win | avg_loss | worst | avg_risk | BTC | ETH | SOL | report |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for rank, item in enumerate(results, start=1):
         trades = item.result.trades
         by_symbol = pnl_by_symbol(trades)
-        worst = min((trade.pnl for trade in trades), default=0.0)
+        quality = backtest_quality(item.result, item.candidate.config.initial_equity)
         avg_risk = sum(trade.risk_multiplier for trade in trades) / len(trades) if trades else 0.0
         lines.append(
             f"| {rank} | {item.candidate.name} | {item.score:.2f} | {item.result.total_pnl:.2f} | "
-            f"{item.result.win_rate:.2%} | {len(trades)} | {item.result.avg_entry_gap_hours:.2f} | "
-            f"{item.result.avg_win:.2f} | {item.result.avg_loss:.2f} | {worst:.2f} | {avg_risk:.2f} | "
+            f"{item.result.win_rate:.2%} | {len(trades)} | {quality.max_drawdown:.2f} | "
+            f"{quality.max_drawdown_pct:.2%} | {format_profit_factor(quality.profit_factor)} | "
+            f"{item.result.avg_win:.2f} | {item.result.avg_loss:.2f} | {quality.worst_trade:.2f} | {avg_risk:.2f} | "
             f"{by_symbol.get('BTC/USDT:USDT', 0.0):.2f} | {by_symbol.get('ETH/USDT:USDT', 0.0):.2f} | "
             f"{by_symbol.get('SOL/USDT:USDT', 0.0):.2f} | {item.report_path} |"
         )
@@ -483,6 +499,35 @@ def format_param_delta(current: float | bool | None, recommended: float | bool |
     if current is None or recommended is None:
         return "`-`"
     return f"`{float(recommended) - float(current):+.4g}`"
+
+
+def backtest_quality(result: BacktestResult, initial_equity: float) -> BacktestQuality:
+    gross_profit = sum(trade.pnl for trade in result.trades if trade.pnl > 0)
+    gross_loss = abs(sum(trade.pnl for trade in result.trades if trade.pnl < 0))
+    profit_factor = gross_profit / gross_loss if gross_loss else float("inf")
+    equity = initial_equity
+    peak = initial_equity
+    max_drawdown = 0.0
+    for trade in sorted(result.trades, key=lambda item: item.exit_time):
+        equity += trade.pnl
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
+    max_drawdown_pct = max_drawdown / peak if peak else 0.0
+    worst_trade = min((trade.pnl for trade in result.trades), default=0.0)
+    return BacktestQuality(
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
+        profit_factor=profit_factor,
+        max_drawdown=max_drawdown,
+        max_drawdown_pct=max_drawdown_pct,
+        worst_trade=worst_trade,
+    )
+
+
+def format_profit_factor(value: float) -> str:
+    if value == float("inf"):
+        return "inf"
+    return f"{value:.2f}"
 
 
 def pnl_by_symbol(trades: list[SimTrade]) -> dict[str, float]:

@@ -13,12 +13,13 @@ class SizingSettings(Protocol):
 
 def adjusted_risk_multiplier(signal: TradeSignal | dict[str, Any], settings: SizingSettings) -> float:
     base = max(0.0, min(raw_risk_multiplier(signal), settings.max_signal_risk_multiplier))
+    throttle = risk_throttle(signal)
     if not settings.confirmation_position_sizing:
-        return base
+        return round(base * throttle, 4)
 
     score = opportunity_score(signal)
     regime = signal_value(signal, "regime")
-    side = signal_value(signal, "side")
+    side = signal_value(signal, "position_side") or signal_value(signal, "side")
     symbol = str(signal_value(signal, "symbol") or "")
     reasons = opportunity_reasons(signal)
     required = {
@@ -48,13 +49,29 @@ def adjusted_risk_multiplier(signal: TradeSignal | dict[str, Any], settings: Siz
         boosted *= 0.92
     if symbol.startswith("SOL/"):
         boosted *= 0.85
+    if symbol.startswith("SOL/") and side == PositionSide.SHORT and regime == Regime.SHOCK_TREND_DOWN:
+        boosted *= 0.65
+    boosted *= throttle
 
-    return round(max(base, min(boosted, settings.confirmation_max_risk_multiplier, settings.max_signal_risk_multiplier)), 4)
+    return round(
+        max(
+            base * throttle,
+            min(boosted, settings.confirmation_max_risk_multiplier, settings.max_signal_risk_multiplier),
+        ),
+        4,
+    )
 
 
 def raw_risk_multiplier(signal: TradeSignal | dict[str, Any]) -> float:
     try:
         return float(signal_metadata(signal).get("risk_multiplier", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def risk_throttle(signal: TradeSignal | dict[str, Any]) -> float:
+    try:
+        return max(0.0, min(float(signal_metadata(signal).get("risk_throttle", 1.0)), 1.0))
     except (TypeError, ValueError):
         return 1.0
 

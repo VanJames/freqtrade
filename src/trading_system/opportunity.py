@@ -147,6 +147,8 @@ def risk_multiplier_for(
         multiplier *= 0.78
     if side == PositionSide.SHORT:
         multiplier *= 0.90
+    if symbol.startswith("SOL/") and side == PositionSide.SHORT and regime == Regime.SHOCK_TREND_DOWN:
+        multiplier *= 0.65
 
     return round(max(0.0, min(multiplier, 1.0)), 4)
 
@@ -186,9 +188,13 @@ def sol_trade_allowed(
         if ret_24h < -0.018 and ret_72h < 0.0:
             return False
     else:
-        if close_position_72h <= 0.08:
+        if regime == Regime.SHOCK_TREND_DOWN and score < 98:
             return False
-        if close_position_72h <= 0.22 and ret_24h > -0.006:
+        if close_position_72h <= 0.18:
+            return False
+        if close_position_72h <= 0.30 and ret_24h > -0.010:
+            return False
+        if regime == Regime.SHOCK_TREND_DOWN and ret_24h > -0.003:
             return False
         if ret_24h > 0.018 and ret_72h > 0.0:
             return False

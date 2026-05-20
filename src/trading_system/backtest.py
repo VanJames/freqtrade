@@ -1243,6 +1243,12 @@ def build_user_rule_signal(
         }
 
     shock_trend_up_rsi_quality = 42 <= last_rsi_5m <= 66
+    recent_5h_position = recent_range_position(history_5m, price, bars=60)
+    shock_trend_up_risk_throttle = 1.0
+    if features.get("close_position_72h", 0.5) >= 0.75 and features.get("ret_72h", 0.0) <= 0:
+        shock_trend_up_risk_throttle *= 0.70
+    if recent_5h_position >= 0.90 and features.get("ret_24h", 0.0) < 0.003:
+        shock_trend_up_risk_throttle *= 0.70
     shock_trend_up_opportunity = score_opportunity(
         symbol=symbol,
         regime=regime,
@@ -1308,10 +1314,20 @@ def build_user_rule_signal(
             "stop": stop,
             "take_profit": price + reward,
             "trailing_gap_pct": config.trailing_gap_pct,
+            "risk_throttle": shock_trend_up_risk_throttle,
             **opportunity_metadata(shock_trend_up_opportunity),
             "risk_multiplier": max(config.shock_trend_risk_multiplier, shock_trend_up_opportunity.risk_multiplier),
         }
-    shock_trend_down_rsi_quality = 34 <= last_rsi_5m <= 58
+    shock_trend_down_rsi_quality = 35 <= last_rsi_5m <= 58
+    shock_trend_down_range_ok = features.get("close_position_72h", 0.5) >= (
+        0.18 if symbol.startswith("SOL/") else 0.08
+    )
+    shock_trend_down_momentum_ok = (
+        features.get("ret_24h", 0.0) <= -0.003 or features.get("close_position_72h", 0.5) >= 0.30
+        if symbol.startswith("SOL/")
+        else True
+    )
+    shock_trend_down_risk_throttle = 0.70 if features.get("close_position_72h", 0.5) <= 0.32 else 1.0
     shock_trend_down_opportunity = score_opportunity(
         symbol=symbol,
         regime=regime,
@@ -1329,22 +1345,25 @@ def build_user_rule_signal(
             "ema_slope": ema20_5m_value <= ema20_5m_prev,
             "rsi_quality": shock_trend_down_rsi_quality,
             "not_chasing": last_rsi_5m >= 24,
-            "range_position": features.get("close_position_72h", 0.5) >= 0.08,
+            "range_position": shock_trend_down_range_ok,
         },
         penalties={
             "directional_conflict": directional_breakout
             and not (features.get("ret_72h", 0.0) < 0 and features.get("ret_24h", 0.0) < 0.01),
             "rsi_extreme": last_rsi_5m < 20,
             "counter_ema": features["ema20_1h"] > features["ema60_1h"],
-            "overextended": features.get("close_position_72h", 0.5) < 0.04,
+            "overextended": features.get("close_position_72h", 0.5) < (
+                0.18 if symbol.startswith("SOL/") else 0.04
+            ),
         },
         reward_risk=config.trend_reward_risk,
         volatility_tier=volatility_policy.tier,
-        min_score=88,
+        min_score=96,
     )
     if (
         regime == Regime.SHOCK_TREND_DOWN
         and shock_trend_down_opportunity.allow_trade
+        and shock_trend_down_opportunity.score >= 96
         and trend_down_aligned
         and features["ema20_1h"] <= features["ema60_1h"]
         and price <= features["ema20_1h"] * 1.003
@@ -1355,6 +1374,8 @@ def build_user_rule_signal(
         and price <= ema20_5m_value * 1.002
         and ema20_5m_value <= ema20_5m_prev
         and shock_trend_down_rsi_quality
+        and shock_trend_down_range_ok
+        and shock_trend_down_momentum_ok
         and sol_trade_allowed(
             symbol=symbol,
             side=PositionSide.SHORT,
@@ -1377,10 +1398,23 @@ def build_user_rule_signal(
             "stop": stop,
             "take_profit": price - reward,
             "trailing_gap_pct": config.trailing_gap_pct,
+            "min_trailing_activate_r": max(config.min_trailing_activate_r, 1.5),
+            "risk_throttle": shock_trend_down_risk_throttle,
             **opportunity_metadata(shock_trend_down_opportunity),
             "risk_multiplier": max(config.shock_trend_down_risk_multiplier, shock_trend_down_opportunity.risk_multiplier),
         }
     return None
+
+
+def recent_range_position(history: pd.DataFrame, price: float, bars: int) -> float:
+    recent = history.tail(bars)
+    if recent.empty:
+        return 0.5
+    high = float(recent.high.max())
+    low = float(recent.low.min())
+    if high <= low:
+        return 0.5
+    return (price - low) / (high - low)
 
 
 def multi_timeframe_aligned(history_5m: pd.DataFrame, side: PositionSide) -> bool:
