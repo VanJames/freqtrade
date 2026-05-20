@@ -73,7 +73,13 @@ class OKXQuantEngine:
         )
         self.alpha_filter = AlphaFilter()
         self.grid_planner = GridPlanner()
-        self.position_manager = PositionManager()
+        self.position_manager = PositionManager(
+            min_stop_loss_pct=settings.min_stop_loss_pct,
+            max_stop_loss_pct=settings.max_stop_loss_pct,
+            trailing_gap_pct=settings.trailing_gap_pct,
+            min_trailing_activate_r=settings.min_trailing_activate_r,
+            recovered_risk_multiplier=settings.defensive_risk_multiplier,
+        )
         self.llm_reviewer = LLMRegimeReviewer(
             model=settings.llm_regime_model,
             provider=settings.llm_regime_provider,
@@ -354,6 +360,26 @@ class OKXQuantEngine:
             self.exchange.fetch_positions(symbol),
             self.settings.exchange_request_timeout_seconds,
         )
+        recovered_positions = self.position_manager.recover_missing_states(
+            symbol,
+            positions,
+            price=latest_price,
+            atr_value=features.atr_1h or features.atr_4h,
+            regime=regime,
+        )
+        if recovered_positions:
+            self.symbol_status[symbol]["recovered_positions"] = recovered_positions
+            for item in recovered_positions:
+                logger.warning(
+                    "recovered live position symbol=%s side=%s contracts=%.8f entry=%.8f "
+                    "protective_stop=%.8f regime=%s",
+                    item["symbol"],
+                    item["side"],
+                    item["contracts"],
+                    item["entry_price"],
+                    item["stop_loss"],
+                    item["regime"],
+                )
         diagnostics = self.strategy.entry_diagnostics(
             symbol,
             regime,
@@ -798,6 +824,10 @@ class OKXQuantEngine:
                 symbol: status.get("last_order")
                 for symbol, status in self.symbol_status.items()
                 if status.get("last_order") is not None
+            },
+            "recovered_positions": {
+                f"{symbol}:{side.value}": value
+                for (symbol, side), value in self.position_manager.recovered_positions.items()
             },
             "symbol_locks": {symbol: until.isoformat() for symbol, until in self.risk.symbol_locks.items()},
             "hedge_locks": {

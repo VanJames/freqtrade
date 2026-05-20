@@ -7,7 +7,8 @@ import pytest
 from trading_system.config import Settings
 from trading_system.engine import OKXQuantEngine
 from trading_system.exchange import ExchangeClient, okx_setting_blocked
-from trading_system.models import OrderResult, Position, Side
+from trading_system.models import OrderResult, Position, PositionSide, Regime, Side
+from trading_system.position_manager import PositionManager
 
 
 @pytest.mark.asyncio
@@ -106,6 +107,64 @@ def test_display_entry_diagnostics_prefers_completed_result_over_transient_statu
             "last_completed_entry_diagnostics": completed,
         }
     ) is completed
+
+
+def test_position_manager_recovers_existing_long_position_with_protective_stop() -> None:
+    manager = PositionManager(
+        min_stop_loss_pct=0.002,
+        max_stop_loss_pct=0.012,
+        trailing_gap_pct=0.0025,
+        min_trailing_activate_r=1.0,
+        recovered_risk_multiplier=0.7,
+    )
+    position = Position(
+        symbol="BTC/USDT:USDT",
+        side=PositionSide.LONG,
+        contracts=0.01,
+        entry_price=100.0,
+    )
+
+    recovered = manager.recover_missing_states(
+        "BTC/USDT:USDT",
+        [position],
+        price=101.0,
+        atr_value=1.0,
+        regime=Regime.SHOCK_TREND_UP,
+    )
+
+    state = manager.trailing[("BTC/USDT:USDT", PositionSide.LONG)]
+    assert len(recovered) == 1
+    assert state.stop_loss == 98.8
+    assert state.trailing_gap_pct == 0.0025
+    assert state.risk_multiplier == 0.7
+
+
+def test_position_manager_removes_recovered_state_after_position_disappears() -> None:
+    manager = PositionManager()
+    position = Position(
+        symbol="ETH/USDT:USDT",
+        side=PositionSide.SHORT,
+        contracts=1.0,
+        entry_price=2000.0,
+    )
+    manager.recover_missing_states(
+        "ETH/USDT:USDT",
+        [position],
+        price=1990.0,
+        atr_value=20.0,
+        regime=Regime.SHOCK_TREND_DOWN,
+    )
+
+    manager.recover_missing_states(
+        "ETH/USDT:USDT",
+        [],
+        price=1990.0,
+        atr_value=20.0,
+        regime=Regime.UNKNOWN,
+    )
+
+    assert ("ETH/USDT:USDT", PositionSide.SHORT) not in manager.trailing
+    assert not manager.recovered_positions
 
 
 class FailingInitializeExchange(ExchangeClient):

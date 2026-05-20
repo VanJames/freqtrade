@@ -284,6 +284,7 @@ def render_page(data: dict[str, Any]) -> str:
     prices = memory.get("prices", {}) if isinstance(memory, dict) else {}
     regime_checked_at = memory.get("regime_checked_at", {}) if isinstance(memory, dict) else {}
     entry_diagnostics = memory.get("entry_diagnostics", {}) if isinstance(memory, dict) else {}
+    recovered_positions = memory.get("recovered_positions", {}) if isinstance(memory, dict) else {}
     hedge_locks = memory.get("hedge_locks", {}) if isinstance(memory, dict) else {}
     risk = memory.get("risk", {}) if isinstance(memory, dict) else {}
     engine_version = memory.get("engine_version", "-") if isinstance(memory, dict) else "-"
@@ -382,6 +383,8 @@ def render_page(data: dict[str, Any]) -> str:
   </section>
 
   {collapsible_panel("未下单原因", entry_diagnostics_panel(mode, entry_diagnostics), "dashboard-panel-entry-diagnostics")}
+
+  {collapsible_panel("恢复持仓", recovered_positions_panel(recovered_positions), "dashboard-panel-recovered-positions")}
 
   {collapsible_panel("最近订单", orders_table(orders), "dashboard-panel-orders")}
 
@@ -600,6 +603,31 @@ def entry_diagnostics_panel(mode: dict[str, Any], diagnostics: dict[str, Any]) -
             '</div>'
         )
     return f'<div class="diag-list">{cards}</div>'
+
+
+def recovered_positions_panel(positions: dict[str, Any]) -> str:
+    if not positions:
+        return '<div class="muted">暂无恢复持仓。程序当前没有发现需要从 OKX 现有持仓重建保护状态的仓位。</div>'
+    rows = ""
+    for key, raw in sorted(positions.items()):
+        item = raw if isinstance(raw, dict) else {}
+        rows += (
+            "<tr>"
+            f"<td>{escape(str(item.get('symbol') or key))}</td>"
+            f"<td>{escape(str(item.get('side') or '-'))}</td>"
+            f"<td>{escape(format_metric_value(item.get('contracts', '-')))}</td>"
+            f"<td>{escape(format_price(item.get('entry_price')))}</td>"
+            f"<td>{escape(format_price(item.get('stop_loss')))}</td>"
+            f"<td>{escape(format_price(item.get('take_profit')))}</td>"
+            f"<td>{escape(format_metric_value(item.get('atr', '-')))}</td>"
+            f"<td>{escape(str(item.get('regime') or '-'))}</td>"
+            "</tr>"
+        )
+    return (
+        "<table><thead><tr><th>品种</th><th>方向</th><th>数量</th><th>开仓价</th>"
+        "<th>保护止损</th><th>止盈</th><th>ATR</th><th>恢复行情</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
 
 
 def condition_text(item: dict[str, Any]) -> str:

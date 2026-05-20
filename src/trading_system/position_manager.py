@@ -4,8 +4,22 @@ from trading_system.models import Position, PositionSide, Regime, Side, SignalTy
 
 
 class PositionManager:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        min_stop_loss_pct: float = 0.002,
+        max_stop_loss_pct: float = 0.012,
+        trailing_gap_pct: float = 0.0025,
+        min_trailing_activate_r: float = 1.0,
+        recovered_risk_multiplier: float = 0.3,
+    ) -> None:
         self.trailing: dict[tuple[str, PositionSide], TrailingState] = {}
+        self.recovered_positions: dict[tuple[str, PositionSide], dict[str, object]] = {}
+        self.min_stop_loss_pct = min_stop_loss_pct
+        self.max_stop_loss_pct = max_stop_loss_pct
+        self.trailing_gap_pct = trailing_gap_pct
+        self.min_trailing_activate_r = min_trailing_activate_r
+        self.recovered_risk_multiplier = recovered_risk_multiplier
 
     def register_entry(self, signal: TradeSignal, atr_value: float) -> None:
         if signal.regime not in {
@@ -29,6 +43,46 @@ class PositionManager:
             highest_price=signal.price,
             lowest_price=signal.price,
         )
+        self.recovered_positions.pop(key, None)
+
+    def recover_missing_states(
+        self,
+        symbol: str,
+        positions: list[Position],
+        *,
+        price: float,
+        atr_value: float,
+        regime: Regime,
+    ) -> list[dict[str, object]]:
+        recovered: list[dict[str, object]] = []
+        active_keys = {(pos.symbol, pos.side) for pos in positions if pos.contracts > 0}
+        for key in list(self.trailing):
+            if key[0] == symbol and key not in active_keys:
+                self.trailing.pop(key, None)
+                self.recovered_positions.pop(key, None)
+
+        for pos in positions:
+            if pos.contracts <= 0:
+                continue
+            key = (pos.symbol, pos.side)
+            if key in self.trailing:
+                continue
+            state = self._recovered_state(pos, price=price, atr_value=atr_value)
+            self.trailing[key] = state
+            info = {
+                "symbol": pos.symbol,
+                "side": pos.side.value,
+                "contracts": pos.contracts,
+                "entry_price": pos.entry_price,
+                "stop_loss": state.stop_loss,
+                "take_profit": state.take_profit,
+                "atr": state.atr,
+                "regime": regime.value,
+                "risk_multiplier": state.risk_multiplier,
+            }
+            self.recovered_positions[key] = info
+            recovered.append(info)
+        return recovered
 
     def exit_signals(
         self,
@@ -42,18 +96,19 @@ class PositionManager:
             key = (pos.symbol, pos.side)
             state = self.trailing.get(key)
             if not state:
-                state = TrailingState(
-                    symbol=pos.symbol,
-                    position_side=pos.side,
-                    entry_price=pos.entry_price,
-                    atr=atr_value,
-                    stop_loss=pos.metadata.get("stop_loss", 0.0),
-                    take_profit=pos.metadata.get("take_profit"),
-                    risk_multiplier=float(pos.metadata.get("risk_multiplier", 1.0)),
-                    highest_price=pos.entry_price,
-                    lowest_price=pos.entry_price,
-                )
+                state = self._recovered_state(pos, price=price, atr_value=atr_value)
                 self.trailing[key] = state
+                self.recovered_positions[key] = {
+                    "symbol": pos.symbol,
+                    "side": pos.side.value,
+                    "contracts": pos.contracts,
+                    "entry_price": pos.entry_price,
+                    "stop_loss": state.stop_loss,
+                    "take_profit": state.take_profit,
+                    "atr": state.atr,
+                    "regime": Regime.UNKNOWN.value,
+                    "risk_multiplier": state.risk_multiplier,
+                }
             state.atr = atr_value or state.atr
             if pos.side == PositionSide.LONG:
                 state.highest_price = max(state.highest_price, price)
@@ -86,6 +141,49 @@ class PositionManager:
                 elif state.take_profit is not None and price <= state.take_profit:
                     signals.append(self._exit_signal(symbol, Side.BUY, PositionSide.SHORT, price, pos.contracts, "short_take_profit", state.risk_multiplier))
         return signals
+
+    def _recovered_state(self, pos: Position, *, price: float, atr_value: float) -> TrailingState:
+        entry_price = pos.entry_price or price
+        atr_value = atr_value or max(entry_price * self.min_stop_loss_pct, 0.0)
+        stop_loss = self._metadata_float(pos.metadata, "stop_loss")
+        take_profit = self._metadata_float(pos.metadata, "take_profit")
+        if stop_loss <= 0:
+            stop_loss = self._protective_stop(entry_price, atr_value, pos.side)
+        return TrailingState(
+            symbol=pos.symbol,
+            position_side=pos.side,
+            entry_price=entry_price,
+            atr=atr_value,
+            stop_loss=stop_loss,
+            take_profit=take_profit if take_profit > 0 else None,
+            trailing_gap_pct=self.trailing_gap_pct,
+            min_trailing_activate_r=self.min_trailing_activate_r,
+            risk_multiplier=self._metadata_float(
+                pos.metadata,
+                "risk_multiplier",
+                fallback=self.recovered_risk_multiplier,
+            ),
+            highest_price=max(entry_price, price) if pos.side == PositionSide.LONG else entry_price,
+            lowest_price=min(entry_price, price) if pos.side == PositionSide.SHORT else entry_price,
+        )
+
+    def _protective_stop(self, entry_price: float, atr_value: float, side: PositionSide) -> float:
+        min_distance = entry_price * self.min_stop_loss_pct
+        max_distance = entry_price * self.max_stop_loss_pct
+        distance = min(max(atr_value * 1.5, min_distance), max_distance)
+        if side == PositionSide.LONG:
+            return entry_price - distance
+        return entry_price + distance
+
+    @staticmethod
+    def _metadata_float(metadata: dict[str, object], key: str, fallback: float = 0.0) -> float:
+        value = metadata.get(key)
+        if value is None and isinstance(metadata.get("info"), dict):
+            value = metadata["info"].get(key)  # type: ignore[index]
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback
 
     def _exit_signal(
         self,
