@@ -96,6 +96,25 @@ class OKXQuantEngine:
                 await self.exchange.set_leverage(symbol, self.settings.trend_symbol_leverage_limit)
                 for timeframe, limit in {"5m": 150, "1h": 120, "4h": 100}.items():
                     self.klines[symbol][timeframe] = await self.exchange.fetch_ohlcv(symbol, timeframe, limit)
+                latest_price = (
+                    float(self.klines[symbol]["5m"][-1][4])
+                    if self.klines[symbol]["5m"]
+                    else 0.0
+                )
+                self._set_entry_status(
+                    symbol,
+                    price=latest_price,
+                    regime=Regime.UNKNOWN,
+                    action="engine_started",
+                    summary="waiting_live_check",
+                    blockers=[
+                        {
+                            "code": "live_symbol_check",
+                            "passed": False,
+                            "value": "等待下一轮实盘检查",
+                        }
+                    ],
+                )
             equity = await self.exchange.fetch_balance_equity()
             self.risk.update_equity(equity)
             logger.info("engine initialized dry_run=%s symbols=%s", self.settings.dry_run, self.settings.symbols)
@@ -131,7 +150,21 @@ class OKXQuantEngine:
         while self.running and not self.risk.fused():
             try:
                 await self._tick_symbol(symbol)
-            except Exception:
+            except Exception as exc:
+                self._set_entry_status(
+                    symbol,
+                    price=self._latest_price(symbol),
+                    regime=self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN),
+                    action="symbol_loop_error",
+                    summary="symbol_loop_error",
+                    blockers=[
+                        {
+                            "code": "symbol_loop_error",
+                            "passed": False,
+                            "value": f"{type(exc).__name__}: {exc}",
+                        }
+                    ],
+                )
                 logger.exception("symbol loop failed symbol=%s", symbol)
                 await asyncio.sleep(5)
 
@@ -139,10 +172,36 @@ class OKXQuantEngine:
         await self._execute_signals(await self._build_symbol_signals(symbol))
 
     async def _build_symbol_signals(self, symbol: str) -> list[TradeSignal]:
-        for timeframe in ("5m", "1h"):
-            latest = await self.exchange.watch_ohlcv(symbol, timeframe)
-            self._update_cache(symbol, timeframe, latest[0])
-        if len(self.klines[symbol]["4h"]) < 100:
+        self._set_entry_status(
+            symbol,
+            price=self._latest_price(symbol),
+            regime=self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN),
+            action="live_5m_wait",
+            summary="waiting_market_data",
+            blockers=[{"code": "live_5m_ohlcv", "passed": False}],
+        )
+        latest = await self.exchange.watch_ohlcv(symbol, "5m")
+        if not latest:
+            self._set_entry_status(
+                symbol,
+                price=self._latest_price(symbol),
+                regime=self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN),
+                action="live_5m_wait",
+                summary="waiting_market_data",
+                blockers=[{"code": "live_5m_ohlcv", "passed": False, "value": "empty"}],
+            )
+            return []
+        self._update_cache(symbol, "5m", latest[0])
+        self._set_entry_status(
+            symbol,
+            price=self._latest_price(symbol),
+            regime=self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN),
+            action="refresh_higher_timeframes",
+            summary="waiting_market_data",
+            blockers=[{"code": "snapshot_1h_ohlcv", "passed": False}],
+        )
+        self.klines[symbol]["1h"] = await self.exchange.fetch_ohlcv(symbol, "1h", 120)
+        if len(self.klines[symbol]["4h"]) < 100 or self._timeframe_stale(symbol, "4h", 14_400_000):
             self.klines[symbol]["4h"] = await self.exchange.fetch_ohlcv(symbol, "4h", 100)
 
         self.risk.inspect_spike(symbol, self.klines[symbol]["5m"])
@@ -177,11 +236,21 @@ class OKXQuantEngine:
             range_72h=features.range_72h,
         )
         review_features["volatility_tier"] = volatility_policy.tier
+        llm_review_required = needs_llm_review(volatility_policy, regime)
+        if llm_review_required:
+            self._set_entry_status(
+                symbol,
+                price=self._latest_price(symbol),
+                regime=regime,
+                action="llm_review",
+                summary="waiting_llm_review",
+                blockers=[{"code": "llm_review_pending", "passed": False}],
+            )
         review = (
             await self.llm_reviewer.review(
                 RegimeReviewInput(symbol=symbol, rule_regime=regime, features=review_features)
             )
-            if needs_llm_review(volatility_policy, regime)
+            if llm_review_required
             else self.llm_reviewer.default_review(regime)
         )
         regime = review.proposed_regime
@@ -219,6 +288,14 @@ class OKXQuantEngine:
                 "metrics": {"regime": regime.value, "price": latest_price, "llm_confidence": review.confidence},
             }
             return []
+        self._set_entry_status(
+            symbol,
+            price=latest_price,
+            regime=regime,
+            action="fetch_positions",
+            summary="waiting_positions",
+            blockers=[{"code": "fetch_positions", "passed": False}],
+        )
         positions = await self.exchange.fetch_positions(symbol)
         diagnostics = self.strategy.entry_diagnostics(
             symbol,
@@ -372,6 +449,41 @@ class OKXQuantEngine:
             cache.append(row)
         if len(cache) > 200:
             del cache[:-200]
+
+    def _set_entry_status(
+        self,
+        symbol: str,
+        *,
+        price: float,
+        regime: Regime,
+        action: str,
+        summary: str,
+        blockers: list[dict[str, object]],
+    ) -> None:
+        requirements = [dict(item) for item in blockers]
+        self.symbol_status[symbol] = {
+            "price": price,
+            "regime": regime.value,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "entry_diagnostics": {
+                "action": action,
+                "summary": summary,
+                "requirements": requirements,
+                "blockers": blockers,
+                "metrics": {"regime": regime.value, "price": price},
+            },
+        }
+
+    def _latest_price(self, symbol: str) -> float:
+        candles = self.klines.get(symbol, {}).get("5m", [])
+        return float(candles[-1][4]) if candles else 0.0
+
+    def _timeframe_stale(self, symbol: str, timeframe: str, stale_after_ms: int) -> bool:
+        candles = self.klines.get(symbol, {}).get(timeframe, [])
+        live_5m = self.klines.get(symbol, {}).get("5m", [])
+        if not candles or not live_5m:
+            return True
+        return int(live_5m[-1][0]) - int(candles[-1][0]) >= stale_after_ms
 
     async def _monitor_loop(self) -> None:
         while self.running and not self.risk.fused():

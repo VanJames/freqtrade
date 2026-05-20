@@ -551,7 +551,7 @@ def entry_diagnostics_panel(mode: dict[str, Any], diagnostics: dict[str, Any]) -
                 f'<div class="diag-head"><div><div class="diag-title">{escape(symbol)}</div>'
                 '<div class="diag-action">等待下一轮策略检查</div></div>'
                 '<span class="diag-summary">暂无数据</span></div>'
-                '<div class="muted">引擎还没有写入该品种的入场诊断。</div>'
+                '<div class="muted">引擎还没有写入该品种的入场诊断。通常是 app 尚未重启到新版本，或该品种循环还没跑到行情/仓位检查。</div>'
                 "</div>"
             )
             continue
@@ -613,6 +613,12 @@ def condition_label(code: str) -> str:
         "enough_5m_candles": "5m K 线数量足够",
         "atr_ready": "ATR 波动率已计算",
         "llm_review_allow_trade": "LLM 复核允许交易",
+        "llm_review_pending": "等待 LLM 复核返回",
+        "live_symbol_check": "实盘引擎完成该品种检查",
+        "live_5m_ohlcv": "等待 5m 实时 K 线更新",
+        "snapshot_1h_ohlcv": "刷新 1h K 线快照",
+        "fetch_positions": "读取 OKX 当前持仓",
+        "symbol_loop_error": "该品种实盘循环无异常",
         "trend_short_enabled": "空头策略启用",
         "opportunity_score": "机会评分达标",
         "multi_timeframe": "5m/15m/1h 方向一致",
@@ -655,6 +661,11 @@ def action_label(action: str) -> str:
     return {
         "none": "不下单",
         "data_wait": "等待数据",
+        "engine_started": "引擎已启动",
+        "live_5m_wait": "等待 5m 行情",
+        "refresh_higher_timeframes": "刷新 1h/4h 行情",
+        "fetch_positions": "读取持仓",
+        "symbol_loop_error": "品种循环报错",
         "llm_review": "LLM 复核",
         "shock_long": "震荡逢低做多",
         "shock_short": "震荡逢高做空",
@@ -668,6 +679,10 @@ def action_label(action: str) -> str:
 def summary_label(summary: str) -> str:
     return {
         "waiting_for_conditions": "等待条件",
+        "waiting_live_check": "等待检查",
+        "waiting_market_data": "等待行情",
+        "waiting_positions": "等待持仓",
+        "waiting_llm_review": "等待LLM",
         "entry_conditions_met": "条件满足",
         "signal_ready": "信号已触发",
         "release_hedge_signal_ready": "解锁信号",
@@ -675,13 +690,14 @@ def summary_label(summary: str) -> str:
         "risk_rejected": "风控拒单",
         "order_submitted": "已提交订单",
         "llm_rejected": "LLM 拒绝",
+        "symbol_loop_error": "循环异常",
     }.get(summary, summary or "-")
 
 
 def summary_class(summary: str) -> str:
     if summary in {"entry_conditions_met", "signal_ready", "release_hedge_signal_ready", "exit_signal_ready", "order_submitted"}:
         return "ready"
-    if summary in {"risk_rejected", "llm_rejected"}:
+    if summary in {"risk_rejected", "llm_rejected", "symbol_loop_error"}:
         return "blocked"
     return ""
 

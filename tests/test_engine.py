@@ -22,6 +22,20 @@ async def test_engine_dry_run_once_initializes_and_ticks() -> None:
     assert len(engine.klines["BTC/USDT:USDT"]["1h"]) > 0
 
 
+@pytest.mark.asyncio
+async def test_engine_run_once_records_entry_diagnostics_for_all_symbols() -> None:
+    settings = Settings(dry_run=True, symbols=["BTC/USDT:USDT", "ETH/USDT:USDT"])
+    engine = OKXQuantEngine(settings)
+    engine.execution.twap_timeout = 0
+
+    await engine.initialize(init_store=False)
+    await engine.run_once()
+    await engine.shutdown()
+
+    assert "entry_diagnostics" in engine.symbol_status["BTC/USDT:USDT"]
+    assert "entry_diagnostics" in engine.symbol_status["ETH/USDT:USDT"]
+
+
 def test_okx_setting_blocked_detects_error_59000() -> None:
     exc = Exception('okx {"code":"59000","msg":"Setting failed. Cancel any open orders, close positions, and stop trading bots first."}')
 
