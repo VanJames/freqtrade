@@ -127,6 +127,14 @@ DeepSeek 路径使用 JSON 输出并经本地 Pydantic schema 校验；解析失
 
 Compose 默认不再把 Postgres 的 `5432` 暴露到宿主机公网；应用、dashboard、init-db 只通过 Docker 内网访问数据库。`.env` 必须设置强随机 `POSTGRES_PASSWORD`，不要使用 `postgres/postgres`。
 
+服务器首次升级到该版本时，如果 `docker compose` 提示 `POSTGRES_PASSWORD is missing`，先执行：
+
+```bash
+python scripts/ensure_postgres_password.py
+```
+
+该脚本会在 `.env` 中生成强随机 `POSTGRES_PASSWORD`，并同步更新 `POSTGRES_DSN`。
+
 如果服务器上的 Postgres 已被植入挖矿程序，按下面流程处理：
 
 ```bash
