@@ -829,7 +829,8 @@ class StrategyEngine:
     ) -> TradeSignal | None:
         shock_trend_up_rsi_quality = 42 <= last_rsi <= 66
         recent_5h_position = self._recent_range_position(df, price, bars=60)
-        local_top_without_impulse = recent_5h_position >= 0.94 and features.ret_24h < 0.008
+        quiet_weak_up_drift = features.range_72h < 0.06 and features.ret_24h < 0.008
+        local_top_without_impulse = recent_5h_position >= 0.94 and quiet_weak_up_drift
         shock_trend_up_risk_throttle = 1.0
         if features.close_position_72h >= 0.75 and features.ret_72h <= 0:
             shock_trend_up_risk_throttle *= 0.70
@@ -910,6 +911,7 @@ class StrategyEngine:
                     "close_position_72h": round(features.close_position_72h, 4),
                     "ret_24h": round(features.ret_24h, 6),
                     "ret_72h": round(features.ret_72h, 6),
+                    "range_72h": round(features.range_72h, 6),
                     "recent_5h_position": round(recent_5h_position, 4),
                 },
             )
