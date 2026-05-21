@@ -205,6 +205,7 @@ class CcxtOkxExchange(ExchangeClient):
         import ccxt.pro as ccxtpro
 
         self.exchange = ccxtpro.okx(self.config)
+        await self.api.load_markets()
         try:
             await self.exchange.set_position_mode(True)
         except Exception as exc:
@@ -241,7 +242,8 @@ class CcxtOkxExchange(ExchangeClient):
         price: float,
         params: dict[str, Any],
     ) -> OrderResult:
-        raw = await self.api.create_order(symbol, order_type, side.value, amount, price, params)
+        exchange_amount = self._to_exchange_amount(symbol, amount)
+        raw = await self.api.create_order(symbol, order_type, side.value, exchange_amount, price, params)
         self._invalidate_positions_cache()
         return self._parse_order_result(
             raw,
@@ -331,21 +333,42 @@ class CcxtOkxExchange(ExchangeClient):
             raw.get("price"),
             fallback_price,
         )
+        symbol = str(raw.get("symbol") or fallback_symbol)
+        raw_amount = self._float_value(raw.get("amount"), info.get("sz"), 0.0)
+        raw_filled = self._float_value(raw.get("filled"), info.get("accFillSz"), 0.0)
+        raw_remaining = self._float_value(raw.get("remaining"), 0.0)
+        amount = self._from_exchange_amount(symbol, raw_amount) if raw_amount else fallback_amount
+        filled = self._from_exchange_amount(symbol, raw_filled)
+        remaining = self._from_exchange_amount(symbol, raw_remaining)
         return OrderResult(
             id=str(raw["id"]),
-            symbol=str(raw.get("symbol") or fallback_symbol),
+            symbol=symbol,
             side=Side(raw.get("side") or fallback_side.value),
             position_side=PositionSide(info.get("posSide") or fallback_position_side.value),
-            amount=self._float_value(raw.get("amount"), info.get("sz"), fallback_amount),
+            amount=amount,
             price=self._float_value(raw.get("price"), info.get("px"), fallback_price),
             status=str(raw.get("status") or "open"),
-            filled=self._float_value(raw.get("filled"), info.get("accFillSz"), 0.0),
-            remaining=self._float_value(raw.get("remaining"), 0.0),
+            filled=filled,
+            remaining=remaining,
             fee=self._float_value(fee.get("cost"), info.get("fee"), 0.0),
             average=average,
             realized_pnl=self._optional_float(raw.get("pnl"), info.get("pnl"), info.get("realizedPnl")),
             raw=raw,
         )
+
+    def _contract_size(self, symbol: str) -> float:
+        market = self.api.market(symbol)
+        if not market.get("contract"):
+            return 1.0
+        return float(market.get("contractSize") or 1.0)
+
+    def _to_exchange_amount(self, symbol: str, base_amount: float) -> float:
+        contract_size = self._contract_size(symbol)
+        return base_amount / contract_size if contract_size > 0 else base_amount
+
+    def _from_exchange_amount(self, symbol: str, exchange_amount: float) -> float:
+        contract_size = self._contract_size(symbol)
+        return exchange_amount * contract_size if contract_size > 0 else exchange_amount
 
     @staticmethod
     def _float_value(*values: Any) -> float:
@@ -370,15 +393,17 @@ class CcxtOkxExchange(ExchangeClient):
     def _parse_positions(self, raw_positions: list[dict[str, Any]]) -> list[Position]:
         positions: list[Position] = []
         for raw in raw_positions:
-            contracts = float(raw.get("contracts") or 0.0)
-            if contracts <= 0:
+            raw_contracts = float(raw.get("contracts") or 0.0)
+            if raw_contracts <= 0:
                 continue
+            symbol = raw["symbol"]
+            base_contracts = self._from_exchange_amount(symbol, raw_contracts)
             side = PositionSide(raw.get("side") or raw.get("info", {}).get("posSide"))
             positions.append(
                 Position(
-                    symbol=raw["symbol"],
+                    symbol=symbol,
                     side=side,
-                    contracts=contracts,
+                    contracts=base_contracts,
                     entry_price=float(raw.get("entryPrice") or 0.0),
                     unrealized_pnl=float(raw.get("unrealizedPnl") or 0.0),
                     metadata=raw,
