@@ -915,7 +915,30 @@ class StrategyEngine:
             if symbol.startswith("SOL/")
             else True
         )
-        shock_trend_down_risk_throttle = 0.70 if features.close_position_72h <= 0.32 else 1.0
+        low_range_short = features.close_position_72h < 0.35
+        shock_trend_down_rebound_ready = (
+            not low_range_short
+            or (
+                last_rsi >= 45
+                and price >= ema_now * 0.998
+                and self._timeframe_aligned(self._aggregate_bars(df, 3), PositionSide.SHORT, min_bars=12)
+            )
+        )
+        shock_trend_down_risk_throttle = 1.0
+        if features.close_position_72h < 0.20:
+            shock_trend_down_risk_throttle *= 0.30
+        elif features.close_position_72h < 0.30:
+            shock_trend_down_risk_throttle *= 0.45
+        elif features.close_position_72h < 0.35:
+            shock_trend_down_risk_throttle *= 0.65
+        if features.close_position_72h < 0.30 and features.ret_72h <= -0.05:
+            shock_trend_down_risk_throttle *= 0.65
+        if features.close_position_72h < 0.35 and features.ret_24h <= -0.018:
+            shock_trend_down_risk_throttle *= 0.75
+        if volatility_policy.tier == "HIGH":
+            shock_trend_down_risk_throttle *= 0.85
+        elif volatility_policy.tier == "EXTREME":
+            shock_trend_down_risk_throttle *= 0.65
         shock_trend_down_opportunity = score_opportunity(
             symbol=symbol,
             regime=regime,
@@ -934,6 +957,7 @@ class StrategyEngine:
                 "rsi_quality": shock_trend_down_rsi_quality,
                 "not_chasing": last_rsi >= 24,
                 "range_position": shock_trend_down_range_ok,
+                "low_range_rebound": shock_trend_down_rebound_ready,
             },
             penalties={
                 "directional_conflict": self._directional_breakout_active(features)
@@ -962,6 +986,7 @@ class StrategyEngine:
             and shock_trend_down_rsi_quality
             and shock_trend_down_range_ok
             and shock_trend_down_momentum_ok
+            and shock_trend_down_rebound_ready
             and self._sol_allowed(symbol, PositionSide.SHORT, regime, shock_trend_down_opportunity.score, features)
         ):
             stop = self._cap_stop(price, features.current_4h_high, PositionSide.SHORT)
@@ -984,7 +1009,9 @@ class StrategyEngine:
                 "user_4h_shock_trend_down_pullback_confirmed",
                 {
                     "trailing_gap_pct": self.trailing_gap_pct,
-                    "min_trailing_activate_r": max(self.min_trailing_activate_r, 1.5),
+                    "min_trailing_activate_r": max(self.min_trailing_activate_r, 0.85 if low_range_short else 1.2),
+                    "breakeven_activate_r": 0.65 if low_range_short else 0.85,
+                    "breakeven_buffer_pct": 0.0003,
                     "risk_throttle": shock_trend_down_risk_throttle,
                     **opportunity_metadata(shock_trend_down_opportunity),
                     "risk_multiplier": max(
@@ -992,6 +1019,9 @@ class StrategyEngine:
                         shock_trend_down_opportunity.risk_multiplier,
                     ),
                     "volatility_tier": volatility_policy.tier,
+                    "close_position_72h": round(features.close_position_72h, 4),
+                    "ret_24h": round(features.ret_24h, 6),
+                    "ret_72h": round(features.ret_72h, 6),
                 },
             )
         return None

@@ -11,7 +11,7 @@ from trading_system.config import Settings
 from trading_system.execution import ExecutionEngine
 from trading_system.exchange import CcxtOkxExchange, DryRunExchange, ExchangeClient
 from trading_system.foresight import ForesightProvider
-from trading_system.models import HedgeLock, PositionSide, Regime, SignalType, TradeSignal
+from trading_system.models import HedgeLock, OrderResult, PositionSide, Regime, SignalType, TradeSignal
 from trading_system.llm_regime import LLMRegimeReviewer, RegimeReviewInput
 from trading_system.portfolio import AlphaFilter, GridPlanner
 from trading_system.position_manager import PositionManager
@@ -366,6 +366,7 @@ class OKXQuantEngine:
             price=latest_price,
             atr_value=features.atr_1h or features.atr_4h,
             regime=regime,
+            signal_hints=self._position_signal_hints(),
         )
         if recovered_positions:
             self.symbol_status[symbol]["recovered_positions"] = recovered_positions
@@ -520,6 +521,9 @@ class OKXQuantEngine:
                     signal.position_side,
                     self.risk.signal_risk_multiplier(signal),
                 )
+            synced_order = await self._sync_submitted_order(order, signal)
+            if synced_order:
+                order = synced_order
             status = self.symbol_status.setdefault(signal.symbol, {})
             status["last_order"] = {
                 "id": order.id,
@@ -554,7 +558,7 @@ class OKXQuantEngine:
                 status["entry_diagnostics"] = diagnostics
                 status["last_completed_entry_diagnostics"] = diagnostics
             if self.store:
-                await self.store.record_order(order, signal.regime)
+                await self.store.record_order(order, signal.regime, signal)
 
     def _update_cache(self, symbol: str, timeframe: str, row: list[float]) -> None:
         cache = self.klines[symbol][timeframe]
@@ -758,6 +762,7 @@ class OKXQuantEngine:
                 if self.risk.update_equity(equity):
                     await self.exchange.close_all_positions()
                 await self._save_snapshot()
+                await self._sync_recent_orders()
                 await self._save_cache()
                 await asyncio.sleep(60)
             except Exception:
@@ -825,6 +830,7 @@ class OKXQuantEngine:
                 for symbol, status in self.symbol_status.items()
                 if status.get("last_order") is not None
             },
+            "trailing_states": self.position_manager.trailing_snapshot(),
             "recovered_positions": {
                 f"{symbol}:{side.value}": value
                 for (symbol, side), value in self.position_manager.recovered_positions.items()
@@ -845,6 +851,35 @@ class OKXQuantEngine:
             task for task in self.execution.background_tasks if not task.done()
         )
         await self.store.save_snapshot(equity, active_hedging, memory)
+
+    async def _sync_submitted_order(
+        self,
+        order: OrderResult,
+        signal: TradeSignal,
+    ) -> OrderResult | None:
+        if signal.signal_type not in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
+            return None
+        await asyncio.sleep(1)
+        try:
+            return await self.exchange.fetch_order(order.id, order.symbol)
+        except Exception:
+            logger.exception("order sync failed order_id=%s symbol=%s", order.id, order.symbol)
+            return None
+
+    async def _sync_recent_orders(self) -> None:
+        if not self.store:
+            return
+        try:
+            refs = await self.store.recent_order_refs(limit=20)
+        except Exception:
+            logger.exception("load recent orders for sync failed")
+            return
+        for order_id, symbol in refs:
+            try:
+                order = await self.exchange.fetch_order(order_id, symbol)
+                await self.store.update_order_result(order)
+            except Exception:
+                logger.debug("recent order sync skipped order_id=%s symbol=%s", order_id, symbol, exc_info=True)
 
     def _display_entry_diagnostics(self, status: dict[str, object]) -> dict[str, Any] | None:
         current = status.get("entry_diagnostics")
@@ -871,7 +906,25 @@ class OKXQuantEngine:
             "take_profit": signal.take_profit,
             "reason": signal.reason,
             "created_at": signal.created_at.isoformat(),
+            "trailing_gap_pct": signal.metadata.get("trailing_gap_pct"),
+            "min_trailing_activate_r": signal.metadata.get("min_trailing_activate_r"),
+            "breakeven_activate_r": signal.metadata.get("breakeven_activate_r"),
+            "breakeven_buffer_pct": signal.metadata.get("breakeven_buffer_pct"),
+            "risk_multiplier": signal.metadata.get("risk_multiplier"),
         }
+
+    def _position_signal_hints(self) -> dict[tuple[str, PositionSide], dict[str, object]]:
+        hints: dict[tuple[str, PositionSide], dict[str, object]] = {}
+        for symbol, status in self.symbol_status.items():
+            signal = status.get("last_signal")
+            if not isinstance(signal, dict) or signal.get("type") not in {SignalType.ENTER_TREND.value, SignalType.ENTER_GRID.value}:
+                continue
+            try:
+                side = PositionSide(str(signal.get("position_side")))
+            except ValueError:
+                continue
+            hints[(symbol, side)] = signal
+        return hints
 
     async def _restore_latest_snapshot(self) -> None:
         if not self.store:
@@ -883,6 +936,11 @@ class OKXQuantEngine:
             self.regime_classifier.regimes[symbol] = Regime(value)
         for side, value in snapshot.get("direction_risk", {}).items():
             self.risk.direction_risk[PositionSide(side)] = float(value)
+        self.position_manager.restore_trailing_snapshot(snapshot.get("trailing_states", {}))
+        for symbol, signal in snapshot.get("last_signal", {}).items():
+            self.symbol_status.setdefault(symbol, {})["last_signal"] = signal
+        for symbol, order in snapshot.get("last_order", {}).items():
+            self.symbol_status.setdefault(symbol, {})["last_order"] = order
         for symbol, raw in snapshot.get("hedge_locks", {}).items():
             self.hedge_locks[symbol] = HedgeLock(
                 symbol=symbol,

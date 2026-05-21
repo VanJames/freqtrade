@@ -39,6 +39,8 @@ class PositionManager:
             take_profit=signal.take_profit,
             trailing_gap_pct=signal.metadata.get("trailing_gap_pct"),
             min_trailing_activate_r=float(signal.metadata.get("min_trailing_activate_r", 1.0)),
+            breakeven_activate_r=float(signal.metadata.get("breakeven_activate_r", 0.0) or 0.0),
+            breakeven_buffer_pct=float(signal.metadata.get("breakeven_buffer_pct", 0.0) or 0.0),
             risk_multiplier=float(signal.metadata.get("risk_multiplier", 1.0)),
             highest_price=signal.price,
             lowest_price=signal.price,
@@ -53,8 +55,10 @@ class PositionManager:
         price: float,
         atr_value: float,
         regime: Regime,
+        signal_hints: dict[tuple[str, PositionSide], dict[str, object]] | None = None,
     ) -> list[dict[str, object]]:
         recovered: list[dict[str, object]] = []
+        signal_hints = signal_hints or {}
         active_keys = {(pos.symbol, pos.side) for pos in positions if pos.contracts > 0}
         for key in list(self.trailing):
             if key[0] == symbol and key not in active_keys:
@@ -67,7 +71,7 @@ class PositionManager:
             key = (pos.symbol, pos.side)
             if key in self.trailing:
                 continue
-            state = self._recovered_state(pos, price=price, atr_value=atr_value)
+            state = self._recovered_state(pos, price=price, atr_value=atr_value, signal_hint=signal_hints.get(key))
             self.trailing[key] = state
             info = {
                 "symbol": pos.symbol,
@@ -114,6 +118,13 @@ class PositionManager:
                 state.highest_price = max(state.highest_price, price)
                 if state.trailing_gap_pct and state.stop_loss > 0:
                     risk = abs(state.entry_price - state.stop_loss)
+                    if (
+                        state.breakeven_activate_r > 0
+                        and risk > 0
+                        and state.highest_price - state.entry_price >= state.breakeven_activate_r * risk
+                    ):
+                        state.stop_loss = max(state.stop_loss, state.entry_price * (1 + state.breakeven_buffer_pct))
+                        state.active = True
                     if risk > 0 and state.highest_price - state.entry_price >= state.min_trailing_activate_r * risk:
                         state.stop_loss = max(state.stop_loss, state.highest_price * (1 - state.trailing_gap_pct))
                         state.active = True
@@ -122,13 +133,42 @@ class PositionManager:
                     state.stop_loss = max(state.stop_loss, state.highest_price - 1.5 * state.atr)
                 if state.stop_loss > 0 and price <= state.stop_loss:
                     reason = "long_trailing_stop" if state.active else "long_stop_loss"
-                    signals.append(self._exit_signal(symbol, Side.SELL, PositionSide.LONG, price, pos.contracts, reason, state.risk_multiplier))
+                    signals.append(
+                        self._exit_signal(
+                            symbol,
+                            Side.SELL,
+                            PositionSide.LONG,
+                            price,
+                            pos.contracts,
+                            reason,
+                            state.risk_multiplier,
+                            state.entry_price,
+                        )
+                    )
                 elif state.take_profit is not None and price >= state.take_profit:
-                    signals.append(self._exit_signal(symbol, Side.SELL, PositionSide.LONG, price, pos.contracts, "long_take_profit", state.risk_multiplier))
+                    signals.append(
+                        self._exit_signal(
+                            symbol,
+                            Side.SELL,
+                            PositionSide.LONG,
+                            price,
+                            pos.contracts,
+                            "long_take_profit",
+                            state.risk_multiplier,
+                            state.entry_price,
+                        )
+                    )
             else:
                 state.lowest_price = min(state.lowest_price or price, price)
                 if state.trailing_gap_pct and state.stop_loss > 0:
                     risk = abs(state.stop_loss - state.entry_price)
+                    if (
+                        state.breakeven_activate_r > 0
+                        and risk > 0
+                        and state.entry_price - state.lowest_price >= state.breakeven_activate_r * risk
+                    ):
+                        state.stop_loss = min(state.stop_loss, state.entry_price * (1 - state.breakeven_buffer_pct))
+                        state.active = True
                     if risk > 0 and state.entry_price - state.lowest_price >= state.min_trailing_activate_r * risk:
                         state.stop_loss = min(state.stop_loss, state.lowest_price * (1 + state.trailing_gap_pct))
                         state.active = True
@@ -137,16 +177,88 @@ class PositionManager:
                     state.stop_loss = min(state.stop_loss, state.lowest_price + 1.5 * state.atr)
                 if state.stop_loss > 0 and price >= state.stop_loss:
                     reason = "short_trailing_stop" if state.active else "short_stop_loss"
-                    signals.append(self._exit_signal(symbol, Side.BUY, PositionSide.SHORT, price, pos.contracts, reason, state.risk_multiplier))
+                    signals.append(
+                        self._exit_signal(
+                            symbol,
+                            Side.BUY,
+                            PositionSide.SHORT,
+                            price,
+                            pos.contracts,
+                            reason,
+                            state.risk_multiplier,
+                            state.entry_price,
+                        )
+                    )
                 elif state.take_profit is not None and price <= state.take_profit:
-                    signals.append(self._exit_signal(symbol, Side.BUY, PositionSide.SHORT, price, pos.contracts, "short_take_profit", state.risk_multiplier))
+                    signals.append(
+                        self._exit_signal(
+                            symbol,
+                            Side.BUY,
+                            PositionSide.SHORT,
+                            price,
+                            pos.contracts,
+                            "short_take_profit",
+                            state.risk_multiplier,
+                            state.entry_price,
+                        )
+                    )
         return signals
 
-    def _recovered_state(self, pos: Position, *, price: float, atr_value: float) -> TrailingState:
+    def trailing_snapshot(self) -> dict[str, dict[str, object]]:
+        return {
+            self._key_string(symbol, side): {
+                "symbol": state.symbol,
+                "position_side": state.position_side.value,
+                "entry_price": state.entry_price,
+                "atr": state.atr,
+                "stop_loss": state.stop_loss,
+                "take_profit": state.take_profit,
+                "trailing_gap_pct": state.trailing_gap_pct,
+                "min_trailing_activate_r": state.min_trailing_activate_r,
+                "breakeven_activate_r": state.breakeven_activate_r,
+                "breakeven_buffer_pct": state.breakeven_buffer_pct,
+                "risk_multiplier": state.risk_multiplier,
+                "highest_price": state.highest_price,
+                "lowest_price": state.lowest_price,
+                "active": state.active,
+            }
+            for (symbol, side), state in self.trailing.items()
+        }
+
+    def restore_trailing_snapshot(self, raw: dict[str, dict[str, object]]) -> None:
+        for key, item in raw.items():
+            symbol = str(item.get("symbol") or key.rsplit(":", 1)[0])
+            side = PositionSide(str(item.get("position_side") or key.rsplit(":", 1)[1]))
+            self.trailing[(symbol, side)] = TrailingState(
+                symbol=symbol,
+                position_side=side,
+                entry_price=self._float_item(item, "entry_price"),
+                atr=self._float_item(item, "atr"),
+                stop_loss=self._float_item(item, "stop_loss"),
+                take_profit=self._optional_float_item(item, "take_profit"),
+                trailing_gap_pct=self._optional_float_item(item, "trailing_gap_pct"),
+                min_trailing_activate_r=self._float_item(item, "min_trailing_activate_r", 1.0),
+                breakeven_activate_r=self._float_item(item, "breakeven_activate_r"),
+                breakeven_buffer_pct=self._float_item(item, "breakeven_buffer_pct"),
+                risk_multiplier=self._float_item(item, "risk_multiplier", 1.0),
+                highest_price=self._float_item(item, "highest_price"),
+                lowest_price=self._float_item(item, "lowest_price"),
+                active=bool(item.get("active", False)),
+            )
+
+    def _recovered_state(
+        self,
+        pos: Position,
+        *,
+        price: float,
+        atr_value: float,
+        signal_hint: dict[str, object] | None = None,
+    ) -> TrailingState:
         entry_price = pos.entry_price or price
         atr_value = atr_value or max(entry_price * self.min_stop_loss_pct, 0.0)
-        stop_loss = self._metadata_float(pos.metadata, "stop_loss")
-        take_profit = self._metadata_float(pos.metadata, "take_profit")
+        signal_hint = signal_hint or {}
+        stop_loss = self._metadata_float(pos.metadata, "stop_loss") or self._float_item(signal_hint, "stop_loss")
+        take_profit = self._metadata_float(pos.metadata, "take_profit") or self._float_item(signal_hint, "take_profit")
         if stop_loss <= 0:
             stop_loss = self._protective_stop(entry_price, atr_value, pos.side)
         return TrailingState(
@@ -156,12 +268,14 @@ class PositionManager:
             atr=atr_value,
             stop_loss=stop_loss,
             take_profit=take_profit if take_profit > 0 else None,
-            trailing_gap_pct=self.trailing_gap_pct,
-            min_trailing_activate_r=self.min_trailing_activate_r,
+            trailing_gap_pct=self._optional_float_item(signal_hint, "trailing_gap_pct") or self.trailing_gap_pct,
+            min_trailing_activate_r=self._float_item(signal_hint, "min_trailing_activate_r", self.min_trailing_activate_r),
+            breakeven_activate_r=self._float_item(signal_hint, "breakeven_activate_r"),
+            breakeven_buffer_pct=self._float_item(signal_hint, "breakeven_buffer_pct"),
             risk_multiplier=self._metadata_float(
                 pos.metadata,
                 "risk_multiplier",
-                fallback=self.recovered_risk_multiplier,
+                fallback=self._float_item(signal_hint, "risk_multiplier", self.recovered_risk_multiplier),
             ),
             highest_price=max(entry_price, price) if pos.side == PositionSide.LONG else entry_price,
             lowest_price=min(entry_price, price) if pos.side == PositionSide.SHORT else entry_price,
@@ -185,6 +299,22 @@ class PositionManager:
         except (TypeError, ValueError):
             return fallback
 
+    @staticmethod
+    def _float_item(item: dict[str, object], key: str, fallback: float = 0.0) -> float:
+        try:
+            return float(item.get(key, fallback) or fallback)
+        except (TypeError, ValueError):
+            return fallback
+
+    @classmethod
+    def _optional_float_item(cls, item: dict[str, object], key: str) -> float | None:
+        value = cls._float_item(item, key)
+        return value if value > 0 else None
+
+    @staticmethod
+    def _key_string(symbol: str, side: PositionSide) -> str:
+        return f"{symbol}:{side.value}"
+
     def _exit_signal(
         self,
         symbol: str,
@@ -194,6 +324,7 @@ class PositionManager:
         contracts: float,
         reason: str,
         risk_multiplier: float,
+        entry_price: float,
     ) -> TradeSignal:
         return TradeSignal(
             symbol=symbol,
@@ -204,5 +335,10 @@ class PositionManager:
             price=price,
             stop_loss=price,
             reason=reason,
-            metadata={"contracts": contracts, "reduce_only": True, "risk_multiplier": risk_multiplier},
+            metadata={
+                "contracts": contracts,
+                "reduce_only": True,
+                "risk_multiplier": risk_multiplier,
+                "entry_price": entry_price,
+            },
         )

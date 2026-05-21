@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from trading_system.models import OrderResult, Regime
+from trading_system.models import OrderResult, Regime, TradeSignal
 
 logger = getLogger(__name__)
 
@@ -26,6 +26,13 @@ order_tracks = Table(
     Column("maker_filled", Numeric(18, 8), nullable=False, default=0),
     Column("taker_twap_filled", Numeric(18, 8), nullable=False, default=0),
     Column("fee_paid", Numeric(18, 8), nullable=False, default=0),
+    Column("status", String(32), nullable=False, default=""),
+    Column("filled_qty", Numeric(18, 8), nullable=False, default=0),
+    Column("avg_price", Numeric(18, 8), nullable=False, default=0),
+    Column("realized_pnl", Numeric(18, 8), nullable=True),
+    Column("side", String(8), nullable=False, default=""),
+    Column("position_side", String(8), nullable=False, default=""),
+    Column("signal_reason", Text, nullable=False, default=""),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -57,6 +64,7 @@ class StateStore:
         await ensure_database_exists(self.dsn)
         async with self.engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
+            await self._ensure_order_columns(conn)
         self._schema_ready = True
 
     async def ensure_schema(self) -> None:
@@ -64,17 +72,27 @@ class StateStore:
             return
         await self.initialize()
 
-    async def record_order(self, order: OrderResult, regime: Regime) -> None:
+    async def record_order(
+        self,
+        order: OrderResult,
+        regime: Regime,
+        signal: TradeSignal | None = None,
+    ) -> None:
+        realized_pnl = order.realized_pnl
+        if realized_pnl is None and signal is not None:
+            realized_pnl = estimate_realized_pnl(order, signal)
         async with self.engine.begin() as conn:
-            stmt = insert(order_tracks).values(
-                order_id=order.id,
-                symbol=order.symbol,
-                regime_mode=regime.value,
-                initial_qty=order.amount,
-                maker_filled=order.filled,
-                taker_twap_filled=0,
-                fee_paid=order.fee,
-                created_at=datetime.now(timezone.utc),
+            stmt = pg_insert(order_tracks).values(
+                **self._order_values(order, regime, signal, realized_pnl, created_at=datetime.now(timezone.utc))
+            ).on_conflict_do_update(
+                index_elements=[order_tracks.c.order_id],
+                set_={
+                    "status": order.status,
+                    "filled_qty": order.filled,
+                    "avg_price": order.average or order.price,
+                    "fee_paid": order.fee,
+                    "realized_pnl": realized_pnl,
+                },
             )
             await conn.execute(stmt)
 
@@ -85,9 +103,39 @@ class StateStore:
                 .where(order_tracks.c.order_id == order_id)
                 .values(
                     taker_twap_filled=order_tracks.c.taker_twap_filled + filled,
+                    filled_qty=order_tracks.c.filled_qty + filled,
                     fee_paid=order_tracks.c.fee_paid + fee,
                 )
             )
+
+    async def update_order_result(
+        self,
+        order: OrderResult,
+        signal: TradeSignal | None = None,
+        realized_pnl: float | None = None,
+    ) -> None:
+        if realized_pnl is None:
+            realized_pnl = order.realized_pnl
+        if realized_pnl is None and signal is not None:
+            realized_pnl = estimate_realized_pnl(order, signal)
+        values: dict[str, Any] = {
+            "status": order.status,
+            "filled_qty": order.filled,
+            "avg_price": order.average or order.price,
+            "fee_paid": order.fee,
+            "realized_pnl": realized_pnl,
+        }
+        async with self.engine.begin() as conn:
+            await conn.execute(update(order_tracks).where(order_tracks.c.order_id == order.id).values(**values))
+
+    async def recent_order_refs(self, limit: int = 30) -> list[tuple[str, str]]:
+        async with self.engine.begin() as conn:
+            rows = await conn.execute(
+                select(order_tracks.c.order_id, order_tracks.c.symbol)
+                .order_by(desc(order_tracks.c.created_at))
+                .limit(limit)
+            )
+        return [(str(order_id), str(symbol)) for order_id, symbol in rows]
 
     async def save_snapshot(self, equity: float, active_hedging: bool, memory: dict[str, Any]) -> None:
         async with self.engine.begin() as conn:
@@ -138,6 +186,69 @@ class StateStore:
 
     async def close(self) -> None:
         await self.engine.dispose()
+
+    async def _ensure_order_columns(self, conn) -> None:
+        await conn.execute(
+            text(
+                """
+                alter table order_tracks
+                add column if not exists status varchar(32) not null default '',
+                add column if not exists filled_qty numeric(18, 8) not null default 0,
+                add column if not exists avg_price numeric(18, 8) not null default 0,
+                add column if not exists realized_pnl numeric(18, 8),
+                add column if not exists side varchar(8) not null default '',
+                add column if not exists position_side varchar(8) not null default '',
+                add column if not exists signal_reason text not null default ''
+                """
+            )
+        )
+
+    def _order_values(
+        self,
+        order: OrderResult,
+        regime: Regime,
+        signal: TradeSignal | None,
+        realized_pnl: float | None,
+        *,
+        created_at: datetime,
+    ) -> dict[str, Any]:
+        return {
+            "order_id": order.id,
+            "symbol": order.symbol,
+            "regime_mode": regime.value,
+            "initial_qty": order.amount,
+            "maker_filled": order.filled,
+            "taker_twap_filled": 0,
+            "fee_paid": order.fee,
+            "status": order.status,
+            "filled_qty": order.filled,
+            "avg_price": order.average or order.price,
+            "realized_pnl": realized_pnl,
+            "side": order.side.value,
+            "position_side": order.position_side.value,
+            "signal_reason": signal.reason if signal else "",
+            "created_at": created_at,
+        }
+
+
+def estimate_realized_pnl(order: OrderResult, signal: TradeSignal) -> float | None:
+    entry_price = _metadata_float(signal.metadata, "entry_price")
+    exit_price = order.average or order.price
+    filled = order.filled
+    if entry_price <= 0 or exit_price <= 0 or filled <= 0:
+        return None
+    if signal.position_side.value == "long":
+        gross = (exit_price - entry_price) * filled
+    else:
+        gross = (entry_price - exit_price) * filled
+    return gross - order.fee
+
+
+def _metadata_float(metadata: dict[str, Any], key: str) -> float:
+    try:
+        return float(metadata.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 async def ensure_database_exists(dsn: str) -> None:

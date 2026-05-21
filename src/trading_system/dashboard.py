@@ -73,8 +73,27 @@ async def ensure_dashboard_schema(conn: asyncpg.Connection) -> None:
             maker_filled numeric(18, 8) not null default 0,
             taker_twap_filled numeric(18, 8) not null default 0,
             fee_paid numeric(18, 8) not null default 0,
+            status varchar(32) not null default '',
+            filled_qty numeric(18, 8) not null default 0,
+            avg_price numeric(18, 8) not null default 0,
+            realized_pnl numeric(18, 8),
+            side varchar(8) not null default '',
+            position_side varchar(8) not null default '',
+            signal_reason text not null default '',
             created_at timestamp with time zone not null
         )
+        """
+    )
+    await conn.execute(
+        """
+        alter table order_tracks
+        add column if not exists status varchar(32) not null default '',
+        add column if not exists filled_qty numeric(18, 8) not null default 0,
+        add column if not exists avg_price numeric(18, 8) not null default 0,
+        add column if not exists realized_pnl numeric(18, 8),
+        add column if not exists side varchar(8) not null default '',
+        add column if not exists position_side varchar(8) not null default '',
+        add column if not exists signal_reason text not null default ''
         """
     )
     await conn.execute(
@@ -115,7 +134,8 @@ async def fetch_dashboard_data() -> dict[str, Any]:
         orders = await conn.fetch(
             """
             select order_id, symbol, regime_mode, initial_qty, maker_filled,
-                   taker_twap_filled, fee_paid, created_at
+                   taker_twap_filled, fee_paid, status, filled_qty,
+                   avg_price, realized_pnl, side, position_side, signal_reason, created_at
             from order_tracks
             order by created_at desc
             limit 30
@@ -896,15 +916,29 @@ def orders_table(orders: list[dict[str, Any]]) -> str:
             f"<td>{escape(str(order.get('created_at', '')))}</td>"
             f"<td>{escape(str(order.get('symbol', '')))}</td>"
             f"<td>{escape(str(order.get('regime_mode', '')))}</td>"
+            f"<td>{escape(str(order.get('status', '')))}</td>"
+            f"<td>{escape(str(order.get('side', '')))} / {escape(str(order.get('position_side', '')))}</td>"
             f"<td>{escape(str(order.get('initial_qty', '')))}</td>"
-            f"<td>{escape(str(order.get('maker_filled', '')))}</td>"
-            f"<td>{escape(str(order.get('taker_twap_filled', '')))}</td>"
+            f"<td>{escape(str(order.get('filled_qty', '')))}</td>"
+            f"<td>{escape(format_price(order.get('avg_price')))}</td>"
             f"<td>{escape(str(order.get('fee_paid', '')))}</td>"
+            f"<td>{escape(format_pnl(order.get('realized_pnl')))}</td>"
+            f"<td>{escape(str(order.get('signal_reason', '')))}</td>"
             f"<td>{escape(str(order.get('order_id', '')))}</td>"
             "</tr>"
         )
     return (
-        "<table><thead><tr><th>时间</th><th>品种</th><th>行情</th><th>数量</th>"
-        "<th>Maker</th><th>TWAP</th><th>手续费</th><th>订单ID</th></tr></thead>"
+        "<table><thead><tr><th>时间</th><th>品种</th><th>行情</th><th>状态</th><th>方向</th>"
+        "<th>数量</th><th>已成交</th><th>均价</th><th>手续费</th><th>盈亏</th><th>原因</th><th>订单ID</th></tr></thead>"
         f"<tbody>{rows}</tbody></table>"
     )
+
+
+def format_pnl(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:.4f}"

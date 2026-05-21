@@ -118,6 +118,8 @@ class OrderResult:
     filled: float = 0.0
     remaining: float = 0.0
     fee: float = 0.0
+    average: float = 0.0
+    realized_pnl: float | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -141,6 +143,8 @@ class TrailingState:
     take_profit: float | None = None
     trailing_gap_pct: float | None = None
     min_trailing_activate_r: float = 1.0
+    breakeven_activate_r: float = 0.0
+    breakeven_buffer_pct: float = 0.0
     risk_multiplier: float = 1.0
     highest_price: float = 0.0
     lowest_price: float = 0.0

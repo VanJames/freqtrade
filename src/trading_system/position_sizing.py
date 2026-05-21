@@ -53,10 +53,12 @@ def adjusted_risk_multiplier(signal: TradeSignal | dict[str, Any], settings: Siz
         boosted *= 0.65
     boosted *= throttle
 
+    cap = quality_risk_cap(signal, settings)
+    floor = min(base * throttle, cap)
     return round(
         max(
-            base * throttle,
-            min(boosted, settings.confirmation_max_risk_multiplier, settings.max_signal_risk_multiplier),
+            floor,
+            min(boosted, settings.confirmation_max_risk_multiplier, settings.max_signal_risk_multiplier, cap),
         ),
         4,
     )
@@ -89,6 +91,45 @@ def opportunity_reasons(signal: TradeSignal | dict[str, Any]) -> set[str]:
         for item in str(signal_metadata(signal).get("opportunity_reasons", "")).split(",")
         if item.strip()
     }
+
+
+def quality_risk_cap(signal: TradeSignal | dict[str, Any], settings: SizingSettings) -> float:
+    cap = min(settings.confirmation_max_risk_multiplier, settings.max_signal_risk_multiplier)
+    regime = signal_value(signal, "regime")
+    side = signal_value(signal, "position_side") or signal_value(signal, "side")
+    if regime != Regime.SHOCK_TREND_DOWN or side != PositionSide.SHORT:
+        return cap
+
+    close_position = metadata_float(signal, "close_position_72h", 0.5)
+    ret_72h = metadata_float(signal, "ret_72h", 0.0)
+    ret_24h = metadata_float(signal, "ret_24h", 0.0)
+    volatility_tier = str(signal_metadata(signal).get("volatility_tier", "NORMAL")).upper()
+
+    if close_position < 0.20:
+        cap = min(cap, 0.35)
+    elif close_position < 0.30:
+        cap = min(cap, 0.65)
+    elif close_position < 0.35:
+        cap = min(cap, 0.85)
+    elif close_position < 0.45:
+        cap = min(cap, 1.10)
+
+    if close_position < 0.35 and ret_72h <= -0.05:
+        cap *= 0.8
+    if close_position < 0.35 and ret_24h <= -0.018:
+        cap *= 0.85
+    if volatility_tier == "HIGH":
+        cap *= 0.9
+    elif volatility_tier == "EXTREME":
+        cap *= 0.75
+    return max(0.1, cap)
+
+
+def metadata_float(signal: TradeSignal | dict[str, Any], key: str, default: float) -> float:
+    try:
+        return float(signal_metadata(signal).get(key, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def signal_metadata(signal: TradeSignal | dict[str, Any]) -> dict[str, Any]:

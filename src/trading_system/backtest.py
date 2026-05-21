@@ -713,6 +713,8 @@ def trade_signal_to_position(
         "atr": atr_1h,
         "trailing_gap_pct": float(metadata.get("trailing_gap_pct", 0.0) or 0.0),
         "min_trailing_activate_r": float(metadata.get("min_trailing_activate_r", 1.0) or 1.0),
+        "breakeven_activate_r": float(metadata.get("breakeven_activate_r", 0.0) or 0.0),
+        "breakeven_buffer_pct": float(metadata.get("breakeven_buffer_pct", 0.0) or 0.0),
         "opportunity_score": int(metadata.get("opportunity_score", 0) or 0),
         "opportunity_grade": str(metadata.get("opportunity_grade", "")),
         "risk_multiplier": risk_multiplier,
@@ -1326,7 +1328,33 @@ def build_user_rule_signal(
         if symbol.startswith("SOL/")
         else True
     )
-    shock_trend_down_risk_throttle = 0.70 if features.get("close_position_72h", 0.5) <= 0.32 else 1.0
+    low_range_short = features.get("close_position_72h", 0.5) < 0.35
+    shock_trend_down_rebound_ready = (
+        not low_range_short
+        or (
+            last_rsi_5m >= 45
+            and price >= ema20_5m_value * 0.998
+            and timeframe_aligned(resample_history(history_5m, "15min"), PositionSide.SHORT, min_bars=12)
+        )
+    )
+    close_position_72h = features.get("close_position_72h", 0.5)
+    ret_24h = features.get("ret_24h", 0.0)
+    ret_72h = features.get("ret_72h", 0.0)
+    shock_trend_down_risk_throttle = 1.0
+    if close_position_72h < 0.20:
+        shock_trend_down_risk_throttle *= 0.30
+    elif close_position_72h < 0.30:
+        shock_trend_down_risk_throttle *= 0.45
+    elif close_position_72h < 0.35:
+        shock_trend_down_risk_throttle *= 0.65
+    if close_position_72h < 0.30 and ret_72h <= -0.05:
+        shock_trend_down_risk_throttle *= 0.65
+    if close_position_72h < 0.35 and ret_24h <= -0.018:
+        shock_trend_down_risk_throttle *= 0.75
+    if volatility_policy.tier == "HIGH":
+        shock_trend_down_risk_throttle *= 0.85
+    elif volatility_policy.tier == "EXTREME":
+        shock_trend_down_risk_throttle *= 0.65
     shock_trend_down_opportunity = score_opportunity(
         symbol=symbol,
         regime=regime,
@@ -1345,6 +1373,7 @@ def build_user_rule_signal(
             "rsi_quality": shock_trend_down_rsi_quality,
             "not_chasing": last_rsi_5m >= 24,
             "range_position": shock_trend_down_range_ok,
+            "low_range_rebound": shock_trend_down_rebound_ready,
         },
         penalties={
             "directional_conflict": directional_breakout
@@ -1375,6 +1404,7 @@ def build_user_rule_signal(
         and shock_trend_down_rsi_quality
         and shock_trend_down_range_ok
         and shock_trend_down_momentum_ok
+        and shock_trend_down_rebound_ready
         and sol_trade_allowed(
             symbol=symbol,
             side=PositionSide.SHORT,
@@ -1397,10 +1427,16 @@ def build_user_rule_signal(
             "stop": stop,
             "take_profit": price - reward,
             "trailing_gap_pct": config.trailing_gap_pct,
-            "min_trailing_activate_r": max(config.min_trailing_activate_r, 1.5),
+            "min_trailing_activate_r": max(config.min_trailing_activate_r, 0.85 if low_range_short else 1.2),
+            "breakeven_activate_r": 0.65 if low_range_short else 0.85,
+            "breakeven_buffer_pct": 0.0003,
             "risk_throttle": shock_trend_down_risk_throttle,
             **opportunity_metadata(shock_trend_down_opportunity),
             "risk_multiplier": max(config.shock_trend_down_risk_multiplier, shock_trend_down_opportunity.risk_multiplier),
+            "volatility_tier": volatility_policy.tier,
+            "close_position_72h": round(close_position_72h, 4),
+            "ret_24h": round(ret_24h, 6),
+            "ret_72h": round(ret_72h, 6),
         }
     return None
 
@@ -1491,6 +1527,15 @@ def maybe_exit(position: dict[str, Any], row: pd.Series) -> tuple[float | None, 
         trailing = None
         risk = abs(float(position["entry"]) - float(position["stop"]))
         if position.get("trailing_gap_pct") and risk > 0:
+            if (
+                position.get("breakeven_activate_r", 0.0)
+                and position["highest"] - position["entry"] >= position["breakeven_activate_r"] * risk
+            ):
+                position["stop"] = max(
+                    position["stop"],
+                    position["entry"] * (1 + position.get("breakeven_buffer_pct", 0.0)),
+                )
+                trailing = position["stop"]
             if position["highest"] - position["entry"] >= position.get("min_trailing_activate_r", 1.0) * risk:
                 position["stop"] = max(position["stop"], position["highest"] * (1 - position["trailing_gap_pct"]))
                 trailing = position["stop"]
@@ -1506,6 +1551,15 @@ def maybe_exit(position: dict[str, Any], row: pd.Series) -> tuple[float | None, 
         trailing = None
         risk = abs(float(position["stop"]) - float(position["entry"]))
         if position.get("trailing_gap_pct") and risk > 0:
+            if (
+                position.get("breakeven_activate_r", 0.0)
+                and position["entry"] - position["lowest"] >= position["breakeven_activate_r"] * risk
+            ):
+                position["stop"] = min(
+                    position["stop"],
+                    position["entry"] * (1 - position.get("breakeven_buffer_pct", 0.0)),
+                )
+                trailing = position["stop"]
             if position["entry"] - position["lowest"] >= position.get("min_trailing_activate_r", 1.0) * risk:
                 position["stop"] = min(position["stop"], position["lowest"] * (1 + position["trailing_gap_pct"]))
                 trailing = position["stop"]

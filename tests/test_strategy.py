@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pytest
+import pandas as pd
 
-from trading_system.backtest import BacktestConfig, cap_stop, signal_reward
+from trading_system.backtest import BacktestConfig, cap_stop, maybe_exit, signal_reward
 from trading_system.models import MarketFeatures, PositionSide, Regime
 from trading_system.strategy import StrategyEngine
 from trading_system.volatility import build_volatility_policy
@@ -47,6 +48,27 @@ def test_backtest_reward_never_below_min_take_profit_pct() -> None:
 
     assert stop == pytest.approx(2304.6)
     assert reward == pytest.approx(9.2)
+
+
+def test_short_breakeven_protects_profit_before_full_trailing_activation() -> None:
+    position = {
+        "side": PositionSide.SHORT,
+        "entry": 100.0,
+        "stop": 101.0,
+        "take_profit": 96.0,
+        "lowest": 99.2,
+        "highest": 100.0,
+        "atr": 2.0,
+        "trailing_gap_pct": 0.0025,
+        "min_trailing_activate_r": 1.2,
+        "breakeven_activate_r": 0.65,
+        "breakeven_buffer_pct": 0.0003,
+    }
+
+    exit_price, reason = maybe_exit(position, pd.Series({"high": 100.0, "low": 99.2}))
+
+    assert exit_price == pytest.approx(99.97)
+    assert reason == "trailing_stop"
 
 
 def test_entry_diagnostics_reports_missing_conditions_for_trend_long() -> None:

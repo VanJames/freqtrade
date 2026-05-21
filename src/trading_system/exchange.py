@@ -126,7 +126,18 @@ class DryRunExchange(ExchangeClient):
         position_side = PositionSide(params.get("posSide", "long"))
         filled = 0.0 if params.get("ordType") == "post_only" else amount
         status = "open" if filled == 0 else "closed"
-        result = OrderResult(order_id, symbol, side, position_side, amount, price, status, filled, amount - filled)
+        result = OrderResult(
+            order_id,
+            symbol,
+            side,
+            position_side,
+            amount,
+            price,
+            status,
+            filled,
+            amount - filled,
+            average=price,
+        )
         self.orders[order_id] = result
         logger.info("dry-run order %s", result)
         return result
@@ -232,36 +243,26 @@ class CcxtOkxExchange(ExchangeClient):
     ) -> OrderResult:
         raw = await self.api.create_order(symbol, order_type, side.value, amount, price, params)
         self._invalidate_positions_cache()
-        return OrderResult(
-            id=str(raw["id"]),
-            symbol=symbol,
-            side=side,
-            position_side=PositionSide(params.get("posSide", "long")),
-            amount=float(raw.get("amount") or amount),
-            price=float(raw.get("price") or price),
-            status=str(raw.get("status") or "open"),
-            filled=float(raw.get("filled") or 0.0),
-            remaining=float(raw.get("remaining") or 0.0),
-            fee=float((raw.get("fee") or {}).get("cost") or 0.0),
-            raw=raw,
+        return self._parse_order_result(
+            raw,
+            fallback_symbol=symbol,
+            fallback_side=side,
+            fallback_position_side=PositionSide(params.get("posSide", "long")),
+            fallback_amount=amount,
+            fallback_price=price,
         )
 
     async def fetch_order(self, order_id: str, symbol: str) -> OrderResult:
         raw = await self.api.fetch_order(order_id, symbol)
         side = Side(raw["side"])
         params = raw.get("info", {})
-        return OrderResult(
-            id=str(raw["id"]),
-            symbol=symbol,
-            side=side,
-            position_side=PositionSide(params.get("posSide", "long")),
-            amount=float(raw.get("amount") or 0.0),
-            price=float(raw.get("price") or 0.0),
-            status=str(raw.get("status") or "open"),
-            filled=float(raw.get("filled") or 0.0),
-            remaining=float(raw.get("remaining") or 0.0),
-            fee=float((raw.get("fee") or {}).get("cost") or 0.0),
-            raw=raw,
+        return self._parse_order_result(
+            raw,
+            fallback_symbol=symbol,
+            fallback_side=side,
+            fallback_position_side=PositionSide(params.get("posSide", "long")),
+            fallback_amount=0.0,
+            fallback_price=0.0,
         )
 
     async def cancel_order(self, order_id: str, symbol: str) -> None:
@@ -310,6 +311,61 @@ class CcxtOkxExchange(ExchangeClient):
 
     def _invalidate_positions_cache(self) -> None:
         self._positions_cache = None
+
+    def _parse_order_result(
+        self,
+        raw: dict[str, Any],
+        *,
+        fallback_symbol: str,
+        fallback_side: Side,
+        fallback_position_side: PositionSide,
+        fallback_amount: float,
+        fallback_price: float,
+    ) -> OrderResult:
+        info = raw.get("info") if isinstance(raw.get("info"), dict) else {}
+        fee = raw.get("fee") if isinstance(raw.get("fee"), dict) else {}
+        average = self._float_value(
+            raw.get("average"),
+            raw.get("avgPrice"),
+            info.get("avgPx"),
+            raw.get("price"),
+            fallback_price,
+        )
+        return OrderResult(
+            id=str(raw["id"]),
+            symbol=str(raw.get("symbol") or fallback_symbol),
+            side=Side(raw.get("side") or fallback_side.value),
+            position_side=PositionSide(info.get("posSide") or fallback_position_side.value),
+            amount=self._float_value(raw.get("amount"), info.get("sz"), fallback_amount),
+            price=self._float_value(raw.get("price"), info.get("px"), fallback_price),
+            status=str(raw.get("status") or "open"),
+            filled=self._float_value(raw.get("filled"), info.get("accFillSz"), 0.0),
+            remaining=self._float_value(raw.get("remaining"), 0.0),
+            fee=self._float_value(fee.get("cost"), info.get("fee"), 0.0),
+            average=average,
+            realized_pnl=self._optional_float(raw.get("pnl"), info.get("pnl"), info.get("realizedPnl")),
+            raw=raw,
+        )
+
+    @staticmethod
+    def _float_value(*values: Any) -> float:
+        for value in values:
+            try:
+                if value is not None and value != "":
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    @classmethod
+    def _optional_float(cls, *values: Any) -> float | None:
+        for value in values:
+            try:
+                if value is not None and value != "":
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
 
     def _parse_positions(self, raw_positions: list[dict[str, Any]]) -> list[Position]:
         positions: list[Position] = []

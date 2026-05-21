@@ -139,6 +139,38 @@ def test_position_manager_recovers_existing_long_position_with_protective_stop()
     assert state.risk_multiplier == 0.7
 
 
+def test_position_manager_recovers_existing_position_with_signal_hint() -> None:
+    manager = PositionManager()
+    position = Position(
+        symbol="BTC/USDT:USDT",
+        side=PositionSide.LONG,
+        contracts=0.1,
+        entry_price=77704.47,
+    )
+
+    manager.recover_missing_states(
+        "BTC/USDT:USDT",
+        [position],
+        price=77800.0,
+        atr_value=385.0,
+        regime=Regime.SHOCK_TREND_UP,
+        signal_hints={
+            ("BTC/USDT:USDT", PositionSide.LONG): {
+                "stop_loss": 77531.0272,
+                "take_profit": 78028.22016,
+                "trailing_gap_pct": 0.0025,
+                "min_trailing_activate_r": 1.0,
+                "risk_multiplier": 1.5,
+            }
+        },
+    )
+
+    state = manager.trailing[("BTC/USDT:USDT", PositionSide.LONG)]
+    assert state.stop_loss == pytest.approx(77531.0272)
+    assert state.take_profit == pytest.approx(78028.22016)
+    assert state.risk_multiplier == pytest.approx(1.5)
+
+
 def test_position_manager_removes_recovered_state_after_position_disappears() -> None:
     manager = PositionManager()
     position = Position(

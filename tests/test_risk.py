@@ -112,3 +112,36 @@ def test_confirmation_sizing_uses_position_side_and_risk_throttle_for_shorts() -
     )
 
     assert adjusted_risk_multiplier(short_signal, settings) == pytest.approx(0.8753)
+
+
+def test_confirmation_sizing_caps_low_range_shock_trend_down_shorts() -> None:
+    settings = Settings(
+        dry_run=True,
+        confirmation_position_sizing=True,
+        max_signal_risk_multiplier=3.0,
+        confirmation_max_risk_multiplier=3.0,
+    )
+    short_signal = TradeSignal(
+        symbol="ETH/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.SELL,
+        position_side=PositionSide.SHORT,
+        regime=Regime.SHOCK_TREND_DOWN,
+        price=100.0,
+        stop_loss=101.0,
+        metadata={
+            "opportunity_score": 98,
+            "opportunity_reasons": (
+                "multi_timeframe,one_hour_trend,pullback,confirmation_candle,"
+                "momentum_cross,momentum_positive,not_chasing,rr_good"
+            ),
+            "risk_multiplier": 1.0,
+            "risk_throttle": 1.0,
+            "close_position_72h": 0.31,
+            "ret_24h": -0.004,
+            "ret_72h": -0.025,
+            "volatility_tier": "NORMAL",
+        },
+    )
+
+    assert adjusted_risk_multiplier(short_signal, settings) == pytest.approx(0.85)
