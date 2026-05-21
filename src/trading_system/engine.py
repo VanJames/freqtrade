@@ -680,6 +680,9 @@ class OKXQuantEngine:
             and bool(getattr(review, "allow_trade", True))
         )
         log = logger.debug if quiet_review else logger.info
+        reason_text = ",".join(reasons)
+        if len(reason_text) > 300:
+            reason_text = f"{reason_text[:297]}..."
         log(
             "llm review completed symbol=%s action=%s proposed_regime=%s allow_trade=%s "
             "confidence=%.2f reasons=%s",
@@ -688,7 +691,7 @@ class OKXQuantEngine:
             review.proposed_regime.value,
             review.allow_trade,
             review.confidence,
-            ",".join(reasons),
+            reason_text,
         )
 
     def _log_diagnostic_status(
