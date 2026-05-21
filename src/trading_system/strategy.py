@@ -829,10 +829,11 @@ class StrategyEngine:
     ) -> TradeSignal | None:
         shock_trend_up_rsi_quality = 42 <= last_rsi <= 66
         recent_5h_position = self._recent_range_position(df, price, bars=60)
+        local_top_without_impulse = recent_5h_position >= 0.94 and features.ret_24h < 0.008
         shock_trend_up_risk_throttle = 1.0
         if features.close_position_72h >= 0.75 and features.ret_72h <= 0:
             shock_trend_up_risk_throttle *= 0.70
-        if recent_5h_position >= 0.90 and features.ret_24h < 0.003:
+        if recent_5h_position >= 0.90 and features.ret_24h < 0.008:
             shock_trend_up_risk_throttle *= 0.70
         shock_trend_up_opportunity = score_opportunity(
             symbol=symbol,
@@ -850,7 +851,7 @@ class StrategyEngine:
                 "price_location": price >= ema_now * 0.998 and price >= features.ema20_1h * 0.997,
                 "ema_slope": ema_now >= ema_prev,
                 "rsi_quality": shock_trend_up_rsi_quality,
-                "not_chasing": last_rsi <= 68,
+                "not_chasing": last_rsi <= 68 and not local_top_without_impulse,
                 "range_position": features.close_position_72h <= 0.92,
             },
             penalties={
@@ -877,6 +878,7 @@ class StrategyEngine:
             and price >= ema_now * 0.998
             and ema_now >= ema_prev
             and shock_trend_up_rsi_quality
+            and not local_top_without_impulse
             and self._sol_allowed(symbol, PositionSide.LONG, regime, shock_trend_up_opportunity.score, features)
         ):
             stop = self._cap_stop(price, features.current_4h_low, PositionSide.LONG)
@@ -896,6 +898,8 @@ class StrategyEngine:
                 {
                     "trailing_gap_pct": self.trailing_gap_pct,
                     "min_trailing_activate_r": self.min_trailing_activate_r,
+                    "breakeven_activate_r": 0.75,
+                    "breakeven_buffer_pct": 0.0003,
                     "risk_throttle": shock_trend_up_risk_throttle,
                     **opportunity_metadata(shock_trend_up_opportunity),
                     "risk_multiplier": max(
@@ -903,6 +907,10 @@ class StrategyEngine:
                         shock_trend_up_opportunity.risk_multiplier,
                     ),
                     "volatility_tier": volatility_policy.tier,
+                    "close_position_72h": round(features.close_position_72h, 4),
+                    "ret_24h": round(features.ret_24h, 6),
+                    "ret_72h": round(features.ret_72h, 6),
+                    "recent_5h_position": round(recent_5h_position, 4),
                 },
             )
 

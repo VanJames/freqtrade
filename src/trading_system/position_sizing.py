@@ -98,6 +98,23 @@ def quality_risk_cap(signal: TradeSignal | dict[str, Any], settings: SizingSetti
     regime = signal_value(signal, "regime")
     side = signal_value(signal, "position_side") or signal_value(signal, "side")
     if regime != Regime.SHOCK_TREND_DOWN or side != PositionSide.SHORT:
+        if regime == Regime.SHOCK_TREND_UP and side == PositionSide.LONG:
+            recent_position = metadata_float(signal, "recent_5h_position", 0.5)
+            close_position = metadata_float(signal, "close_position_72h", 0.5)
+            ret_24h = metadata_float(signal, "ret_24h", 0.0)
+            ret_72h = metadata_float(signal, "ret_72h", 0.0)
+            volatility_tier = str(signal_metadata(signal).get("volatility_tier", "NORMAL")).upper()
+            if recent_position >= 0.90 and ret_24h < 0.008:
+                cap = min(cap, 0.90)
+            if ret_72h <= 0 and ret_24h < 0.006:
+                cap = min(cap, 0.75)
+            if close_position >= 0.80 and ret_24h < 0.006:
+                cap = min(cap, 1.10)
+            if volatility_tier == "HIGH":
+                cap *= 0.9
+            elif volatility_tier == "EXTREME":
+                cap *= 0.75
+            return max(0.1, cap)
         return cap
 
     close_position = metadata_float(signal, "close_position_72h", 0.5)
