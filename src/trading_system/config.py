@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     okx_demo: bool = True
     dry_run: bool = True
     symbols: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+        default_factory=lambda: ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XAU/USDT:USDT"]
     )
     postgres_dsn: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/trading"
     redis_url: str = "redis://localhost:6379/0"
