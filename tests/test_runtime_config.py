@@ -42,3 +42,11 @@ def test_runtime_config_boolean_accepts_float_roundtrip() -> None:
 
     assert settings.confirmation_position_sizing is True
     assert settings.llm_regime_review_enabled is True
+
+
+def test_runtime_config_applies_position_monitor_interval() -> None:
+    settings = Settings(dry_run=True)
+
+    apply_runtime_config(settings, {"position_monitor_interval_seconds": "1.5"})
+
+    assert settings.position_monitor_interval_seconds == 1.5

@@ -97,6 +97,16 @@ class OKXQuantEngine:
         self._applied_leverage_limit = settings.trend_symbol_leverage_limit
         self.symbol_status: dict[str, dict[str, object]] = {}
         self._diagnostic_log_state: dict[tuple[str, str], tuple[str, float]] = {}
+        self._exit_lock = asyncio.Lock()
+        self._pending_exit_keys: set[tuple[str, PositionSide]] = set()
+        self.position_monitor_status: dict[str, object] = {
+            "interval_seconds": settings.position_monitor_interval_seconds,
+            "last_checked_at": None,
+            "last_symbol": None,
+            "last_price": None,
+            "checks": 0,
+            "exit_signals": 0,
+        }
         self.running = False
 
     async def initialize(self, init_store: bool = True) -> None:
@@ -147,6 +157,7 @@ class OKXQuantEngine:
     async def run(self) -> None:
         self.running = True
         tasks = [asyncio.create_task(self._symbol_loop(symbol)) for symbol in self.settings.symbols]
+        tasks.append(asyncio.create_task(self._position_monitor_loop()))
         tasks.append(asyncio.create_task(self._monitor_loop()))
         try:
             await asyncio.gather(*tasks)
@@ -398,7 +409,7 @@ class OKXQuantEngine:
             return release_signals
         exit_signals = self.position_manager.exit_signals(
             symbol,
-            features.close_1h,
+            latest_price,
             features.atr_1h or features.atr_4h,
             positions,
         )
@@ -450,106 +461,212 @@ class OKXQuantEngine:
             return
 
         for signal in signals:
-            funding = await self.exchange.fetch_funding_rate(signal.symbol)
-            decision = self.risk.assess(signal, equity, funding)
-            if not decision.allowed:
-                logger.warning(
-                    "signal rejected symbol=%s regime=%s side=%s reason=%s signal_reason=%s "
-                    "price=%.8f stop=%.8f take_profit=%s funding=%.6f",
-                    signal.symbol,
-                    signal.regime.value,
-                    signal.position_side.value,
-                    decision.reason,
-                    signal.reason,
-                    signal.price,
-                    signal.stop_loss,
-                    signal.take_profit,
-                    funding,
-                )
+            exit_key: tuple[str, PositionSide] | None = None
+            if signal.signal_type in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
+                exit_key = (signal.symbol, signal.position_side)
+                async with self._exit_lock:
+                    if exit_key in self._pending_exit_keys:
+                        logger.info(
+                            "duplicate exit skipped symbol=%s side=%s reason=%s",
+                            signal.symbol,
+                            signal.position_side.value,
+                            signal.reason,
+                        )
+                        continue
+                    self._pending_exit_keys.add(exit_key)
+            try:
+                funding = await self.exchange.fetch_funding_rate(signal.symbol)
+                decision = self.risk.assess(signal, equity, funding)
+                if not decision.allowed:
+                    logger.warning(
+                        "signal rejected symbol=%s regime=%s side=%s reason=%s signal_reason=%s "
+                        "price=%.8f stop=%.8f take_profit=%s funding=%.6f",
+                        signal.symbol,
+                        signal.regime.value,
+                        signal.position_side.value,
+                        decision.reason,
+                        signal.reason,
+                        signal.price,
+                        signal.stop_loss,
+                        signal.take_profit,
+                        funding,
+                    )
+                    status = self.symbol_status.setdefault(signal.symbol, {})
+                    status["last_risk_rejection"] = {
+                        "reason": decision.reason,
+                        "checked_at": datetime.now(timezone.utc).isoformat(),
+                        "signal_reason": signal.reason,
+                    }
+                    previous_diagnostics = status.get("entry_diagnostics")
+                    if isinstance(previous_diagnostics, dict):
+                        blocker = {"code": f"risk_{decision.reason}", "passed": False}
+                        requirements = [*previous_diagnostics.get("requirements", []), blocker]
+                        blockers = [*previous_diagnostics.get("blockers", []), blocker]
+                        diagnostics = {
+                            **previous_diagnostics,
+                            "summary": "risk_rejected",
+                            "requirements": requirements,
+                            "blockers": blockers,
+                            "risk_rejection": decision.reason,
+                        }
+                        status["entry_diagnostics"] = diagnostics
+                        status["last_completed_entry_diagnostics"] = diagnostics
+                    continue
+                if signal.signal_type == SignalType.ENTER_GRID:
+                    orders = []
+                    atr_value = abs(signal.price - signal.stop_loss) / 1.5
+                    for price, amount in self.grid_planner.orders_for_signal(signal, decision.size, atr_value):
+                        orders.append(await self.execution.execute_limit(signal, amount, price))
+                    order = orders[0]
+                else:
+                    order = await self.execution.execute(signal, decision)
+                if signal.signal_type == SignalType.RELEASE_HEDGE:
+                    lock = self.hedge_locks.get(signal.symbol)
+                    if lock:
+                        lock.active = False
+                if signal.signal_type in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
+                    self.risk.release_risk(
+                        signal.position_side,
+                        float(signal.metadata.get("risk_multiplier", 1.0)),
+                    )
+                    self.position_manager.trailing.pop((signal.symbol, signal.position_side), None)
+                if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
+                    self.position_manager.register_entry(signal, abs(signal.price - signal.stop_loss))
+                if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
+                    self.risk.reserve_risk(
+                        signal.position_side,
+                        self.risk.signal_risk_multiplier(signal),
+                    )
+                synced_order = await self._sync_submitted_order(order, signal)
+                if synced_order:
+                    order = synced_order
                 status = self.symbol_status.setdefault(signal.symbol, {})
-                status["last_risk_rejection"] = {
-                    "reason": decision.reason,
-                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                status["last_order"] = {
+                    "id": order.id,
+                    "status": order.status,
+                    "side": order.side.value,
+                    "position_side": order.position_side.value,
+                    "amount": order.amount,
+                    "price": order.price,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                     "signal_reason": signal.reason,
                 }
+                logger.info(
+                    "order submitted symbol=%s order_id=%s status=%s regime=%s side=%s amount=%.8f "
+                    "price=%.8f signal_reason=%s",
+                    signal.symbol,
+                    order.id,
+                    order.status,
+                    signal.regime.value,
+                    signal.position_side.value,
+                    order.amount,
+                    order.price,
+                    signal.reason,
+                )
                 previous_diagnostics = status.get("entry_diagnostics")
                 if isinstance(previous_diagnostics, dict):
-                    blocker = {"code": f"risk_{decision.reason}", "passed": False}
-                    requirements = [*previous_diagnostics.get("requirements", []), blocker]
-                    blockers = [*previous_diagnostics.get("blockers", []), blocker]
                     diagnostics = {
                         **previous_diagnostics,
-                        "summary": "risk_rejected",
-                        "requirements": requirements,
-                        "blockers": blockers,
-                        "risk_rejection": decision.reason,
+                        "summary": "order_submitted",
+                        "order_id": order.id,
+                        "signal_reason": signal.reason,
                     }
                     status["entry_diagnostics"] = diagnostics
                     status["last_completed_entry_diagnostics"] = diagnostics
-                continue
-            if signal.signal_type == SignalType.ENTER_GRID:
-                orders = []
-                atr_value = abs(signal.price - signal.stop_loss) / 1.5
-                for price, amount in self.grid_planner.orders_for_signal(signal, decision.size, atr_value):
-                    orders.append(await self.execution.execute_limit(signal, amount, price))
-                order = orders[0]
-            else:
-                order = await self.execution.execute(signal, decision)
-            if signal.signal_type == SignalType.RELEASE_HEDGE:
-                lock = self.hedge_locks.get(signal.symbol)
-                if lock:
-                    lock.active = False
-            if signal.signal_type in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
-                self.risk.release_risk(
-                    signal.position_side,
-                    float(signal.metadata.get("risk_multiplier", 1.0)),
-                )
-                self.position_manager.trailing.pop((signal.symbol, signal.position_side), None)
-            if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
-                self.position_manager.register_entry(signal, abs(signal.price - signal.stop_loss))
-            if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
-                self.risk.reserve_risk(
-                    signal.position_side,
-                    self.risk.signal_risk_multiplier(signal),
-                )
-            synced_order = await self._sync_submitted_order(order, signal)
-            if synced_order:
-                order = synced_order
-            status = self.symbol_status.setdefault(signal.symbol, {})
-            status["last_order"] = {
-                "id": order.id,
-                "status": order.status,
-                "side": order.side.value,
-                "position_side": order.position_side.value,
-                "amount": order.amount,
-                "price": order.price,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "signal_reason": signal.reason,
-            }
-            logger.info(
-                "order submitted symbol=%s order_id=%s status=%s regime=%s side=%s amount=%.8f "
-                "price=%.8f signal_reason=%s",
-                signal.symbol,
-                order.id,
-                order.status,
-                signal.regime.value,
-                signal.position_side.value,
-                order.amount,
-                order.price,
-                signal.reason,
+                if self.store:
+                    await self.store.record_order(order, signal.regime, signal)
+            finally:
+                if exit_key is not None:
+                    async with self._exit_lock:
+                        self._pending_exit_keys.discard(exit_key)
+
+    async def _position_monitor_loop(self) -> None:
+        while self.running and not self.risk.fused():
+            try:
+                await self._monitor_positions_once()
+                interval = max(0.5, self.settings.position_monitor_interval_seconds)
+                self.position_monitor_status["interval_seconds"] = interval
+                await asyncio.sleep(interval)
+            except Exception:
+                logger.exception("position monitor loop failed")
+                await asyncio.sleep(5)
+
+    async def _monitor_positions_once(self) -> None:
+        for symbol in self.settings.symbols:
+            self.position_monitor_status["checks"] = int(self.position_monitor_status.get("checks") or 0) + 1
+            self.position_monitor_status["last_checked_at"] = datetime.now(timezone.utc).isoformat()
+            self.position_monitor_status["last_symbol"] = symbol
+            positions = await self._await_exchange_step(
+                symbol,
+                "monitor_fetch_positions",
+                self.exchange.fetch_positions(symbol),
+                self.settings.exchange_request_timeout_seconds,
             )
-            previous_diagnostics = status.get("entry_diagnostics")
-            if isinstance(previous_diagnostics, dict):
-                diagnostics = {
-                    **previous_diagnostics,
-                    "summary": "order_submitted",
-                    "order_id": order.id,
-                    "signal_reason": signal.reason,
-                }
-                status["entry_diagnostics"] = diagnostics
-                status["last_completed_entry_diagnostics"] = diagnostics
-            if self.store:
-                await self.store.record_order(order, signal.regime, signal)
+            if not positions:
+                self.position_manager.recover_missing_states(
+                    symbol,
+                    [],
+                    price=self._latest_price(symbol),
+                    atr_value=self._latest_atr(symbol),
+                    regime=self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN),
+                )
+                continue
+            price = await self._monitor_price(symbol)
+            self.position_monitor_status["last_price"] = price
+            atr_value = self._latest_atr(symbol)
+            recovered = self.position_manager.recover_missing_states(
+                symbol,
+                positions,
+                price=price,
+                atr_value=atr_value,
+                regime=self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN),
+                signal_hints=self._position_signal_hints(),
+            )
+            if recovered:
+                self.symbol_status.setdefault(symbol, {})["recovered_positions"] = recovered
+            signals = self.position_manager.exit_signals(symbol, price, atr_value, positions)
+            if signals:
+                self.position_monitor_status["exit_signals"] = (
+                    int(self.position_monitor_status.get("exit_signals") or 0) + len(signals)
+                )
+                status = self.symbol_status.setdefault(symbol, {})
+                status["last_signal"] = self._signal_status(signals[0])
+                logger.info(
+                    "position monitor exit ready symbol=%s price=%.8f reason=%s",
+                    symbol,
+                    price,
+                    signals[0].reason,
+                )
+                await self._execute_signals(signals)
+
+    async def _monitor_price(self, symbol: str) -> float:
+        book = await self._await_exchange_step(
+            symbol,
+            "monitor_order_book",
+            self.exchange.fetch_order_book(symbol),
+            self.settings.exchange_request_timeout_seconds,
+        )
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        bid = float(bids[0][0]) if bids else 0.0
+        ask = float(asks[0][0]) if asks else 0.0
+        if bid > 0 and ask > 0:
+            price = (bid + ask) / 2
+        else:
+            price = bid or ask or self._latest_price(symbol)
+        self.symbol_status.setdefault(symbol, {})["price"] = price
+        return price
+
+    def _latest_atr(self, symbol: str) -> float:
+        candles = self.klines.get(symbol, {}).get("1h", [])
+        if len(candles) < 2:
+            price = self._latest_price(symbol)
+            return max(price * self.settings.min_stop_loss_pct, 0.0)
+        latest = candles[-1]
+        high = float(latest[2])
+        low = float(latest[3])
+        close = float(latest[4])
+        return max(high - low, close * self.settings.min_stop_loss_pct)
 
     def _update_cache(self, symbol: str, timeframe: str, row: list[float]) -> None:
         cache = self.klines[symbol][timeframe]
@@ -818,6 +935,7 @@ class OKXQuantEngine:
                 "max_signal_risk_multiplier": self.settings.max_signal_risk_multiplier,
                 "confirmation_position_sizing": self.settings.confirmation_position_sizing,
                 "confirmation_max_risk_multiplier": self.settings.confirmation_max_risk_multiplier,
+                "position_monitor_interval_seconds": self.settings.position_monitor_interval_seconds,
                 "llm_regime_review_enabled": self.settings.llm_regime_review_enabled,
                 "llm_regime_provider": self.settings.llm_regime_provider,
                 "llm_regime_model": self.settings.llm_regime_model,
@@ -843,6 +961,7 @@ class OKXQuantEngine:
                 for symbol, status in self.symbol_status.items()
                 if status.get("last_order") is not None
             },
+            "position_monitor": self.position_monitor_status,
             "trailing_states": self.position_manager.trailing_snapshot(),
             "recovered_positions": {
                 f"{symbol}:{side.value}": value

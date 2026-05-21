@@ -98,6 +98,15 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
         description="确认级别模型内部允许放大的最高倍数。通常保持 3，不建议直接调到很高。",
     ),
     RuntimeField(
+        "position_monitor_interval_seconds",
+        "持仓监控间隔秒数",
+        3.0,
+        0.5,
+        30.0,
+        0.5,
+        description="移动止盈/止损独立监控循环的检查间隔。越小越及时，但 OKX 请求更频繁。",
+    ),
+    RuntimeField(
         "llm_regime_review_enabled",
         "启用 LLM 行情复核",
         0.0,

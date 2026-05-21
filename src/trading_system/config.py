@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     live_ohlcv_timeout_seconds: float = 120.0
     exchange_request_timeout_seconds: float = 45.0
     diagnostics_log_interval_seconds: float = 60.0
+    position_monitor_interval_seconds: float = 3.0
 
     risk_percent: float = 0.01
     same_direction_risk_limit: float = 0.03

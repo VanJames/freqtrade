@@ -305,6 +305,7 @@ def render_page(data: dict[str, Any]) -> str:
     regime_checked_at = memory.get("regime_checked_at", {}) if isinstance(memory, dict) else {}
     entry_diagnostics = memory.get("entry_diagnostics", {}) if isinstance(memory, dict) else {}
     recovered_positions = memory.get("recovered_positions", {}) if isinstance(memory, dict) else {}
+    position_monitor = memory.get("position_monitor", {}) if isinstance(memory, dict) else {}
     hedge_locks = memory.get("hedge_locks", {}) if isinstance(memory, dict) else {}
     risk = memory.get("risk", {}) if isinstance(memory, dict) else {}
     engine_version = memory.get("engine_version", "-") if isinstance(memory, dict) else "-"
@@ -405,6 +406,8 @@ def render_page(data: dict[str, Any]) -> str:
   {collapsible_panel("未下单原因", entry_diagnostics_panel(mode, entry_diagnostics), "dashboard-panel-entry-diagnostics")}
 
   {collapsible_panel("恢复持仓", recovered_positions_panel(recovered_positions), "dashboard-panel-recovered-positions")}
+
+  {collapsible_panel("持仓监控", dict_table(localized_monitor_status(position_monitor)), "dashboard-panel-position-monitor")}
 
   {collapsible_panel("最近订单", orders_table(orders), "dashboard-panel-orders")}
 
@@ -865,6 +868,19 @@ def dict_table(values: dict[str, Any]) -> str:
         for key, value in values.items()
     )
     return f"<table>{rows}</table>"
+
+
+def localized_monitor_status(values: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(values, dict) or not values:
+        return {}
+    return {
+        "监控间隔秒数": values.get("interval_seconds"),
+        "最近检查时间": format_local_time(values.get("last_checked_at")),
+        "最近检查品种": values.get("last_symbol"),
+        "最近监控价格": format_price(values.get("last_price")),
+        "累计检查次数": values.get("checks"),
+        "累计触发退出信号": values.get("exit_signals"),
+    }
 
 
 def runtime_config_form(fields: list[dict[str, Any]], values: dict[str, Any]) -> str:

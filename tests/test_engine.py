@@ -7,7 +7,7 @@ import pytest
 from trading_system.config import Settings
 from trading_system.engine import OKXQuantEngine
 from trading_system.exchange import ExchangeClient, okx_setting_blocked
-from trading_system.models import OrderResult, Position, PositionSide, Regime, Side
+from trading_system.models import OrderResult, Position, PositionSide, Regime, Side, TrailingState
 from trading_system.position_manager import PositionManager
 
 
@@ -197,6 +197,106 @@ def test_position_manager_removes_recovered_state_after_position_disappears() ->
 
     assert ("ETH/USDT:USDT", PositionSide.SHORT) not in manager.trailing
     assert not manager.recovered_positions
+
+
+class PositionMonitorExchange(ExchangeClient):
+    def __init__(self) -> None:
+        self.orders: list[OrderResult] = []
+        self.position = Position(
+            symbol="BTC/USDT:USDT",
+            side=PositionSide.LONG,
+            contracts=0.01,
+            entry_price=100.0,
+        )
+
+    async def initialize(self) -> None:
+        return None
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
+        return []
+
+    async def watch_ohlcv(self, symbol: str, timeframe: str) -> list[list[float]]:
+        return []
+
+    async def fetch_order_book(self, symbol: str) -> dict[str, list[list[float]]]:
+        return {"bids": [[103.0, 1.0]], "asks": [[103.2, 1.0]]}
+
+    async def create_order(
+        self,
+        symbol: str,
+        order_type: str,
+        side: Side,
+        amount: float,
+        price: float,
+        params: dict[str, object],
+    ) -> OrderResult:
+        order = OrderResult(
+            "exit-1",
+            symbol,
+            side,
+            PositionSide(str(params["posSide"])),
+            amount,
+            price,
+            "closed",
+            filled=amount,
+            average=price,
+        )
+        self.orders.append(order)
+        return order
+
+    async def fetch_order(self, order_id: str, symbol: str) -> OrderResult:
+        return self.orders[-1]
+
+    async def cancel_order(self, order_id: str, symbol: str) -> None:
+        return None
+
+    async def close_position(self, position: Position) -> OrderResult | None:
+        return None
+
+    async def close_all_positions(self) -> list[OrderResult]:
+        return []
+
+    async def fetch_balance_equity(self) -> float:
+        return 1000.0
+
+    async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
+        return [self.position] if symbol in {None, "BTC/USDT:USDT"} else []
+
+    async def fetch_funding_rate(self, symbol: str) -> float:
+        return 0.0
+
+    async def set_leverage(self, symbol: str, leverage: float) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_position_monitor_uses_order_book_price_for_trailing_exit() -> None:
+    exchange = PositionMonitorExchange()
+    settings = Settings(dry_run=True, symbols=["BTC/USDT:USDT"])
+    engine = OKXQuantEngine(settings, exchange=exchange)
+    engine.klines["BTC/USDT:USDT"]["1h"] = [
+        [1, 100.0, 100.5, 99.5, 100.0, 1.0],
+        [2, 100.0, 100.5, 99.5, 100.0, 1.0],
+    ]
+    engine.position_manager.trailing[("BTC/USDT:USDT", PositionSide.LONG)] = TrailingState(
+        symbol="BTC/USDT:USDT",
+        position_side=PositionSide.LONG,
+        entry_price=100.0,
+        atr=1.0,
+        stop_loss=104.0,
+        highest_price=105.0,
+        lowest_price=100.0,
+        active=True,
+    )
+
+    await engine._monitor_positions_once()
+
+    assert len(exchange.orders) == 1
+    assert exchange.orders[0].side == Side.SELL
+    assert exchange.orders[0].position_side == PositionSide.LONG
 
 
 class FailingInitializeExchange(ExchangeClient):
