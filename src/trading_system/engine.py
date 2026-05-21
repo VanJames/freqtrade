@@ -282,7 +282,7 @@ class OKXQuantEngine:
                 summary="waiting_llm_review",
                 blockers=[{"code": "llm_review_pending", "passed": False}],
             )
-            logger.info(
+            logger.debug(
                 "llm review requested symbol=%s regime=%s volatility_tier=%s",
                 symbol,
                 regime.value,
@@ -296,16 +296,7 @@ class OKXQuantEngine:
             else self.llm_reviewer.default_review(regime)
         )
         if llm_review_required:
-            logger.info(
-                "llm review completed symbol=%s action=%s proposed_regime=%s allow_trade=%s "
-                "confidence=%.2f reasons=%s",
-                symbol,
-                review.action,
-                review.proposed_regime.value,
-                review.allow_trade,
-                review.confidence,
-                ",".join(review.reasons),
-            )
+            self._log_llm_review(symbol, review)
         regime = review.proposed_regime
         latest_price = float(self.klines[symbol]["5m"][-1][4]) if self.klines[symbol]["5m"] else features.close_1h
         status = self.symbol_status.setdefault(symbol, {})
@@ -679,6 +670,25 @@ class OKXQuantEngine:
             price,
             blockers,
             extra,
+        )
+
+    def _log_llm_review(self, symbol: str, review: Any) -> None:
+        reasons = [str(reason) for reason in getattr(review, "reasons", [])]
+        quiet_review = "llm_rate_limited" in reasons or (
+            "llm_cached" in reasons
+            and getattr(review, "action", "") == "KEEP"
+            and bool(getattr(review, "allow_trade", True))
+        )
+        log = logger.debug if quiet_review else logger.info
+        log(
+            "llm review completed symbol=%s action=%s proposed_regime=%s allow_trade=%s "
+            "confidence=%.2f reasons=%s",
+            symbol,
+            review.action,
+            review.proposed_regime.value,
+            review.allow_trade,
+            review.confidence,
+            ",".join(reasons),
         )
 
     def _log_diagnostic_status(

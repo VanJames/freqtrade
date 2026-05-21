@@ -92,6 +92,9 @@ class StateStore:
                     "avg_price": order.average or order.price,
                     "fee_paid": order.fee,
                     "realized_pnl": realized_pnl,
+                    "side": order.side.value,
+                    "position_side": order.position_side.value,
+                    "signal_reason": signal.reason if signal else order_tracks.c.signal_reason,
                 },
             )
             await conn.execute(stmt)
@@ -124,7 +127,11 @@ class StateStore:
             "avg_price": order.average or order.price,
             "fee_paid": order.fee,
             "realized_pnl": realized_pnl,
+            "side": order.side.value,
+            "position_side": order.position_side.value,
         }
+        if signal is not None:
+            values["signal_reason"] = signal.reason
         async with self.engine.begin() as conn:
             await conn.execute(update(order_tracks).where(order_tracks.c.order_id == order.id).values(**values))
 
