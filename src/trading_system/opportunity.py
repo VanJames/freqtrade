@@ -20,6 +20,10 @@ CHECK_WEIGHTS = {
     "rsi_quality": 7,
     "not_chasing": 6,
     "range_position": 5,
+    "liquidity_sweep": 18,
+    "reclaim": 18,
+    "volume_spike": 14,
+    "pin_bar": 16,
 }
 
 PENALTY_WEIGHTS = {
@@ -134,6 +138,7 @@ def risk_multiplier_for(
         Regime.TREND_SHORT: {"A": 0.58, "B": 0.44, "C": 0.30, "D": 0.15},
         Regime.SHOCK_TREND_UP: {"A": 0.42, "B": 0.30, "C": 0.18, "D": 0.08},
         Regime.SHOCK_TREND_DOWN: {"A": 0.36, "B": 0.25, "C": 0.16, "D": 0.08},
+        Regime.LIQUIDITY_SWEEP_REVERSAL: {"A": 0.72, "B": 0.50, "C": 0.28, "D": 0.10},
         Regime.SHOCK: {"A": 0.58, "B": 0.42, "C": 0.28, "D": 0.14},
     }
     multiplier = by_regime.get(regime, {"D": 0.0}).get(level, 0.0)

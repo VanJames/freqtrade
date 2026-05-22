@@ -98,6 +98,35 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
         description="确认级别模型内部允许放大的最高倍数。通常保持 3，不建议直接调到很高。",
     ),
     RuntimeField(
+        "enable_liquidity_sweep_reversal",
+        "启用插针反转策略",
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        boolean=True,
+        description="识别连续上涨/下跌后的放量插针、扫止损后快速收回信号。默认关闭，回测确认有效后再启用。",
+    ),
+    RuntimeField(
+        "liquidity_sweep_risk_multiplier",
+        "插针反转风险倍数",
+        0.8,
+        0.1,
+        3.0,
+        0.1,
+        description="插针反转信号的基础仓位风险倍数。该策略止损较近，建议先保持 0.5-1.0。",
+    ),
+    RuntimeField(
+        "liquidity_sweep_require_confirmation",
+        "插针等待下一根确认",
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        boolean=True,
+        description="开启后插针不立即入场，等待下一根 5m 不再破针尖并继续收回后入场，降低假反转。",
+    ),
+    RuntimeField(
         "position_monitor_interval_seconds",
         "持仓监控间隔秒数",
         3.0,
@@ -211,7 +240,12 @@ def validate_runtime_config(values: dict[str, Any], settings: Settings | None = 
 
 def apply_runtime_config(settings: Settings, values: dict[str, Any]) -> None:
     for key, value in validate_runtime_config(values, settings).items():
-        if key in {"confirmation_position_sizing", "llm_regime_review_enabled"}:
+        if key in {
+            "confirmation_position_sizing",
+            "enable_liquidity_sweep_reversal",
+            "liquidity_sweep_require_confirmation",
+            "llm_regime_review_enabled",
+        }:
             setattr(settings, key, bool(value))
         elif key in {"llm_regime_review_cache_ttl_seconds", "llm_regime_review_min_interval_seconds"}:
             setattr(settings, key, int(float(value)))

@@ -94,3 +94,50 @@ def test_entry_diagnostics_reports_missing_conditions_for_trend_long() -> None:
     assert diagnostics["action"] == "trend_long"
     assert diagnostics["summary"] == "waiting_for_conditions"
     assert any(item["code"] == "macd_cross_up" for item in diagnostics["blockers"])
+
+
+def test_liquidity_sweep_reversal_detects_downside_reclaim() -> None:
+    engine = StrategyEngine(enable_liquidity_sweep_reversal=True, max_stop_loss_pct=0.015)
+    candles = []
+    price = 110.0
+    for index in range(89):
+        open_price = price
+        close_price = price - 0.12
+        candles.append([index * 300000, open_price, open_price + 0.05, close_price - 0.05, close_price, 100.0])
+        price = close_price
+    candles.append([89 * 300000, 100.0, 100.35, 99.1, 100.2, 260.0])
+    candles.append([90 * 300000, 100.18, 100.45, 99.85, 100.36, 120.0])
+    features = MarketFeatures(
+        atr_1h=0.4,
+        close_1h=100.2,
+        ema20_1h=99.0,
+        ema60_1h=101.0,
+        range_high_4h=112.0,
+        range_low_4h=97.0,
+        previous_1h_low=98.0,
+        previous_1h_high=102.0,
+        current_4h_low=99.1,
+        current_4h_high=101.0,
+        last_4h_close=99.0,
+        prev_4h_close=101.0,
+        ret_24h=-0.02,
+        range_72h=0.05,
+        range_amplitude_4h=0.05,
+    )
+
+    signals = engine.build_signals(
+        "BTC/USDT:USDT",
+        Regime.SHOCK_TREND_DOWN,
+        Regime.SHOCK_TREND_DOWN,
+        features,
+        candles,
+        [],
+    )
+
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal.regime == Regime.LIQUIDITY_SWEEP_REVERSAL
+    assert signal.position_side == PositionSide.LONG
+    assert signal.reason == "liquidity_sweep_downside_confirmed_long"
+    assert signal.metadata["opportunity_score"] >= 92
+    assert signal.metadata["confirmation_mode"] == "next_5m"

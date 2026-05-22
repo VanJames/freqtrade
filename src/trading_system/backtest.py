@@ -71,6 +71,9 @@ class BacktestConfig:
     defensive_risk_multiplier: float = 0.7
     shock_trend_risk_multiplier: float = 0.1
     shock_trend_down_risk_multiplier: float = 0.1
+    enable_liquidity_sweep_reversal: bool = False
+    liquidity_sweep_risk_multiplier: float = 0.8
+    liquidity_sweep_require_confirmation: bool = True
     llm_regime_review_enabled: bool = False
     llm_regime_provider: str = "openai"
     llm_regime_model: str = "gpt-4.1-mini"
@@ -205,6 +208,9 @@ class OKXBacktester:
             defensive_risk_multiplier=config.defensive_risk_multiplier,
             shock_trend_risk_multiplier=config.shock_trend_risk_multiplier,
             shock_trend_down_risk_multiplier=config.shock_trend_down_risk_multiplier,
+            enable_liquidity_sweep_reversal=config.enable_liquidity_sweep_reversal,
+            liquidity_sweep_risk_multiplier=config.liquidity_sweep_risk_multiplier,
+            liquidity_sweep_require_confirmation=config.liquidity_sweep_require_confirmation,
         )
         self.llm_review_count = 0
 
@@ -471,6 +477,7 @@ class OKXBacktester:
             f"- 杠杆限制: shock `{self.config.shock_leverage_limit:.1f}x`, trend `{self.config.trend_symbol_leverage_limit:.1f}x`, signal risk cap `{self.config.max_signal_risk_multiplier:.1f}x`",
             f"- 确认级别动态仓位: `{self.config.confirmation_position_sizing}`, max risk `{self.config.confirmation_max_risk_multiplier:.1f}x`",
             f"- 风控约束: same direction `{self.config.same_direction_risk_limit:.2%}`, daily drawdown `{self.config.daily_drawdown_limit:.2%}`, funding block `{self.config.funding_block_threshold:.4%}`, backtest funding `{self.config.backtest_funding_rate:.4%}`",
+            f"- 插针/扫单反转策略: `{self.config.enable_liquidity_sweep_reversal}`, risk `{self.config.liquidity_sweep_risk_multiplier:.2f}x`, next confirmation `{self.config.liquidity_sweep_require_confirmation}`",
             f"- 手续费假设: maker `{self.config.fee_rate:.4%}` 每边，滑点 `{self.config.slippage_rate:.4%}` 每边",
             f"- SHOCK 参数: stop `{self.config.shock_stop_atr} ATR`, take_profit `{self.config.shock_take_profit_atr} ATR`, "
             f"long zone `{self.config.shock_long_zone_min:.0%}-{self.config.shock_long_zone_max:.0%}`, "
@@ -513,7 +520,15 @@ class OKXBacktester:
             "|---|---:|---:|",
             ]
         )
-        for regime in [Regime.TREND_LONG, Regime.TREND_SHORT, Regime.SHOCK, Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_DOWN, Regime.UNKNOWN]:
+        for regime in [
+            Regime.TREND_LONG,
+            Regime.TREND_SHORT,
+            Regime.SHOCK,
+            Regime.SHOCK_TREND_UP,
+            Regime.SHOCK_TREND_DOWN,
+            Regime.LIQUIDITY_SWEEP_REVERSAL,
+            Regime.UNKNOWN,
+        ]:
             hits = [hit for hit in result.regime_hits if hit.regime == regime]
             if not hits:
                 continue
@@ -528,7 +543,14 @@ class OKXBacktester:
                 "|---|---:|---:|---:|",
             ]
         )
-        for regime in [Regime.TREND_LONG, Regime.TREND_SHORT, Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_DOWN, Regime.SHOCK]:
+        for regime in [
+            Regime.TREND_LONG,
+            Regime.TREND_SHORT,
+            Regime.SHOCK_TREND_UP,
+            Regime.SHOCK_TREND_DOWN,
+            Regime.LIQUIDITY_SWEEP_REVERSAL,
+            Regime.SHOCK,
+        ]:
             trades = [trade for trade in result.trades if trade.regime == regime]
             if not trades:
                 continue
@@ -1619,7 +1641,14 @@ def evaluate_regime_hit(
     idx: int,
     horizon_bars: int = 12 * 12,
 ) -> RegimeHit | None:
-    if regime not in {Regime.TREND_LONG, Regime.TREND_SHORT, Regime.SHOCK, Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_DOWN}:
+    if regime not in {
+        Regime.TREND_LONG,
+        Regime.TREND_SHORT,
+        Regime.SHOCK,
+        Regime.SHOCK_TREND_UP,
+        Regime.SHOCK_TREND_DOWN,
+        Regime.LIQUIDITY_SWEEP_REVERSAL,
+    }:
         return None
     future = df5.iloc[idx + 1 : idx + 1 + horizon_bars]
     if future.empty:
@@ -1632,8 +1661,10 @@ def evaluate_regime_hit(
         correct = ret > max(0.003, 0.5 * atr_pct)
     elif regime in {Regime.TREND_SHORT, Regime.SHOCK_TREND_DOWN}:
         correct = ret < -max(0.003, 0.5 * atr_pct)
-    else:
+    elif regime == Regime.SHOCK:
         correct = abs(ret) <= max(0.01, atr_pct)
+    else:
+        correct = abs(ret) > max(0.003, 0.5 * atr_pct)
     return RegimeHit(symbol=symbol, timestamp=now, regime=regime, correct=correct)
 
 

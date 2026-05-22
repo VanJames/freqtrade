@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     defensive_risk_multiplier: float = 0.7
     shock_trend_risk_multiplier: float = 0.1
     shock_trend_down_risk_multiplier: float = 0.1
+    enable_liquidity_sweep_reversal: bool = False
+    liquidity_sweep_risk_multiplier: float = 0.8
+    liquidity_sweep_require_confirmation: bool = True
     min_take_profit_pct: float = 0.004
     llm_regime_review_enabled: bool = False
     llm_regime_provider: str = "openai"

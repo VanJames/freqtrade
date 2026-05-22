@@ -26,6 +26,9 @@ class StrategyEngine:
         defensive_risk_multiplier: float = 0.7,
         shock_trend_risk_multiplier: float = 0.1,
         shock_trend_down_risk_multiplier: float = 0.1,
+        enable_liquidity_sweep_reversal: bool = False,
+        liquidity_sweep_risk_multiplier: float = 0.8,
+        liquidity_sweep_require_confirmation: bool = True,
     ) -> None:
         self.min_stop_loss_pct = min_stop_loss_pct
         self.high_vol_min_stop_loss_pct = high_vol_min_stop_loss_pct
@@ -42,6 +45,9 @@ class StrategyEngine:
         self.defensive_risk_multiplier = defensive_risk_multiplier
         self.shock_trend_risk_multiplier = shock_trend_risk_multiplier
         self.shock_trend_down_risk_multiplier = shock_trend_down_risk_multiplier
+        self.enable_liquidity_sweep_reversal = enable_liquidity_sweep_reversal
+        self.liquidity_sweep_risk_multiplier = liquidity_sweep_risk_multiplier
+        self.liquidity_sweep_require_confirmation = liquidity_sweep_require_confirmation
 
     def build_signals(
         self,
@@ -59,6 +65,10 @@ class StrategyEngine:
         signals.extend(self._transition_hedges(symbol, regime, previous_regime, features.close_1h, positions))
         if signals:
             return signals
+
+        signal = self._liquidity_sweep_reversal_signal(symbol, regime, features, candles_5m)
+        if signal:
+            return [signal]
 
         signal = self._user_4h_signal(symbol, regime, features, candles_5m)
         return [signal] if signal else []
@@ -541,6 +551,207 @@ class StrategyEngine:
                         )
                     )
         return signals
+
+    def _liquidity_sweep_reversal_signal(
+        self,
+        symbol: str,
+        regime: Regime,
+        features: MarketFeatures,
+        candles_5m: list[list[float]],
+    ) -> TradeSignal | None:
+        if not self.enable_liquidity_sweep_reversal:
+            return None
+        df = ohlcv_frame(candles_5m)
+        min_bars = 91 if self.liquidity_sweep_require_confirmation else 90
+        if len(df) < min_bars or features.atr_1h <= 0:
+            return None
+
+        current = df.iloc[-1]
+        setup = df.iloc[-2] if self.liquidity_sweep_require_confirmation else current
+        setup_index = -2 if self.liquidity_sweep_require_confirmation else -1
+        price = float(current.close)
+        setup_close = float(setup.close)
+        candle_range = float(setup.high) - float(setup.low)
+        if price <= 0 or candle_range <= 0:
+            return None
+
+        previous = df.iloc[-50:-2] if self.liquidity_sweep_require_confirmation else df.iloc[-49:-1]
+        if len(previous) < 48:
+            return None
+        recent_low = float(previous.low.min())
+        recent_high = float(previous.high.max())
+        atr_5m = float(atr(df.high, df.low, df.close).iloc[setup_index]) or features.atr_1h / 12
+        avg_volume = float(df.volume.iloc[-22:-2].mean()) if self.liquidity_sweep_require_confirmation else float(df.volume.iloc[-21:-1].mean())
+        volume_spike = avg_volume > 0 and float(setup.volume) >= 1.8 * avg_volume
+        lower_wick = min(float(setup.open), setup_close) - float(setup.low)
+        upper_wick = float(setup.high) - max(float(setup.open), setup_close)
+        body = abs(setup_close - float(setup.open))
+        body = max(body, setup_close * 0.0001)
+        setup_close_position = (setup_close - float(setup.low)) / candle_range
+        rsi_5m = rsi(df.close, 14)
+        last_rsi = float(rsi_5m.iloc[setup_index])
+        macd_line, signal_line, _ = macd(df.close)
+        long_momentum_positive = bool(macd_line.iloc[-1] >= signal_line.iloc[-1])
+        short_momentum_positive = bool(macd_line.iloc[-1] <= signal_line.iloc[-1])
+        prior_source = df.iloc[:-2] if self.liquidity_sweep_require_confirmation else df.iloc[:-1]
+        prior_15m = self._aggregate_bars(prior_source, 3).tail(8)
+        prior_return = (float(previous.close.iloc[-1]) - float(previous.open.iloc[0])) / float(previous.open.iloc[0])
+        down_context = (
+            len(prior_15m) >= 6
+            and int((prior_15m.close < prior_15m.open).sum()) >= 5
+            and prior_return <= -0.006
+        ) or features.ret_24h <= -0.015 or regime in {Regime.TREND_SHORT, Regime.SHOCK_TREND_DOWN}
+        up_context = (
+            len(prior_15m) >= 6
+            and int((prior_15m.close > prior_15m.open).sum()) >= 5
+            and prior_return >= 0.006
+        ) or features.ret_24h >= 0.015 or regime in {Regime.TREND_LONG, Regime.SHOCK_TREND_UP}
+        volatility_policy = self._volatility_policy(price, features, df)
+
+        swept_low = float(setup.low) < recent_low * 0.9995
+        setup_reclaimed_low = setup_close > recent_low and setup_close > float(setup.open) and setup_close_position >= 0.62
+        confirmed_low = (
+            price >= setup_close
+            and price > recent_low
+            and float(current.low) > float(setup.low)
+            and float(current.close) >= float(current.open) * 0.999
+        ) if self.liquidity_sweep_require_confirmation else True
+        reclaimed_low = setup_reclaimed_low and confirmed_low
+        lower_pin = lower_wick >= 2.2 * body and lower_wick / candle_range >= 0.52
+        long_rsi_ok = 24 <= last_rsi <= 52
+        long_score = score_opportunity(
+            symbol=symbol,
+            regime=Regime.LIQUIDITY_SWEEP_REVERSAL,
+            side=PositionSide.LONG,
+            checks={
+                "regime_direction": down_context,
+                "liquidity_sweep": swept_low,
+                "reclaim": reclaimed_low,
+                "volume_spike": volume_spike,
+                "pin_bar": lower_pin,
+                "confirmation_candle": confirmed_low,
+                "momentum_positive": long_momentum_positive,
+                "rsi_quality": long_rsi_ok,
+                "not_chasing": setup_close_position <= 0.92,
+            },
+            penalties={
+                "extreme_volatility": volatility_policy.tier == "EXTREME",
+                "weak_reclaim": price <= recent_low,
+            },
+            reward_risk=2.4,
+            volatility_tier=volatility_policy.tier,
+            min_score=92,
+        )
+        if (
+            long_score.allow_trade
+            and down_context
+            and swept_low
+            and reclaimed_low
+            and volume_spike
+            and lower_pin
+            and long_rsi_ok
+        ):
+            raw_stop = float(setup.low) - max(0.20 * atr_5m, price * 0.0008)
+            if price - raw_stop <= price * self.max_stop_loss_pct:
+                stop = self._cap_stop(price, raw_stop, PositionSide.LONG, volatility_policy)
+                return self._entry_signal(
+                    symbol,
+                    Side.BUY,
+                    PositionSide.LONG,
+                    Regime.LIQUIDITY_SWEEP_REVERSAL,
+                    price,
+                    stop,
+                    price + self._reward(price, stop, 2.4),
+                    "liquidity_sweep_downside_confirmed_long"
+                    if self.liquidity_sweep_require_confirmation
+                    else "liquidity_sweep_downside_reversal_long",
+                    {
+                        "trailing_gap_pct": min(self.trailing_gap_pct, 0.0022),
+                        "min_trailing_activate_r": 0.75,
+                        "breakeven_activate_r": 0.50,
+                        "breakeven_buffer_pct": 0.00025,
+                        **opportunity_metadata(long_score),
+                        "risk_multiplier": max(self.liquidity_sweep_risk_multiplier, long_score.risk_multiplier),
+                        "volatility_tier": volatility_policy.tier,
+                        "sweep_low": round(float(setup.low), 8),
+                        "reclaim_level": round(recent_low, 8),
+                        "volume_ratio": round(float(setup.volume) / avg_volume, 4) if avg_volume else 0.0,
+                        "confirmation_mode": "next_5m" if self.liquidity_sweep_require_confirmation else "immediate",
+                    },
+                )
+
+        swept_high = float(setup.high) > recent_high * 1.0005
+        setup_reclaimed_high = setup_close < recent_high and setup_close < float(setup.open) and setup_close_position <= 0.38
+        confirmed_high = (
+            price <= setup_close
+            and price < recent_high
+            and float(current.high) < float(setup.high)
+            and float(current.close) <= float(current.open) * 1.001
+        ) if self.liquidity_sweep_require_confirmation else True
+        reclaimed_high = setup_reclaimed_high and confirmed_high
+        upper_pin = upper_wick >= 2.2 * body and upper_wick / candle_range >= 0.52
+        short_rsi_ok = 48 <= last_rsi <= 76
+        short_score = score_opportunity(
+            symbol=symbol,
+            regime=Regime.LIQUIDITY_SWEEP_REVERSAL,
+            side=PositionSide.SHORT,
+            checks={
+                "regime_direction": up_context,
+                "liquidity_sweep": swept_high,
+                "reclaim": reclaimed_high,
+                "volume_spike": volume_spike,
+                "pin_bar": upper_pin,
+                "confirmation_candle": confirmed_high,
+                "momentum_positive": short_momentum_positive,
+                "rsi_quality": short_rsi_ok,
+                "not_chasing": setup_close_position >= 0.08,
+            },
+            penalties={
+                "extreme_volatility": volatility_policy.tier == "EXTREME",
+                "weak_reclaim": price >= recent_high,
+            },
+            reward_risk=2.4,
+            volatility_tier=volatility_policy.tier,
+            min_score=92,
+        )
+        if (
+            short_score.allow_trade
+            and up_context
+            and swept_high
+            and reclaimed_high
+            and volume_spike
+            and upper_pin
+            and short_rsi_ok
+        ):
+            raw_stop = float(setup.high) + max(0.20 * atr_5m, price * 0.0008)
+            if raw_stop - price <= price * self.max_stop_loss_pct:
+                stop = self._cap_stop(price, raw_stop, PositionSide.SHORT, volatility_policy)
+                return self._entry_signal(
+                    symbol,
+                    Side.SELL,
+                    PositionSide.SHORT,
+                    Regime.LIQUIDITY_SWEEP_REVERSAL,
+                    price,
+                    stop,
+                    price - self._reward(price, stop, 2.4),
+                    "liquidity_sweep_upside_confirmed_short"
+                    if self.liquidity_sweep_require_confirmation
+                    else "liquidity_sweep_upside_reversal_short",
+                    {
+                        "trailing_gap_pct": min(self.trailing_gap_pct, 0.0022),
+                        "min_trailing_activate_r": 0.75,
+                        "breakeven_activate_r": 0.50,
+                        "breakeven_buffer_pct": 0.00025,
+                        **opportunity_metadata(short_score),
+                        "risk_multiplier": max(self.liquidity_sweep_risk_multiplier, short_score.risk_multiplier),
+                        "volatility_tier": volatility_policy.tier,
+                        "sweep_high": round(float(setup.high), 8),
+                        "reclaim_level": round(recent_high, 8),
+                        "volume_ratio": round(float(setup.volume) / avg_volume, 4) if avg_volume else 0.0,
+                        "confirmation_mode": "next_5m" if self.liquidity_sweep_require_confirmation else "immediate",
+                    },
+                )
+        return None
 
     def _user_4h_signal(
         self,

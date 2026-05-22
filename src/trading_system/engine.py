@@ -75,6 +75,9 @@ class OKXQuantEngine:
             defensive_risk_multiplier=settings.defensive_risk_multiplier,
             shock_trend_risk_multiplier=settings.shock_trend_risk_multiplier,
             shock_trend_down_risk_multiplier=settings.shock_trend_down_risk_multiplier,
+            enable_liquidity_sweep_reversal=settings.enable_liquidity_sweep_reversal,
+            liquidity_sweep_risk_multiplier=settings.liquidity_sweep_risk_multiplier,
+            liquidity_sweep_require_confirmation=settings.liquidity_sweep_require_confirmation,
         )
         self.risk = RiskManager(settings)
         self.execution = ExecutionEngine(

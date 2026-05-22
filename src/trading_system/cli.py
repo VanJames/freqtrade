@@ -83,6 +83,20 @@ def backtest(
     max_signal_risk_multiplier: Optional[float] = typer.Option(None, help="Maximum per-signal risk multiplier."),
     confirmation_position_sizing: Optional[bool] = typer.Option(None, help="Boost position size only for highly confirmed signals."),
     confirmation_max_risk_multiplier: Optional[float] = typer.Option(None, help="Maximum boosted risk multiplier for confirmed signals."),
+    liquidity_sweep_reversal: Optional[bool] = typer.Option(
+        None,
+        "--liquidity-sweep-reversal/--no-liquidity-sweep-reversal",
+        help="Enable liquidity-sweep pin-bar reversal entries.",
+    ),
+    liquidity_sweep_risk_multiplier: Optional[float] = typer.Option(
+        None,
+        help="Base risk multiplier for liquidity-sweep reversal entries.",
+    ),
+    liquidity_sweep_confirmation: Optional[bool] = typer.Option(
+        None,
+        "--liquidity-sweep-confirmation/--no-liquidity-sweep-confirmation",
+        help="Wait one extra 5m candle to confirm liquidity-sweep reversal entries.",
+    ),
     funding_rate: float = typer.Option(0.0, help="Backtest funding rate assumption."),
     funding_block_threshold: Optional[float] = typer.Option(None, help="Funding rate threshold used by risk checks."),
     llm_review: Optional[bool] = typer.Option(None, help="Enable LLM regime review during backtest. Defaults to .env."),
@@ -121,6 +135,21 @@ def backtest(
                 confirmation_max_risk_multiplier
                 if confirmation_max_risk_multiplier is not None
                 else settings.confirmation_max_risk_multiplier
+            ),
+            enable_liquidity_sweep_reversal=(
+                liquidity_sweep_reversal
+                if liquidity_sweep_reversal is not None
+                else settings.enable_liquidity_sweep_reversal
+            ),
+            liquidity_sweep_risk_multiplier=(
+                liquidity_sweep_risk_multiplier
+                if liquidity_sweep_risk_multiplier is not None
+                else settings.liquidity_sweep_risk_multiplier
+            ),
+            liquidity_sweep_require_confirmation=(
+                liquidity_sweep_confirmation
+                if liquidity_sweep_confirmation is not None
+                else settings.liquidity_sweep_require_confirmation
             ),
             funding_block_threshold=(
                 funding_block_threshold if funding_block_threshold is not None else settings.funding_block_threshold

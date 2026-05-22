@@ -32,7 +32,13 @@ def adjusted_risk_multiplier(signal: TradeSignal | dict[str, Any], settings: Siz
         "not_chasing",
     }
     required_hits = len(required & reasons)
-    if regime not in {Regime.TREND_LONG, Regime.TREND_SHORT, Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_DOWN}:
+    if regime not in {
+        Regime.TREND_LONG,
+        Regime.TREND_SHORT,
+        Regime.SHOCK_TREND_UP,
+        Regime.SHOCK_TREND_DOWN,
+        Regime.LIQUIDITY_SWEEP_REVERSAL,
+    }:
         return base
 
     boosted = base
@@ -45,6 +51,8 @@ def adjusted_risk_multiplier(signal: TradeSignal | dict[str, Any], settings: Siz
 
     if regime in {Regime.TREND_SHORT, Regime.SHOCK_TREND_DOWN}:
         boosted *= 0.82
+    if regime == Regime.LIQUIDITY_SWEEP_REVERSAL:
+        boosted *= 0.75
     if side == PositionSide.SHORT:
         boosted *= 0.92
     if symbol.startswith("SOL/"):
@@ -97,6 +105,8 @@ def quality_risk_cap(signal: TradeSignal | dict[str, Any], settings: SizingSetti
     cap = min(settings.confirmation_max_risk_multiplier, settings.max_signal_risk_multiplier)
     regime = signal_value(signal, "regime")
     side = signal_value(signal, "position_side") or signal_value(signal, "side")
+    if regime == Regime.LIQUIDITY_SWEEP_REVERSAL:
+        return max(0.1, min(cap, 1.2))
     if regime != Regime.SHOCK_TREND_DOWN or side != PositionSide.SHORT:
         if regime == Regime.SHOCK_TREND_UP and side == PositionSide.LONG:
             recent_position = metadata_float(signal, "recent_5h_position", 0.5)
