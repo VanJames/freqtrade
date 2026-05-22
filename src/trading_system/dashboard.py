@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from html import escape
 from pathlib import Path
+from string import Template
 from urllib.parse import parse_qs
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -435,43 +436,8 @@ async def report_file(request: Request, name: str) -> FileResponse:
 
 
 def render_page(data: dict[str, Any]) -> str:
-    snapshot = data["latest_snapshot"] or {}
-    memory = snapshot.get("serialized_memory") or {}
-    regimes = memory.get("regimes", {}) if isinstance(memory, dict) else {}
-    prices = memory.get("prices", {}) if isinstance(memory, dict) else {}
-    regime_checked_at = memory.get("regime_checked_at", {}) if isinstance(memory, dict) else {}
-    entry_diagnostics = memory.get("entry_diagnostics", {}) if isinstance(memory, dict) else {}
-    recovered_positions = memory.get("recovered_positions", {}) if isinstance(memory, dict) else {}
-    trailing_states = memory.get("trailing_states", {}) if isinstance(memory, dict) else {}
-    live_positions = memory.get("positions", []) if isinstance(memory, dict) else []
-    position_monitor = memory.get("position_monitor", {}) if isinstance(memory, dict) else {}
-    hedge_locks = memory.get("hedge_locks", {}) if isinstance(memory, dict) else {}
-    risk = memory.get("risk", {}) if isinstance(memory, dict) else {}
-    engine_version = memory.get("engine_version", "-") if isinstance(memory, dict) else "-"
-    snapshot_exchange = memory.get("exchange_id") if isinstance(memory, dict) else None
-    market_data_source = memory.get("market_data_source") if isinstance(memory, dict) else None
-    displayed_exchange = str(snapshot_exchange or mode.get("selected_exchange_id") or mode.get("exchange_id") or "okx")
-    snapshot_saved_at = memory.get("snapshot_saved_at") if isinstance(memory, dict) else None
-    orders = data["orders"]
-    mode = data["mode"]
-    runtime_config = data["runtime_config"]
-    runtime_fields = data["runtime_fields"]
-    exchange_sessions = data.get("exchange_sessions", [])
-    latest_tuning = data["latest_tuning_report"]
-    overview_body = (
-        '<section class="grid">'
-        f'{metric("账户权益", fmt(snapshot.get("total_equity"), "USDT"))}'
-        f'{metric("当前交易所", displayed_exchange.upper())}'
-        f'{metric("订单总数", data["order_count"])}'
-        f'{metric("对冲状态", "ON" if snapshot.get("active_hedging") else "OFF")}'
-        f'{metric("行情源", str(market_data_source or displayed_exchange).upper())}'
-        f'{metric("快照时间", format_local_time(snapshot_saved_at or snapshot.get("snapshot_time")))}'
-        f'{metric("引擎版本", str(engine_version or "-"))}'
-        "</section>"
-    )
-    hedge_body = f'<pre>{escape(json.dumps(hedge_locks, ensure_ascii=False, indent=2))}</pre>'
-
-    return f"""<!doctype html>
+    initial_json = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    template = Template(r"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -479,188 +445,452 @@ def render_page(data: dict[str, Any]) -> str:
   <link rel="icon" href="/favicon.ico" sizes="32x32">
   <title>Quant Dashboard</title>
   <style>
-    :root {{ color-scheme: dark; --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e8eaed; --muted:#9aa4b2; --good:#39d98a; --warn:#ffcc66; --bad:#ff6b6b; }}
-    body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }}
-    main {{ max-width:1180px; margin:0 auto; padding:24px; }}
-    header {{ display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:20px; }}
-    h1 {{ margin:0; font-size:24px; letter-spacing:0; }}
-    h2 {{ margin:0; font-size:16px; color:var(--text); font-weight:700; }}
-    .top-actions {{ display:flex; align-items:center; gap:10px; }}
-    .grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }}
-    .panel {{ min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:8px; }}
-    details.panel {{ overflow:hidden; margin-bottom:16px; }}
-    details.panel > summary {{ list-style:none; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px; cursor:pointer; user-select:none; }}
-    details.panel > summary::-webkit-details-marker {{ display:none; }}
-    .panel-body {{ padding:0 16px 16px; }}
-    .chevron {{ color:var(--muted); font-size:13px; }}
-    details[open] .chevron::before {{ content:"收起"; }}
-    details:not([open]) .chevron::before {{ content:"展开"; }}
-    .metric-tile {{ min-width:0; background:#11151d; border:1px solid var(--line); border-radius:8px; padding:16px; }}
-    .metric {{ min-width:0; font-size:22px; font-weight:700; line-height:1.25; margin-top:6px; overflow-wrap:anywhere; word-break:break-word; }}
-    .muted {{ color:var(--muted); font-size:13px; }}
-    .status {{ display:inline-flex; padding:4px 8px; border-radius:999px; border:1px solid var(--line); font-size:12px; }}
-    .live {{ color:var(--bad); border-color:rgba(255,107,107,.5); }}
-    .demo {{ color:var(--warn); border-color:rgba(255,204,102,.5); }}
-    .ok {{ color:var(--good); }}
-    table {{ width:100%; border-collapse:collapse; font-size:13px; }}
-    th, td {{ border-bottom:1px solid var(--line); padding:9px 8px; text-align:left; white-space:normal; overflow-wrap:anywhere; word-break:break-word; }}
-    th {{ color:var(--muted); font-weight:600; }}
-    .cards {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }}
-    .form-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
-    label {{ display:flex; flex-direction:column; gap:6px; color:var(--muted); font-size:13px; }}
-    .field-title {{ color:var(--text); font-weight:600; }}
-    .field-note {{ min-height:34px; line-height:1.45; color:var(--muted); font-size:12px; }}
-    .diag-list {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }}
-    .diag-card {{ min-width:0; border:1px solid var(--line); border-radius:8px; padding:12px; background:#11151d; }}
-    .diag-head {{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:8px; }}
-    .diag-title {{ font-weight:700; overflow-wrap:anywhere; }}
-    .diag-action {{ color:var(--muted); font-size:12px; margin-top:2px; }}
-    .diag-summary {{ display:inline-flex; border:1px solid var(--line); border-radius:999px; padding:3px 8px; font-size:12px; color:var(--warn); white-space:nowrap; }}
-    .diag-summary.ready {{ color:var(--good); }}
-    .diag-summary.blocked {{ color:var(--bad); }}
-    .diag-blockers {{ margin:8px 0 0; padding-left:18px; color:#d9dee8; font-size:13px; line-height:1.55; }}
-    .diag-metrics {{ display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }}
-    .diag-metric {{ border:1px solid var(--line); border-radius:999px; padding:3px 7px; color:var(--muted); font-size:12px; }}
-    input {{ width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; background:#10131a; color:var(--text); padding:10px 11px; font-size:14px; }}
-    button {{ border:1px solid #3c76ff; background:#2258d4; color:white; border-radius:6px; padding:10px 14px; font-weight:700; cursor:pointer; }}
-    .ghost-button {{ border-color:var(--line); background:#10131a; color:var(--text); }}
-    .actions {{ display:flex; align-items:center; gap:12px; margin-top:14px; }}
-    select {{ width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; background:#10131a; color:var(--text); padding:10px 11px; font-size:14px; }}
-    .qr-box {{ display:grid; grid-template-columns:180px minmax(0,1fr); gap:16px; align-items:start; margin-top:14px; }}
-    .qr-box img {{ display:none; width:180px; height:180px; background:white; border-radius:8px; padding:8px; box-sizing:border-box; }}
-    pre {{ overflow:auto; margin:0; font-size:12px; color:#c8d1dc; }}
-    @media (max-width:900px) {{ .grid,.cards,.form-grid,.diag-list,.qr-box {{ grid-template-columns:1fr; }} header {{ flex-direction:column; }} }}
+    :root { color-scheme: dark; --bg:#0d1016; --sidebar:#11151d; --panel:#171b24; --panel2:#10141b; --line:#29313f; --text:#edf1f6; --muted:#94a0b2; --good:#33d17a; --warn:#f7c948; --bad:#ff6b6b; --accent:#4f8cff; --cyan:#3ddbd9; --orange:#ff9f43; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
+    button,input,select { font:inherit; }
+    button { border:1px solid #3b6fd8; background:#255bd6; color:white; border-radius:7px; padding:10px 13px; font-weight:700; cursor:pointer; transition:transform .18s ease,border-color .18s ease,background .18s ease; }
+    button:hover { transform:translateY(-1px); }
+    button:disabled { opacity:.55; cursor:not-allowed; transform:none; }
+    input,select { width:100%; border:1px solid var(--line); border-radius:7px; background:#0e1219; color:var(--text); padding:10px 11px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th,td { border-bottom:1px solid var(--line); padding:10px 8px; text-align:left; white-space:normal; overflow-wrap:anywhere; word-break:break-word; vertical-align:top; }
+    th { color:var(--muted); font-weight:700; }
+    pre { margin:0; overflow:auto; color:#cbd4e1; font-size:12px; }
+    .app-shell { min-height:100vh; display:grid; grid-template-columns:260px minmax(0,1fr); }
+    .sidebar { position:sticky; top:0; height:100vh; padding:18px 14px; border-right:1px solid var(--line); background:var(--sidebar); display:flex; flex-direction:column; gap:16px; z-index:30; }
+    .brand { padding:4px 8px 12px; border-bottom:1px solid var(--line); }
+    .brand-title { margin:0; font-size:21px; letter-spacing:0; }
+    .brand-subtitle { margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }
+    .nav { display:flex; flex-direction:column; gap:6px; overflow:auto; }
+    .nav-button { display:grid; grid-template-columns:28px minmax(0,1fr) auto; align-items:center; gap:10px; width:100%; border:1px solid transparent; background:transparent; color:var(--muted); text-align:left; padding:10px; }
+    .nav-button:hover,.nav-button.active { color:var(--text); background:#171d29; border-color:var(--line); transform:none; }
+    .nav-icon { width:22px; height:22px; border-radius:6px; display:grid; place-items:center; color:var(--cyan); background:#0d1d23; font-size:12px; font-weight:800; }
+    .nav-count { color:var(--muted); font-size:12px; }
+    .sidebar-footer { margin-top:auto; display:flex; gap:8px; align-items:center; }
+    .content { min-width:0; padding:18px 22px 32px; }
+    .mobile-top { display:none; position:sticky; top:0; z-index:20; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; background:rgba(13,16,22,.94); border-bottom:1px solid var(--line); backdrop-filter:blur(12px); }
+    .page-head { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:18px; }
+    .page-title { margin:0; font-size:24px; letter-spacing:0; }
+    .page-meta { margin-top:6px; color:var(--muted); font-size:13px; }
+    .top-actions { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; align-items:center; }
+    .ghost-button { border-color:var(--line); background:#111722; color:var(--text); }
+    .status-pill { display:inline-flex; align-items:center; gap:7px; border:1px solid var(--line); border-radius:999px; padding:7px 10px; color:var(--muted); font-size:12px; background:#10151f; }
+    .status-dot { width:7px; height:7px; border-radius:50%; background:var(--muted); box-shadow:0 0 0 4px rgba(148,160,178,.12); }
+    .status-pill.live .status-dot { background:var(--bad); box-shadow:0 0 0 4px rgba(255,107,107,.13); }
+    .status-pill.demo .status-dot { background:var(--warn); box-shadow:0 0 0 4px rgba(247,201,72,.13); }
+    .status-pill.ok .status-dot { background:var(--good); box-shadow:0 0 0 4px rgba(51,209,122,.13); }
+    .grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
+    .two-col { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+    .panel,.metric-tile,.diag-card,.flow-card { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:8px; box-shadow:0 18px 60px rgba(0,0,0,.18); }
+    .panel { padding:16px; animation:rise .28s ease both; }
+    .panel-title { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+    .panel-title h2 { margin:0; font-size:16px; letter-spacing:0; }
+    .muted { color:var(--muted); }
+    .small { font-size:12px; }
+    .metric-tile { padding:15px; background:linear-gradient(180deg,#171d27,#121720); }
+    .metric-label { color:var(--muted); font-size:12px; }
+    .metric-value { margin-top:7px; font-size:22px; font-weight:800; line-height:1.2; overflow-wrap:anywhere; }
+    .table-wrap { overflow:auto; }
+    .tag { display:inline-flex; border:1px solid var(--line); border-radius:999px; padding:3px 8px; color:var(--muted); font-size:12px; white-space:nowrap; }
+    .tag.good { color:var(--good); border-color:rgba(51,209,122,.35); }
+    .tag.warn { color:var(--warn); border-color:rgba(247,201,72,.35); }
+    .tag.bad { color:var(--bad); border-color:rgba(255,107,107,.35); }
+    .diag-list { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+    .diag-card { padding:13px; background:var(--panel2); transition:transform .18s ease,border-color .18s ease; }
+    .diag-card:hover { transform:translateY(-2px); border-color:#3f4b60; }
+    .diag-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:8px; }
+    .diag-title { font-weight:800; overflow-wrap:anywhere; }
+    .diag-action { color:var(--muted); font-size:12px; margin-top:2px; }
+    .blockers { margin:8px 0 0; padding-left:18px; color:#dce4ee; font-size:13px; line-height:1.55; }
+    .metric-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+    .form-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+    .field { display:flex; flex-direction:column; gap:7px; color:var(--muted); font-size:13px; }
+    .field-title { color:var(--text); font-weight:700; }
+    .field-note { min-height:34px; line-height:1.45; color:var(--muted); font-size:12px; }
+    .switch-row { flex-direction:row; align-items:center; justify-content:space-between; border:1px solid var(--line); border-radius:8px; padding:10px; background:#10151f; }
+    .switch-row input { width:auto; transform:scale(1.15); }
+    .actions { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-top:14px; }
+    .qr-box { display:grid; grid-template-columns:180px minmax(0,1fr); gap:16px; align-items:start; margin-top:14px; }
+    .qr-box img { width:180px; height:180px; background:white; border-radius:8px; padding:8px; }
+    .trade-flow { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; position:relative; }
+    .trade-flow::before { content:""; position:absolute; left:8%; right:8%; top:29px; height:2px; background:linear-gradient(90deg,var(--cyan),var(--accent),var(--orange)); opacity:.55; animation:flowline 2.8s linear infinite; }
+    .flow-card { position:relative; padding:12px; background:#111722; z-index:1; overflow:hidden; }
+    .flow-card::after { content:""; position:absolute; inset:auto -25% -45% -25%; height:60px; background:radial-gradient(circle,rgba(61,219,217,.18),transparent 70%); animation:pulse 2.4s ease-in-out infinite; }
+    .flow-dot { width:12px; height:12px; border-radius:50%; background:var(--cyan); box-shadow:0 0 0 6px rgba(61,219,217,.12); margin-bottom:14px; animation:blink 1.6s ease-in-out infinite; }
+    .flow-title { font-weight:800; font-size:13px; }
+    .flow-desc { margin-top:5px; color:var(--muted); font-size:12px; line-height:1.45; }
+    .drawer-mask { display:none; }
+    @keyframes rise { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes pulse { 0%,100% { transform:translateY(0); opacity:.6; } 50% { transform:translateY(-14px); opacity:1; } }
+    @keyframes blink { 0%,100% { transform:scale(.86); } 50% { transform:scale(1.12); } }
+    @keyframes flowline { from { filter:hue-rotate(0deg); } to { filter:hue-rotate(45deg); } }
+    @media (max-width:1100px) { .grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .diag-list,.form-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .trade-flow { grid-template-columns:1fr; } .trade-flow::before { display:none; } }
+    @media (max-width:860px) {
+      .app-shell { display:block; }
+      .mobile-top { display:flex; }
+      .sidebar { position:fixed; left:0; top:0; bottom:0; width:284px; transform:translateX(-104%); transition:transform .22s ease; box-shadow:24px 0 80px rgba(0,0,0,.38); }
+      .sidebar.open { transform:translateX(0); }
+      .drawer-mask.open { display:block; position:fixed; inset:0; z-index:25; background:rgba(0,0,0,.55); }
+      .content { padding:16px 14px 28px; }
+      .page-head { flex-direction:column; }
+      .top-actions { justify-content:flex-start; }
+      .grid,.two-col,.diag-list,.form-grid,.qr-box { grid-template-columns:1fr; }
+      .metric-value { font-size:20px; }
+    }
   </style>
 </head>
 <body>
-<main>
-  <header>
-    <div>
-      <h1>Quant Dashboard</h1>
-      <div class="muted">本地时间 {escape(str(data["local_now"]))} · 每 10 秒自动刷新</div>
-    </div>
-    <div class="top-actions">{mode_badge(mode)}<form method="post" action="/logout"><button class="ghost-button" type="submit">退出</button></form></div>
-  </header>
-
-  {collapsible_panel("概览", overview_body, "dashboard-panel-overview")}
-
-  <section class="cards">
-    {collapsible_panel("当前行情", market_table(mode, regimes, prices, regime_checked_at), "dashboard-panel-market")}
-    {collapsible_panel("风控状态", dict_table(risk), "dashboard-panel-risk")}
-  </section>
-
-  {collapsible_panel("未下单原因", entry_diagnostics_panel(mode, entry_diagnostics), "dashboard-panel-entry-diagnostics")}
-
-  {collapsible_panel("持仓保护", recovered_positions_panel(recovered_positions, trailing_states, live_positions), "dashboard-panel-recovered-positions")}
-
-  {collapsible_panel("持仓监控", dict_table(localized_monitor_status(position_monitor)), "dashboard-panel-position-monitor")}
-
-  {collapsible_panel("最近订单", orders_table(orders), "dashboard-panel-orders")}
-
-  {collapsible_panel("动态风控配置", runtime_config_form(runtime_fields, runtime_config), "dashboard-panel-runtime")}
-
-  {collapsible_panel("交易所连接", exchange_panel(mode, exchange_sessions), "dashboard-panel-exchange")}
-
-  {collapsible_panel("自动调参建议", tuning_report_panel(latest_tuning), "dashboard-panel-tuning")}
-
-  <section class="cards">
-    {collapsible_panel("锁仓状态", hedge_body, "dashboard-panel-hedge")}
-    {collapsible_panel("运行配置", dict_table(mode), "dashboard-panel-mode")}
-  </section>
-</main>
+<div id="root"></div>
+<noscript>需要启用 JavaScript 才能查看控制台。</noscript>
+<script>window.__DASHBOARD_DATA__ = $initial_data;</script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script>
-  document.querySelectorAll("details[data-panel-id]").forEach((panel) => {{
-    const key = "dashboard:" + panel.dataset.panelId + ":open";
-    panel.open = localStorage.getItem(key) === "1";
-    panel.addEventListener("toggle", () => {{
-      localStorage.setItem(key, panel.open ? "1" : "0");
-    }});
-  }});
-  const form = document.getElementById("runtime-config-form");
-  if (form) {{
-    form.addEventListener("submit", async (event) => {{
+(function () {
+  const e = React.createElement;
+  const navItems = [
+    ["overview", "概览", "总"],
+    ["market", "行情", "行"],
+    ["flow", "交易过程", "流"],
+    ["diagnostics", "入场诊断", "诊"],
+    ["positions", "持仓保护", "仓"],
+    ["orders", "最近订单", "单"],
+    ["risk", "风控配置", "控"],
+    ["exchange", "交易所", "所"],
+    ["tuning", "调参报告", "参"],
+    ["system", "系统", "系"]
+  ];
+  const conditionLabels = {
+    regime_known:"行情判断不是 UNKNOWN", supported_regime:"支持该行情类型", enough_5m_candles:"5m K 线数量足够", atr_ready:"ATR 波动率已计算",
+    llm_review_allow_trade:"LLM 复核允许交易", llm_review_pending:"等待 LLM 复核返回", live_symbol_check:"实盘引擎完成该品种检查",
+    live_5m_ohlcv:"等待 5m 实时 K 线更新", snapshot_1h_ohlcv:"刷新 1h K 线快照", fetch_positions:"读取当前持仓", symbol_loop_error:"该品种实盘循环无异常",
+    trend_short_enabled:"空头策略启用", opportunity_score:"机会评分达标", multi_timeframe:"5m/15m/1h 方向一致", one_hour_trend:"1h 趋势同向",
+    one_hour_bullish:"1h EMA20 在 EMA60 上方", one_hour_bearish:"1h EMA20 在 EMA60 下方", four_hour_bullish:"4h 收盘方向向上",
+    four_hour_bearish:"4h 收盘方向向下", near_breakout:"价格靠近 4h 突破位", near_4h_low:"价格靠近 4h 低位",
+    pullback_down:"最近 5m 出现回调阴线", pullback_up:"最近 5m 出现反弹阳线", bullish_candle:"当前 5m 阳线确认", bearish_candle:"当前 5m 阴线确认",
+    macd_cross_up:"5m MACD 金叉", macd_cross_down:"5m MACD 死叉", price_below_midpoint:"震荡区间价格在中线下方", price_above_midpoint:"震荡区间价格在中线上方",
+    price_above_ema20_5m:"价格站上 5m EMA20", price_below_ema20_5m:"价格压在 5m EMA20 下方", price_above_ema20_1h:"价格站上 1h EMA20",
+    price_below_ema20_1h:"价格压在 1h EMA20 下方", ema_slope_up:"5m EMA20 斜率向上", ema_slope_down:"5m EMA20 斜率向下",
+    rsi_40_66:"5m RSI 在 40-66", rsi_34_60:"5m RSI 在 34-60", rsi_42_66:"5m RSI 在 42-66", rsi_35_58:"5m RSI 在 35-58",
+    range_position_not_chasing:"72h 区间位置未追高", range_position_short_room:"72h 区间还有做空空间", down_momentum:"短线下跌动量达标", sol_filter:"SOL 专属过滤通过"
+  };
+  const actionLabels = { none:"不下单", data_wait:"等待数据", engine_started:"引擎已启动", live_5m_wait:"等待 5m 行情", refresh_higher_timeframes:"刷新 1h/4h 行情", fetch_positions:"读取持仓", symbol_loop_error:"品种循环报错", llm_review:"LLM 复核", shock_long:"震荡逢低做多", shock_short:"震荡逢高做空", trend_long:"单边上涨回调做多", trend_short:"单边下跌反弹做空", shock_trend_up:"震荡上行回调做多", shock_trend_down:"震荡下行反弹做空" };
+  const summaryLabels = { waiting_for_conditions:"等待条件", waiting_live_check:"等待检查", waiting_market_data:"等待行情", waiting_positions:"等待持仓", waiting_llm_review:"等待LLM", entry_conditions_met:"条件满足", signal_ready:"信号已触发", release_hedge_signal_ready:"解锁信号", exit_signal_ready:"退出信号", risk_rejected:"风控拒单", order_submitted:"已提交订单", llm_rejected:"LLM 拒绝", symbol_loop_error:"循环异常" };
+  const metricLabels = { price:"价格", rsi_5m:"RSI", opportunity_score:"评分", min_score:"最低分", close_position_72h:"72h位置", ret_24h:"24h涨跌", ret_72h:"72h涨跌", volatility_tier:"波动级别" };
+
+  function value(v, fallback) { return v === undefined || v === null || v === "" ? (fallback || "-") : v; }
+  function snapshot(data) { return data.latest_snapshot || {}; }
+  function memory(data) {
+    const raw = snapshot(data).serialized_memory;
+    return raw && typeof raw === "object" ? raw : {};
+  }
+  function symbols(data) {
+    const mode = data.mode || {};
+    const mem = memory(data);
+    const configured = String(mode.symbols || "").split(",").map((item) => item.trim()).filter(Boolean);
+    const union = new Set(configured);
+    Object.keys(mem.regimes || {}).forEach((item) => union.add(item));
+    Object.keys(mem.prices || {}).forEach((item) => union.add(item));
+    Object.keys(mem.entry_diagnostics || {}).forEach((item) => union.add(item));
+    return Array.from(union);
+  }
+  function localTime(raw) {
+    if (!raw) return "-";
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) return String(raw);
+    return date.toLocaleString("zh-CN", { hour12:false });
+  }
+  function formatNumber(raw, digits) {
+    if (raw === undefined || raw === null || raw === "") return "-";
+    const num = Number(raw);
+    if (!Number.isFinite(num)) return String(raw);
+    return num.toFixed(digits).replace(/\.?0+$$/, "");
+  }
+  function price(raw) {
+    const num = Number(raw);
+    if (!Number.isFinite(num)) return value(raw);
+    if (num >= 1000) return num.toFixed(2);
+    if (num >= 10) return num.toFixed(4);
+    return num.toFixed(6);
+  }
+  function pnl(raw) {
+    if (raw === null || raw === undefined || raw === "") return "-";
+    const num = Number(raw);
+    if (!Number.isFinite(num)) return String(raw);
+    return (num >= 0 ? "+" : "") + num.toFixed(4);
+  }
+  function conditionText(item) {
+    const code = String((item && item.code) || "unknown");
+    let label = conditionLabels[code] || code;
+    if (!conditionLabels[code] && code.endsWith("_timeout")) label = (conditionLabels[code.replace(/_timeout$$/, "")] || code.replace(/_timeout$$/, "")) + "超时";
+    if (code.indexOf("risk_") === 0) label = "风控允许下单：" + code.replace("risk_", "");
+    if (!item || item.value === undefined) return label;
+    return label + "，当前值 " + formatNumber(item.value, 4);
+  }
+  function summaryClass(summary) {
+    if (["entry_conditions_met","signal_ready","release_hedge_signal_ready","exit_signal_ready","order_submitted"].indexOf(summary) >= 0) return "good";
+    if (["risk_rejected","llm_rejected","symbol_loop_error"].indexOf(summary) >= 0) return "bad";
+    return "warn";
+  }
+  function modeBadge(mode) {
+    const exchange = String(mode.selected_exchange_id || mode.exchange_id || "okx").toUpperCase();
+    let klass = "ok", text = exchange + " DRY RUN";
+    if (String(mode.dry_run).toLowerCase() === "false" && String(mode.okx_demo).toLowerCase() === "false") { klass = "live"; text = exchange + " REAL"; }
+    else if (String(mode.okx_demo).toLowerCase() === "true") { klass = "demo"; text = exchange + " DEMO"; }
+    return e("span", { className:"status-pill " + klass }, e("span", { className:"status-dot" }), text);
+  }
+  function Panel(props) {
+    return e("section", { className:"panel" }, e("div", { className:"panel-title" }, e("h2", null, props.title), props.extra || null), props.children);
+  }
+  function Metric(props) {
+    return e("div", { className:"metric-tile" }, e("div", { className:"metric-label" }, props.label), e("div", { className:"metric-value" }, props.value));
+  }
+  function Empty(props) { return e("div", { className:"muted small" }, props.text || "暂无数据"); }
+  function Table(props) {
+    if (!props.rows || !props.rows.length) return e(Empty, { text: props.empty });
+    return e("div", { className:"table-wrap" }, e("table", null,
+      e("thead", null, e("tr", null, props.columns.map((col) => e("th", { key:col.key }, col.label)))),
+      e("tbody", null, props.rows.map((row, idx) => e("tr", { key:idx }, props.columns.map((col) => e("td", { key:col.key }, col.render ? col.render(row) : value(row[col.key]))))))
+    ));
+  }
+  function Overview({ data }) {
+    const snap = snapshot(data), mem = memory(data), mode = data.mode || {};
+    const exchange = String(mem.exchange_id || mode.selected_exchange_id || mode.exchange_id || "okx").toUpperCase();
+    return e(React.Fragment, null,
+      e("div", { className:"grid" },
+        e(Metric, { label:"账户权益", value:formatNumber(snap.total_equity, 2) + " USDT" }),
+        e(Metric, { label:"当前交易所", value:exchange }),
+        e(Metric, { label:"订单总数", value:value(data.order_count, "0") }),
+        e(Metric, { label:"对冲状态", value:snap.active_hedging ? "ON" : "OFF" }),
+        e(Metric, { label:"行情源", value:String(mem.market_data_source || exchange).toUpperCase() }),
+        e(Metric, { label:"快照时间", value:localTime(mem.snapshot_saved_at || snap.snapshot_time) }),
+        e(Metric, { label:"引擎版本", value:value(mem.engine_version) }),
+        e(Metric, { label:"更新时间", value:value(data.local_now) })
+      )
+    );
+  }
+  function Market({ data }) {
+    const mem = memory(data);
+    const rows = symbols(data).map((symbol) => ({ symbol, price:(mem.prices || {})[symbol], regime:(mem.regimes || {})[symbol], checked:(mem.regime_checked_at || {})[symbol] }));
+    return e(Panel, { title:"当前行情" }, e(Table, { rows, empty:"暂无行情数据", columns:[
+      {key:"symbol", label:"品种"}, {key:"price", label:"实时价格", render:(row) => price(row.price)}, {key:"regime", label:"行情判断", render:(row) => value(row.regime)}, {key:"checked", label:"最近判断时间", render:(row) => localTime(row.checked)}
+    ]}));
+  }
+  function TradeFlow({ data }) {
+    const mem = memory(data);
+    const latestOrder = (data.orders || [])[0] || {};
+    const steps = [
+      ["行情扫描", "读取 5m/15m/1h/4h 与实时价格"],
+      ["趋势识别", "按用户规则和过滤器生成行情类型"],
+      ["信号评分", "等待回调、金叉/死叉和机会评分"],
+      ["风控校验", "仓位、同向风险、盈亏比与 LLM 复核"],
+      ["持仓监控", "止损、移动止盈、恢复仓位保护"]
+    ];
+    return e(Panel, { title:"交易过程动画", extra:e("span", { className:"tag" }, "最近订单 " + value(latestOrder.order_id)) },
+      e("div", { className:"trade-flow" }, steps.map((step, idx) => e("div", { className:"flow-card", key:step[0] },
+        e("div", { className:"flow-dot", style:{ animationDelay:(idx * 0.16) + "s" } }),
+        e("div", { className:"flow-title" }, step[0]),
+        e("div", { className:"flow-desc" }, step[1])
+      ))),
+      e("div", { className:"two-col", style:{ marginTop:"14px" } },
+        e(Panel, { title:"风控状态" }, e(DictTable, { data:mem.risk || {} })),
+        e(Panel, { title:"持仓监控" }, e(DictTable, { data:mem.position_monitor || {} }))
+      )
+    );
+  }
+  function Diagnostics({ data }) {
+    const diag = memory(data).entry_diagnostics || {};
+    const rows = symbols(data);
+    if (!rows.length) return e(Panel, { title:"入场诊断" }, e(Empty, { text:"暂无诊断数据，等待实盘引擎保存下一次快照" }));
+    return e(Panel, { title:"入场诊断", extra:e("span", { className:"tag" }, "解释为什么没下单") },
+      e("div", { className:"diag-list" }, rows.map((symbol) => {
+        const item = diag[symbol];
+        if (!item || typeof item !== "object") return e("div", { className:"diag-card", key:symbol },
+          e("div", { className:"diag-head" }, e("div", null, e("div", { className:"diag-title" }, symbol), e("div", { className:"diag-action" }, "等待下一轮策略检查")), e("span", { className:"tag warn" }, "暂无数据")),
+          e("div", { className:"muted small" }, "引擎还没有写入该品种的入场诊断。通常是 app 尚未重启到新版本，或该品种循环还没跑到行情/仓位检查。")
+        );
+        const blockers = Array.isArray(item.blockers) ? item.blockers : [];
+        const metrics = item.metrics && typeof item.metrics === "object" ? item.metrics : {};
+        const keys = ["price","rsi_5m","opportunity_score","min_score","close_position_72h","ret_24h","ret_72h","volatility_tier"];
+        return e("div", { className:"diag-card", key:symbol },
+          e("div", { className:"diag-head" }, e("div", null, e("div", { className:"diag-title" }, symbol), e("div", { className:"diag-action" }, actionLabels[item.action] || value(item.action))), e("span", { className:"tag " + summaryClass(item.summary) }, summaryLabels[item.summary] || value(item.summary))),
+          blockers.length ? e("ul", { className:"blockers" }, blockers.map((blocker, idx) => e("li", { key:idx }, conditionText(blocker)))) : e("div", { className:"muted small" }, "当前入场条件已满足，等待风控、交易执行或下一轮检查。"),
+          e("div", { className:"metric-tags" }, keys.filter((key) => metrics[key] !== undefined).map((key) => e("span", { className:"tag", key:key }, (metricLabels[key] || key) + ": " + formatNumber(metrics[key], 4))))
+        );
+      }))
+    );
+  }
+  function protectedRows(mem) {
+    const rows = {};
+    (Array.isArray(mem.positions) ? mem.positions : []).forEach((raw) => {
+      if (!raw || typeof raw !== "object") return;
+      const symbol = String(raw.symbol || ""), side = String(raw.side || "");
+      if (!symbol || !side) return;
+      rows[symbol + ":" + side] = { symbol, side, contracts:raw.contracts, entry_price:raw.entry_price, source:"交易所持仓" };
+    });
+    Object.entries(mem.trailing_states || {}).forEach(([key, raw]) => {
+      if (!raw || typeof raw !== "object") return;
+      const symbol = String(raw.symbol || key.split(":")[0]), side = String(raw.position_side || key.split(":").pop());
+      rows[symbol + ":" + side] = Object.assign(rows[symbol + ":" + side] || { symbol, side }, { entry_price:raw.entry_price, stop_loss:raw.stop_loss, take_profit:raw.take_profit, atr:raw.atr, source:"移动止盈状态" });
+    });
+    Object.entries(mem.recovered_positions || {}).forEach(([key, raw]) => {
+      if (!raw || typeof raw !== "object") return;
+      const symbol = String(raw.symbol || key.split(":")[0]), side = String(raw.side || key.split(":").pop());
+      rows[symbol + ":" + side] = Object.assign(rows[symbol + ":" + side] || { symbol, side }, raw, { source:"恢复持仓" });
+    });
+    return Object.values(rows);
+  }
+  function Positions({ data }) {
+    const rows = protectedRows(memory(data));
+    return e(Panel, { title:"持仓保护" }, e(Table, { rows, empty:"暂无持仓保护数据", columns:[
+      {key:"symbol", label:"品种"}, {key:"side", label:"方向"}, {key:"contracts", label:"数量", render:(row) => formatNumber(row.contracts, 6)}, {key:"entry_price", label:"开仓价", render:(row) => price(row.entry_price)},
+      {key:"stop_loss", label:"保护止损", render:(row) => price(row.stop_loss)}, {key:"take_profit", label:"止盈", render:(row) => price(row.take_profit)}, {key:"atr", label:"ATR", render:(row) => formatNumber(row.atr, 6)}, {key:"regime", label:"恢复行情"}, {key:"source", label:"来源"}
+    ]}));
+  }
+  function Orders({ data }) {
+    return e(Panel, { title:"最近订单", extra:e("span", { className:"tag" }, "最多 30 条") }, e(Table, { rows:data.orders || [], empty:"暂无订单", columns:[
+      {key:"created_at", label:"时间", render:(row) => localTime(row.created_at)}, {key:"symbol", label:"品种"}, {key:"regime_mode", label:"行情"}, {key:"side", label:"方向"}, {key:"position_side", label:"持仓方向"},
+      {key:"initial_qty", label:"数量", render:(row) => formatNumber(row.initial_qty, 6)}, {key:"avg_price", label:"均价", render:(row) => price(row.avg_price)}, {key:"fee_paid", label:"手续费", render:(row) => formatNumber(row.fee_paid, 6)},
+      {key:"realized_pnl", label:"已实现盈亏", render:(row) => pnl(row.realized_pnl)}, {key:"status", label:"状态"}, {key:"order_id", label:"订单ID"}
+    ]}));
+  }
+  function DictTable({ data }) {
+    const rows = Object.entries(data || {}).map(([key, val]) => ({ key, val }));
+    return e(Table, { rows, empty:"暂无数据", columns:[{key:"key", label:"字段"}, {key:"val", label:"值", render:(row) => typeof row.val === "object" ? e("pre", null, JSON.stringify(row.val, null, 2)) : String(value(row.val))}] });
+  }
+  function RuntimeConfig({ data, onData }) {
+    const [form, setForm] = React.useState(data.runtime_config || {});
+    const [status, setStatus] = React.useState("");
+    React.useEffect(() => setForm(data.runtime_config || {}), [data.runtime_config]);
+    async function submit(event) {
       event.preventDefault();
-      const status = document.getElementById("runtime-config-status");
-      const payload = Object.fromEntries(new FormData(form).entries());
-      form.querySelectorAll('input[type="checkbox"]').forEach((input) => {{
-        payload[input.name] = input.checked ? "1" : "0";
-      }});
-      status.textContent = "保存中...";
-      const response = await fetch("/api/runtime-config", {{
-        method: "POST",
-        headers: {{"Content-Type": "application/json"}},
-        body: JSON.stringify(payload)
-      }});
-      if (response.ok) {{
-        status.textContent = "已保存，实盘引擎下一轮自动应用";
-      }} else {{
-        const data = await response.json().catch(() => ({{detail: "保存失败"}}));
-        status.textContent = data.detail || "保存失败";
-      }}
-    }});
-  }}
-  const exchangeForm = document.getElementById("exchange-select-form");
-  const hotcoinQrButton = document.getElementById("hotcoin-qr-start");
-  let hotcoinQrToken = "";
-  let hotcoinPollTimer = null;
-  if (exchangeForm) {{
-    exchangeForm.addEventListener("submit", async (event) => {{
+      setStatus("保存中...");
+      const response = await fetch("/api/runtime-config", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(form) });
+      const body = await response.json().catch(() => ({}));
+      if (response.ok) { setStatus("已保存，实盘引擎下一轮自动应用"); onData && onData(Object.assign({}, data, { runtime_config: body.runtime_config || form })); }
+      else setStatus(body.detail || "保存失败");
+    }
+    return e(Panel, { title:"动态风控配置" }, e("form", { onSubmit:submit },
+      e("div", { className:"form-grid" }, (data.runtime_fields || []).map((field) => {
+        const checked = ["1","true","True",true,1].indexOf(form[field.key]) >= 0;
+        if (field.boolean) return e("label", { className:"field switch-row", key:field.key }, e("span", null, e("span", { className:"field-title" }, field.label), e("div", { className:"field-note" }, field.description || "")), e("input", { type:"checkbox", checked, onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.checked ? "1" : "0" })) }));
+        return e("label", { className:"field", key:field.key }, e("span", { className:"field-title" }, field.label), e("input", { type:field.text ? "text" : "number", min:field.min, max:field.max, step:field.step || "any", value:value(form[field.key], ""), onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.value })) }), e("span", { className:"field-note" }, field.description || ""));
+      })),
+      e("div", { className:"actions" }, e("button", { type:"submit" }, "保存配置"), e("span", { className:"muted small" }, status))
+    ));
+  }
+  function Exchange({ data }) {
+    const current = String((data.mode || {}).selected_exchange_id || (data.mode || {}).exchange_id || "okx").toLowerCase();
+    const [exchange, setExchange] = React.useState(current);
+    const [status, setStatus] = React.useState("");
+    const [qr, setQr] = React.useState(null);
+    const [token, setToken] = React.useState("");
+    React.useEffect(() => setExchange(current), [current]);
+    React.useEffect(() => {
+      if (!token) return undefined;
+      const timer = setInterval(async () => {
+        const response = await fetch("/api/hotcoin/qr/poll", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ qr_token:token }) });
+        const body = await response.json().catch(() => ({}));
+        if (body.status === "connected") { clearInterval(timer); setToken(""); setStatus("扫码成功，Hotcoin token 已保存到数据库"); }
+        else if (body.status === "error") { clearInterval(timer); setToken(""); setStatus(body.message || "扫码失败"); }
+        else setStatus("等待扫码确认...");
+      }, 2000);
+      return () => clearInterval(timer);
+    }, [token]);
+    async function save(event) {
       event.preventDefault();
-      const status = document.getElementById("exchange-select-status");
-      const payload = Object.fromEntries(new FormData(exchangeForm).entries());
-      status.textContent = "保存中...";
-      const response = await fetch("/api/exchange/select", {{
-        method: "POST",
-        headers: {{"Content-Type": "application/json"}},
-        body: JSON.stringify(payload)
-      }});
-      const data = await response.json().catch(() => ({{detail: "保存失败"}}));
-      status.textContent = response.ok ? "已保存；实盘 app 需要重启才会切换交易所" : (data.detail || "保存失败");
-    }});
-  }}
-  if (hotcoinQrButton) {{
-    hotcoinQrButton.addEventListener("click", async () => {{
-      const status = document.getElementById("hotcoin-login-status");
-      const image = document.getElementById("hotcoin-qr-image");
-      status.textContent = "正在生成二维码...";
-      const response = await fetch("/api/hotcoin/qr/start", {{method: "POST"}});
-      const data = await response.json().catch(() => ({{detail: "二维码生成失败"}}));
-      if (!response.ok) {{
-        status.textContent = data.detail || "二维码生成失败";
-        return;
-      }}
-      hotcoinQrToken = data.qr_token;
-      image.src = data.image;
-      image.style.display = "block";
-      status.textContent = "请用 Hotcoin App 扫码确认";
-      if (hotcoinPollTimer) clearInterval(hotcoinPollTimer);
-      hotcoinPollTimer = setInterval(async () => {{
-        if (!hotcoinQrToken) return;
-        const poll = await fetch("/api/hotcoin/qr/poll", {{
-          method: "POST",
-          headers: {{"Content-Type": "application/json"}},
-          body: JSON.stringify({{qr_token: hotcoinQrToken}})
-        }});
-        const pollData = await poll.json().catch(() => ({{status: "error", message: "轮询失败"}}));
-        if (pollData.status === "connected") {{
-          clearInterval(hotcoinPollTimer);
-          hotcoinQrToken = "";
-          status.textContent = "扫码成功，Hotcoin token 已保存到数据库";
-        }} else if (pollData.status === "error") {{
-          clearInterval(hotcoinPollTimer);
-          status.textContent = pollData.message || "扫码失败";
-        }} else {{
-          status.textContent = "等待扫码确认...";
-        }}
-      }}, 2000);
-    }});
-  }}
-  setInterval(() => {{
-    if (!hotcoinQrToken) window.location.reload();
-  }}, 10000);
+      setStatus("保存中...");
+      const response = await fetch("/api/exchange/select", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ exchange_id:exchange }) });
+      const body = await response.json().catch(() => ({}));
+      setStatus(response.ok ? "已保存；实盘 app 需要重启才会切换交易所" : (body.detail || "保存失败"));
+    }
+    async function startQr() {
+      setStatus("正在生成二维码...");
+      const response = await fetch("/api/hotcoin/qr/start", { method:"POST" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) { setStatus(body.detail || "二维码生成失败"); return; }
+      setQr(body.image); setToken(body.qr_token); setStatus("请用 Hotcoin App 扫码确认");
+    }
+    return e(Panel, { title:"交易所连接" },
+      e("form", { onSubmit:save, className:"two-col" },
+        e("label", { className:"field" }, e("span", { className:"field-title" }, "交易所"), e("select", { value:exchange, onChange:(event) => setExchange(event.target.value) }, e("option", { value:"okx" }, "OKX"), e("option", { value:"hotcoin" }, "Hotcoin"))),
+        e("div", { className:"actions" }, e("button", { type:"submit" }, "保存交易所"), e("span", { className:"muted small" }, status))
+      ),
+      e("div", { className:"qr-box" }, qr ? e("img", { src:qr, alt:"Hotcoin QR" }) : e("div", { className:"panel", style:{ minHeight:"180px", display:"grid", placeItems:"center" } }, e("span", { className:"muted small" }, "Hotcoin 二维码")), e("div", null, e("button", { type:"button", className:"ghost-button", onClick:startQr }, "生成 Hotcoin 扫码二维码"), e("div", { className:"muted small", style:{ marginTop:"10px" } }, "扫码成功后 token 会保存到数据库，交易所切换仍需重启实盘 app。"))),
+      e(Panel, { title:"已保存会话" }, e(Table, { rows:data.exchange_sessions || [], empty:"暂无会话", columns:[{key:"exchange_id", label:"交易所"}, {key:"connected", label:"状态", render:(row) => row.connected ? "已连接" : "未连接"}, {key:"token", label:"Token"}, {key:"device_id", label:"设备"}, {key:"updated_at", label:"更新时间", render:(row) => localTime(row.updated_at)}] }))
+    );
+  }
+  function Tuning({ data }) {
+    const report = data.latest_tuning_report;
+    if (!report) return e(Panel, { title:"自动调参建议" }, e(Empty, { text:"暂无调参报告" }));
+    const rows = [{ type:"当前实盘参数回测", values:report.current || {} }, { type:"推荐参数回测", values:report.recommended || {} }];
+    return e(Panel, { title:"自动调参建议", extra:e("a", { className:"tag", href:"/reports/" + report.name, target:"_blank" }, "打开报告") },
+      e("div", { className:"muted small", style:{ marginBottom:"10px" } }, "最近生成：" + localTime(report.mtime) + " · " + value(report.reason)),
+      e(Table, { rows, columns:[{key:"type", label:"类型"}, {key:"candidate", label:"参数档", render:(row) => value(row.values.candidate)}, {key:"pnl", label:"收益", render:(row) => value(row.values.pnl)}, {key:"win_rate", label:"胜率", render:(row) => value(row.values.win_rate)}, {key:"trades", label:"交易次数", render:(row) => value(row.values.trades)}] })
+    );
+  }
+  function System({ data }) {
+    return e("div", { className:"two-col" },
+      e(Panel, { title:"运行配置" }, e(DictTable, { data:data.mode || {} })),
+      e(Panel, { title:"锁仓状态" }, e(DictTable, { data:memory(data).hedge_locks || {} }))
+    );
+  }
+  function App() {
+    const [data, setData] = React.useState(window.__DASHBOARD_DATA__ || {});
+    const [view, setView] = React.useState(localStorage.getItem("dashboard:view") || "overview");
+    const [drawer, setDrawer] = React.useState(false);
+    const [refreshing, setRefreshing] = React.useState(false);
+    React.useEffect(() => {
+      localStorage.setItem("dashboard:view", view);
+      setDrawer(false);
+    }, [view]);
+    React.useEffect(() => {
+      const load = async () => {
+        setRefreshing(true);
+        const response = await fetch("/api/status");
+        if (response.status === 401) { window.location.href = "/login"; return; }
+        if (response.ok) setData(await response.json());
+        setRefreshing(false);
+      };
+      const timer = setInterval(load, 10000);
+      return () => clearInterval(timer);
+    }, []);
+    const mode = data.mode || {};
+    const viewTitle = (navItems.find((item) => item[0] === view) || navItems[0])[1];
+    let body;
+    if (view === "overview") body = e(Overview, { data });
+    else if (view === "market") body = e(Market, { data });
+    else if (view === "flow") body = e(TradeFlow, { data });
+    else if (view === "diagnostics") body = e(Diagnostics, { data });
+    else if (view === "positions") body = e(Positions, { data });
+    else if (view === "orders") body = e(Orders, { data });
+    else if (view === "risk") body = e(RuntimeConfig, { data, onData:setData });
+    else if (view === "exchange") body = e(Exchange, { data });
+    else if (view === "tuning") body = e(Tuning, { data });
+    else body = e(System, { data });
+    return e(React.Fragment, null,
+      e("div", { className:"mobile-top" }, e("button", { className:"ghost-button", onClick:() => setDrawer(true) }, "菜单"), e("strong", null, viewTitle), modeBadge(mode)),
+      e("div", { className:drawer ? "drawer-mask open" : "drawer-mask", onClick:() => setDrawer(false) }),
+      e("div", { className:"app-shell" },
+        e("aside", { className:drawer ? "sidebar open" : "sidebar" },
+          e("div", { className:"brand" }, e("h1", { className:"brand-title" }, "Quant Dashboard"), e("div", { className:"brand-subtitle" }, "本地时间 " + value(data.local_now) + " · 10 秒自动刷新")),
+          e("nav", { className:"nav" }, navItems.map((item) => e("button", { key:item[0], className:"nav-button " + (view === item[0] ? "active" : ""), onClick:() => setView(item[0]) }, e("span", { className:"nav-icon" }, item[2]), e("span", null, item[1]), item[0] === "orders" ? e("span", { className:"nav-count" }, value(data.order_count, "0")) : null))),
+          e("div", { className:"sidebar-footer" }, e("form", { method:"post", action:"/logout" }, e("button", { className:"ghost-button", type:"submit" }, "退出")), modeBadge(mode))
+        ),
+        e("main", { className:"content" },
+          e("header", { className:"page-head" }, e("div", null, e("h1", { className:"page-title" }, viewTitle), e("div", { className:"page-meta" }, "最新快照 " + localTime((memory(data).snapshot_saved_at || snapshot(data).snapshot_time)) + (refreshing ? " · 刷新中" : ""))), e("div", { className:"top-actions" }, modeBadge(mode), e("button", { className:"ghost-button", onClick:async () => { const response = await fetch("/api/status"); if (response.ok) setData(await response.json()); } }, "立即刷新"))),
+          body
+        )
+      )
+    );
+  }
+  ReactDOM.createRoot(document.getElementById("root")).render(e(App));
+})();
 </script>
 </body>
-</html>"""
+</html>""")
+    return template.substitute(initial_data=initial_json)
 
 
 def render_login_page(error: str = "") -> str:
