@@ -33,6 +33,7 @@ order_tracks = Table(
     Column("side", String(8), nullable=False, default=""),
     Column("position_side", String(8), nullable=False, default=""),
     Column("signal_reason", Text, nullable=False, default=""),
+    Column("exchange_id", String(32), nullable=False, default=""),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -64,8 +65,9 @@ exchange_sessions = Table(
 
 
 class StateStore:
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, exchange_id: str = "") -> None:
         self.dsn = dsn
+        self.exchange_id = exchange_id
         self.engine: AsyncEngine = create_async_engine(dsn, pool_pre_ping=True)
         self._schema_ready = False
 
@@ -104,6 +106,7 @@ class StateStore:
                     "side": order.side.value,
                     "position_side": order.position_side.value,
                     "signal_reason": signal.reason if signal else order_tracks.c.signal_reason,
+                    "exchange_id": self.exchange_id or order_tracks.c.exchange_id,
                 },
             )
             await conn.execute(stmt)
@@ -214,7 +217,8 @@ class StateStore:
                 add column if not exists realized_pnl numeric(18, 8),
                 add column if not exists side varchar(8) not null default '',
                 add column if not exists position_side varchar(8) not null default '',
-                add column if not exists signal_reason text not null default ''
+                add column if not exists signal_reason text not null default '',
+                add column if not exists exchange_id varchar(32) not null default ''
                 """
             )
         )
@@ -243,6 +247,7 @@ class StateStore:
             "side": order.side.value,
             "position_side": order.position_side.value,
             "signal_reason": signal.reason if signal else "",
+            "exchange_id": self.exchange_id,
             "created_at": created_at,
         }
 

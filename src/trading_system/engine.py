@@ -933,6 +933,8 @@ class OKXQuantEngine:
                 display_entry_diagnostics[symbol] = display
         memory = {
             "engine_version": ENGINE_DIAGNOSTICS_VERSION,
+            "exchange_id": self.settings.exchange_id,
+            "market_data_source": "okx" if self.settings.exchange_id == "hotcoin" else self.settings.exchange_id,
             "snapshot_saved_at": snapshot_time.isoformat(),
             "regimes": regimes,
             "direction_risk": {side.value: value for side, value in self.risk.direction_risk.items()},

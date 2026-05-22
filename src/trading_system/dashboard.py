@@ -28,7 +28,7 @@ from trading_system.hotcoin import (
 from trading_system.runtime_config import RUNTIME_FIELDS, runtime_defaults, validate_runtime_config
 
 
-app = FastAPI(title="OKX Quant Dashboard")
+app = FastAPI(title="Quant Dashboard")
 FAVICON_PATH = Path(__file__).with_name("assets") / "favicon.ico"
 REPORTS_DIR = Path(os.getenv("REPORTS_DIR", "reports"))
 DASHBOARD_SESSION_COOKIE = "okx_quant_dashboard_session"
@@ -88,6 +88,7 @@ async def ensure_dashboard_schema(conn: asyncpg.Connection) -> None:
             side varchar(8) not null default '',
             position_side varchar(8) not null default '',
             signal_reason text not null default '',
+            exchange_id varchar(32) not null default '',
             created_at timestamp with time zone not null
         )
         """
@@ -101,7 +102,8 @@ async def ensure_dashboard_schema(conn: asyncpg.Connection) -> None:
         add column if not exists realized_pnl numeric(18, 8),
         add column if not exists side varchar(8) not null default '',
         add column if not exists position_side varchar(8) not null default '',
-        add column if not exists signal_reason text not null default ''
+        add column if not exists signal_reason text not null default '',
+        add column if not exists exchange_id varchar(32) not null default ''
         """
     )
     await conn.execute(
@@ -140,17 +142,6 @@ async def fetch_dashboard_data() -> dict[str, Any]:
             limit 1
             """
         )
-        orders = await conn.fetch(
-            """
-            select order_id, symbol, regime_mode, initial_qty, maker_filled,
-                   taker_twap_filled, fee_paid, status, filled_qty,
-                   avg_price, realized_pnl, side, position_side, signal_reason, created_at
-            from order_tracks
-            order by created_at desc
-            limit 30
-            """
-        )
-        order_count = await conn.fetchval("select count(*) from order_tracks")
         runtime_rows = await conn.fetch("select setting_key, setting_value, updated_at from runtime_settings")
         exchange_rows = await conn.fetch(
             "select exchange_id, account_key, session_data, updated_at from exchange_sessions order by updated_at desc"
@@ -168,6 +159,8 @@ async def fetch_dashboard_data() -> dict[str, Any]:
         if str(row["setting_key"]) in defaults
     }
     selected_exchange = runtime_values.get("selected_exchange_id") or os.getenv("EXCHANGE_ID", settings.exchange_id)
+    current_exchange = selected_exchange.lower().strip()
+    order_rows = await fetch_orders_for_exchange(current_exchange)
 
     return {
         "now": datetime.now(timezone.utc).isoformat(),
@@ -185,8 +178,8 @@ async def fetch_dashboard_data() -> dict[str, Any]:
             "llm_min_interval_seconds": os.getenv("LLM_REGIME_REVIEW_MIN_INTERVAL_SECONDS", ""),
         },
         "latest_snapshot": normalize_row(latest_snapshot),
-        "orders": [normalize_row(row) for row in orders],
-        "order_count": int(order_count or 0),
+        "orders": order_rows["orders"],
+        "order_count": order_rows["count"],
         "runtime_config": runtime_config,
         "exchange_sessions": [safe_exchange_session(row) for row in exchange_rows],
         "runtime_fields": [
@@ -205,6 +198,43 @@ async def fetch_dashboard_data() -> dict[str, Any]:
         ],
         "latest_tuning_report": latest_tuning_report(),
     }
+
+
+async def fetch_orders_for_exchange(exchange_id: str) -> dict[str, Any]:
+    conn = await asyncpg.connect(dsn())
+    try:
+        await ensure_dashboard_schema(conn)
+        if exchange_id == "hotcoin":
+            rows = await conn.fetch(
+                """
+                select order_id, symbol, regime_mode, initial_qty, maker_filled,
+                       taker_twap_filled, fee_paid, status, filled_qty,
+                       avg_price, realized_pnl, side, position_side, signal_reason,
+                       exchange_id, created_at
+                from order_tracks
+                where exchange_id = 'hotcoin'
+                order by created_at desc
+                limit 30
+                """
+            )
+            count = await conn.fetchval("select count(*) from order_tracks where exchange_id = 'hotcoin'")
+        else:
+            rows = await conn.fetch(
+                """
+                select order_id, symbol, regime_mode, initial_qty, maker_filled,
+                       taker_twap_filled, fee_paid, status, filled_qty,
+                       avg_price, realized_pnl, side, position_side, signal_reason,
+                       exchange_id, created_at
+                from order_tracks
+                where exchange_id in ('', 'okx')
+                order by created_at desc
+                limit 30
+                """
+            )
+            count = await conn.fetchval("select count(*) from order_tracks where exchange_id in ('', 'okx')")
+    finally:
+        await conn.close()
+    return {"orders": [normalize_row(row) for row in rows], "count": int(count or 0)}
 
 
 def safe_exchange_session(row: asyncpg.Record) -> dict[str, Any]:
@@ -416,6 +446,9 @@ def render_page(data: dict[str, Any]) -> str:
     hedge_locks = memory.get("hedge_locks", {}) if isinstance(memory, dict) else {}
     risk = memory.get("risk", {}) if isinstance(memory, dict) else {}
     engine_version = memory.get("engine_version", "-") if isinstance(memory, dict) else "-"
+    snapshot_exchange = memory.get("exchange_id") if isinstance(memory, dict) else None
+    market_data_source = memory.get("market_data_source") if isinstance(memory, dict) else None
+    displayed_exchange = str(snapshot_exchange or mode.get("selected_exchange_id") or mode.get("exchange_id") or "okx")
     snapshot_saved_at = memory.get("snapshot_saved_at") if isinstance(memory, dict) else None
     orders = data["orders"]
     mode = data["mode"]
@@ -426,9 +459,10 @@ def render_page(data: dict[str, Any]) -> str:
     overview_body = (
         '<section class="grid">'
         f'{metric("账户权益", fmt(snapshot.get("total_equity"), "USDT"))}'
+        f'{metric("当前交易所", displayed_exchange.upper())}'
         f'{metric("订单总数", data["order_count"])}'
         f'{metric("对冲状态", "ON" if snapshot.get("active_hedging") else "OFF")}'
-        f'{metric("交易品种", str(mode.get("symbols") or "-"))}'
+        f'{metric("行情源", str(market_data_source or displayed_exchange).upper())}'
         f'{metric("快照时间", format_local_time(snapshot_saved_at or snapshot.get("snapshot_time")))}'
         f'{metric("引擎版本", str(engine_version or "-"))}'
         "</section>"
@@ -441,7 +475,7 @@ def render_page(data: dict[str, Any]) -> str:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="/favicon.ico" sizes="32x32">
-  <title>OKX Quant Dashboard</title>
+  <title>Quant Dashboard</title>
   <style>
     :root {{ color-scheme: dark; --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e8eaed; --muted:#9aa4b2; --good:#39d98a; --warn:#ffcc66; --bad:#ff6b6b; }}
     body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }}
@@ -500,7 +534,7 @@ def render_page(data: dict[str, Any]) -> str:
 <main>
   <header>
     <div>
-      <h1>OKX Quant Dashboard</h1>
+      <h1>Quant Dashboard</h1>
       <div class="muted">本地时间 {escape(str(data["local_now"]))} · 每 10 秒自动刷新</div>
     </div>
     <div class="top-actions">{mode_badge(mode)}<form method="post" action="/logout"><button class="ghost-button" type="submit">退出</button></form></div>
@@ -650,7 +684,7 @@ def render_login_page(error: str = "") -> str:
 </head>
 <body>
   <form class="login" method="post" action="/login">
-    <h1>OKX Quant Dashboard</h1>
+    <h1>Quant Dashboard</h1>
     <div class="muted">请输入访问密码</div>
     {error_html}
     <label>
@@ -673,11 +707,12 @@ def collapsible_panel(title: str, body: str, panel_id: str) -> str:
 
 
 def mode_badge(mode: dict[str, Any]) -> str:
+    exchange_id = str(mode.get("selected_exchange_id") or mode.get("exchange_id") or "okx").upper()
     if str(mode.get("dry_run")).lower() == "false" and str(mode.get("okx_demo")).lower() == "false":
-        return '<span class="status live">REAL TRADING</span>'
+        return f'<span class="status live">{escape(exchange_id)} REAL</span>'
     if str(mode.get("okx_demo")).lower() == "true":
-        return '<span class="status demo">DEMO</span>'
-    return '<span class="status ok">DRY RUN</span>'
+        return f'<span class="status demo">{escape(exchange_id)} DEMO</span>'
+    return f'<span class="status ok">{escape(exchange_id)} DRY RUN</span>'
 
 
 def metric(label: str, value: Any, unit: str = "") -> str:
@@ -1129,6 +1164,7 @@ def orders_table(orders: list[dict[str, Any]]) -> str:
         rows += (
             "<tr>"
             f"<td>{escape(str(order.get('created_at', '')))}</td>"
+            f"<td>{escape(str(order.get('exchange_id') or 'okx'))}</td>"
             f"<td>{escape(str(order.get('symbol', '')))}</td>"
             f"<td>{escape(str(order.get('regime_mode', '')))}</td>"
             f"<td>{escape(str(order.get('status', '')))}</td>"
@@ -1143,7 +1179,7 @@ def orders_table(orders: list[dict[str, Any]]) -> str:
             "</tr>"
         )
     return (
-        "<table><thead><tr><th>时间</th><th>品种</th><th>行情</th><th>状态</th><th>方向</th>"
+        "<table><thead><tr><th>时间</th><th>交易所</th><th>品种</th><th>行情</th><th>状态</th><th>方向</th>"
         "<th>数量</th><th>已成交</th><th>均价</th><th>手续费</th><th>盈亏</th><th>原因</th><th>订单ID</th></tr></thead>"
         f"<tbody>{rows}</tbody></table>"
     )
