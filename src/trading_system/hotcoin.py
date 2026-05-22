@@ -483,7 +483,7 @@ class HotcoinExchange(ExchangeClient):
             symbol=ccxt_symbol(str(row.get("contractCode") or row.get("symbol") or "")),
             side=side,
             contracts=self._position_amount(row) / 100.0,
-            entry_price=self._float_value(row.get("entryPrice"), row.get("avgPrice"), row.get("openPrice"), 0.0),
+            entry_price=self._float_value(row.get("entryPrice"), row.get("avgPrice"), row.get("openPrice"), row.get("price"), 0.0),
             unrealized_pnl=self._float_value(row.get("unrealizedPnl"), row.get("unRealizedSurplus"), row.get("profit"), 0.0),
             metadata=row,
         )

@@ -931,6 +931,7 @@ class OKXQuantEngine:
             display = self._display_entry_diagnostics(status)
             if display is not None:
                 display_entry_diagnostics[symbol] = display
+        positions_snapshot = await self._positions_snapshot()
         memory = {
             "engine_version": ENGINE_DIAGNOSTICS_VERSION,
             "exchange_id": self.settings.exchange_id,
@@ -974,6 +975,7 @@ class OKXQuantEngine:
                 if status.get("last_order") is not None
             },
             "position_monitor": self.position_monitor_status,
+            "positions": positions_snapshot,
             "trailing_states": self.position_manager.trailing_snapshot(),
             "recovered_positions": {
                 f"{symbol}:{side.value}": value
@@ -995,6 +997,23 @@ class OKXQuantEngine:
             task for task in self.execution.background_tasks if not task.done()
         )
         await self.store.save_snapshot(equity, active_hedging, memory)
+
+    async def _positions_snapshot(self) -> list[dict[str, object]]:
+        try:
+            positions = await self.exchange.fetch_positions()
+        except Exception as exc:
+            logger.warning("positions snapshot failed: %s", exc)
+            return []
+        return [
+            {
+                "symbol": position.symbol,
+                "side": position.side.value,
+                "contracts": position.contracts,
+                "entry_price": position.entry_price,
+                "unrealized_pnl": position.unrealized_pnl,
+            }
+            for position in positions
+        ]
 
     async def _sync_submitted_order(
         self,

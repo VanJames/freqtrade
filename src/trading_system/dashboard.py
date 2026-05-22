@@ -442,6 +442,8 @@ def render_page(data: dict[str, Any]) -> str:
     regime_checked_at = memory.get("regime_checked_at", {}) if isinstance(memory, dict) else {}
     entry_diagnostics = memory.get("entry_diagnostics", {}) if isinstance(memory, dict) else {}
     recovered_positions = memory.get("recovered_positions", {}) if isinstance(memory, dict) else {}
+    trailing_states = memory.get("trailing_states", {}) if isinstance(memory, dict) else {}
+    live_positions = memory.get("positions", []) if isinstance(memory, dict) else []
     position_monitor = memory.get("position_monitor", {}) if isinstance(memory, dict) else {}
     hedge_locks = memory.get("hedge_locks", {}) if isinstance(memory, dict) else {}
     risk = memory.get("risk", {}) if isinstance(memory, dict) else {}
@@ -549,7 +551,7 @@ def render_page(data: dict[str, Any]) -> str:
 
   {collapsible_panel("未下单原因", entry_diagnostics_panel(mode, entry_diagnostics), "dashboard-panel-entry-diagnostics")}
 
-  {collapsible_panel("恢复持仓", recovered_positions_panel(recovered_positions), "dashboard-panel-recovered-positions")}
+  {collapsible_panel("持仓保护", recovered_positions_panel(recovered_positions, trailing_states, live_positions), "dashboard-panel-recovered-positions")}
 
   {collapsible_panel("持仓监控", dict_table(localized_monitor_status(position_monitor)), "dashboard-panel-position-monitor")}
 
@@ -834,12 +836,16 @@ def entry_diagnostics_panel(mode: dict[str, Any], diagnostics: dict[str, Any]) -
     return f'<div class="diag-list">{cards}</div>'
 
 
-def recovered_positions_panel(positions: dict[str, Any]) -> str:
+def recovered_positions_panel(
+    recovered: dict[str, Any],
+    trailing_states: dict[str, Any],
+    live_positions: list[Any],
+) -> str:
+    positions = protected_position_rows(recovered, trailing_states, live_positions)
     if not positions:
-        return '<div class="muted">暂无恢复持仓。程序当前没有发现需要从 OKX 现有持仓重建保护状态的仓位。</div>'
+        return '<div class="muted">暂无持仓保护数据。程序当前没有发现需要从交易所现有持仓重建保护状态的仓位。</div>'
     rows = ""
-    for key, raw in sorted(positions.items()):
-        item = raw if isinstance(raw, dict) else {}
+    for key, item in sorted(positions.items()):
         rows += (
             "<tr>"
             f"<td>{escape(str(item.get('symbol') or key))}</td>"
@@ -850,13 +856,66 @@ def recovered_positions_panel(positions: dict[str, Any]) -> str:
             f"<td>{escape(format_price(item.get('take_profit')))}</td>"
             f"<td>{escape(format_metric_value(item.get('atr', '-')))}</td>"
             f"<td>{escape(str(item.get('regime') or '-'))}</td>"
+            f"<td>{escape(str(item.get('source') or '-'))}</td>"
             "</tr>"
         )
     return (
         "<table><thead><tr><th>品种</th><th>方向</th><th>数量</th><th>开仓价</th>"
-        "<th>保护止损</th><th>止盈</th><th>ATR</th><th>恢复行情</th></tr></thead>"
+        "<th>保护止损</th><th>止盈</th><th>ATR</th><th>恢复行情</th><th>来源</th></tr></thead>"
         f"<tbody>{rows}</tbody></table>"
     )
+
+
+def protected_position_rows(
+    recovered: dict[str, Any],
+    trailing_states: dict[str, Any],
+    live_positions: list[Any],
+) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for raw in live_positions if isinstance(live_positions, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        symbol = str(raw.get("symbol") or "")
+        side = str(raw.get("side") or "")
+        if not symbol or not side:
+            continue
+        key = f"{symbol}:{side}"
+        rows[key] = {
+            "symbol": symbol,
+            "side": side,
+            "contracts": raw.get("contracts"),
+            "entry_price": raw.get("entry_price"),
+            "source": "交易所持仓",
+        }
+    for key, raw in trailing_states.items() if isinstance(trailing_states, dict) else []:
+        if not isinstance(raw, dict):
+            continue
+        symbol = str(raw.get("symbol") or key.rsplit(":", 1)[0])
+        side = str(raw.get("position_side") or key.rsplit(":", 1)[-1])
+        row_key = f"{symbol}:{side}"
+        row = rows.setdefault(row_key, {"symbol": symbol, "side": side})
+        row.update(
+            {
+                "entry_price": raw.get("entry_price", row.get("entry_price")),
+                "stop_loss": raw.get("stop_loss"),
+                "take_profit": raw.get("take_profit"),
+                "atr": raw.get("atr"),
+                "source": "移动止盈状态",
+            }
+        )
+    for key, raw in recovered.items() if isinstance(recovered, dict) else []:
+        if not isinstance(raw, dict):
+            continue
+        symbol = str(raw.get("symbol") or key.rsplit(":", 1)[0])
+        side = str(raw.get("side") or key.rsplit(":", 1)[-1])
+        row_key = f"{symbol}:{side}"
+        row = rows.setdefault(row_key, {"symbol": symbol, "side": side})
+        for field in ("contracts", "entry_price", "stop_loss", "take_profit", "atr", "regime", "risk_multiplier"):
+            value = raw.get(field)
+            if value not in {None, "", 0, 0.0}:
+                row[field] = value
+        row["source"] = "恢复持仓"
+    return rows
 
 
 def condition_text(item: dict[str, Any]) -> str:
