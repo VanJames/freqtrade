@@ -71,7 +71,9 @@ class PositionManager:
             key = (pos.symbol, pos.side)
             if key in self.trailing:
                 state = self.trailing[key]
-                if self._position_entry_changed(state.entry_price, pos.entry_price):
+                if not state.active and (
+                    self._position_entry_changed(state.entry_price, pos.entry_price) or self._state_stop_breached(state, price)
+                ):
                     state = self._recovered_state(pos, price=price, atr_value=atr_value, signal_hint=signal_hints.get(key))
                     self.trailing[key] = state
                     info = self._recovered_info(pos, state, regime)
@@ -92,6 +94,14 @@ class PositionManager:
         if state_entry <= 0:
             return True
         return abs(state_entry - position_entry) / position_entry > 0.001
+
+    @staticmethod
+    def _state_stop_breached(state: TrailingState, price: float) -> bool:
+        if state.stop_loss <= 0 or price <= 0:
+            return False
+        if state.position_side == PositionSide.LONG:
+            return price <= state.stop_loss
+        return price >= state.stop_loss
 
     @staticmethod
     def _recovered_info(pos: Position, state: TrailingState, regime: Regime) -> dict[str, object]:
@@ -280,6 +290,7 @@ class PositionManager:
         take_profit = self._metadata_float(pos.metadata, "take_profit") or self._float_item(signal_hint, "take_profit")
         if stop_loss <= 0:
             stop_loss = self._protective_stop(entry_price, atr_value, pos.side)
+        stop_loss = self._move_breached_stop_outside_market(stop_loss, entry_price, price, atr_value, pos.side)
         return TrailingState(
             symbol=pos.symbol,
             position_side=pos.side,
@@ -301,12 +312,32 @@ class PositionManager:
         )
 
     def _protective_stop(self, entry_price: float, atr_value: float, side: PositionSide) -> float:
-        min_distance = entry_price * self.min_stop_loss_pct
-        max_distance = entry_price * self.max_stop_loss_pct
-        distance = min(max(atr_value * 1.5, min_distance), max_distance)
+        distance = self._protective_distance(entry_price, atr_value)
         if side == PositionSide.LONG:
             return entry_price - distance
         return entry_price + distance
+
+    def _move_breached_stop_outside_market(
+        self,
+        stop_loss: float,
+        entry_price: float,
+        price: float,
+        atr_value: float,
+        side: PositionSide,
+    ) -> float:
+        if price <= 0:
+            return stop_loss
+        distance = self._protective_distance(entry_price, atr_value)
+        if side == PositionSide.LONG and stop_loss >= price:
+            return price - distance
+        if side == PositionSide.SHORT and stop_loss <= price:
+            return price + distance
+        return stop_loss
+
+    def _protective_distance(self, entry_price: float, atr_value: float) -> float:
+        min_distance = entry_price * self.min_stop_loss_pct
+        max_distance = entry_price * self.max_stop_loss_pct
+        return min(max(atr_value * 1.5, min_distance), max_distance)
 
     @staticmethod
     def _metadata_float(metadata: dict[str, object], key: str, fallback: float = 0.0) -> float:
