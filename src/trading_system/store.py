@@ -53,6 +53,15 @@ runtime_settings = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+exchange_sessions = Table(
+    "exchange_sessions",
+    metadata,
+    Column("exchange_id", String(32), primary_key=True),
+    Column("account_key", String(64), primary_key=True),
+    Column("session_data", Text, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
 
 class StateStore:
     def __init__(self, dsn: str) -> None:

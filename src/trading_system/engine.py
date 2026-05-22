@@ -11,6 +11,7 @@ from trading_system.config import Settings
 from trading_system.execution import ExecutionEngine
 from trading_system.exchange import CcxtOkxExchange, DryRunExchange, ExchangeClient
 from trading_system.foresight import ForesightProvider
+from trading_system.hotcoin import HotcoinExchange
 from trading_system.models import HedgeLock, OrderResult, PositionSide, Regime, SignalType, TradeSignal
 from trading_system.llm_regime import LLMRegimeReviewer, RegimeReviewInput
 from trading_system.portfolio import AlphaFilter, GridPlanner
@@ -32,6 +33,17 @@ TRANSIENT_ENTRY_SUMMARIES = {
 }
 
 
+def build_exchange(settings: Settings) -> ExchangeClient:
+    if settings.dry_run:
+        return DryRunExchange(settings.symbols)
+    exchange_id = settings.exchange_id.lower().strip()
+    if exchange_id == "hotcoin":
+        return HotcoinExchange(settings)
+    if exchange_id != "okx":
+        raise ValueError(f"unsupported exchange_id={settings.exchange_id!r}; expected okx or hotcoin")
+    return CcxtOkxExchange(settings.okx_config())
+
+
 class OKXQuantEngine:
     def __init__(
         self,
@@ -42,9 +54,7 @@ class OKXQuantEngine:
         foresight: ForesightProvider | None = None,
     ) -> None:
         self.settings = settings
-        self.exchange = exchange or (
-            DryRunExchange(settings.symbols) if settings.dry_run else CcxtOkxExchange(settings.okx_config())
-        )
+        self.exchange = exchange or build_exchange(settings)
         self.store = store
         self.cache = cache
         self.foresight = foresight or ForesightProvider()

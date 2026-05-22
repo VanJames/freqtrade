@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     okx_secret: str = ""
     okx_password: str = ""
     okx_demo: bool = True
+    exchange_id: str = "okx"
+    hotcoin_base_url: str = "https://bi.hotcoins.cn"
+    hotcoin_device_id: str = "P_qWAfKXrQ5xBBUlEAUReGmPALdmrgafYJ"
     dry_run: bool = True
     symbols: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XAU/USDT:USDT"]

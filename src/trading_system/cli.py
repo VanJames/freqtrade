@@ -34,9 +34,14 @@ def run(
     settings = Settings(dry_run=dry_run)
     store = StateStore(settings.postgres_dsn) if with_store else None
     cache = StateCache(settings.redis_url) if with_redis else None
-    engine = OKXQuantEngine(settings, store=store, cache=cache)
 
     async def main() -> None:
+        if store:
+            runtime_values = await store.load_runtime_settings()
+            selected_exchange = runtime_values.get("selected_exchange_id")
+            if selected_exchange in {"okx", "hotcoin"}:
+                settings.exchange_id = selected_exchange
+        engine = OKXQuantEngine(settings, store=store, cache=cache)
         await engine.initialize(init_store=with_store)
         if once:
             await engine.run_once()

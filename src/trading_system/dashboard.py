@@ -4,6 +4,7 @@ import json
 import os
 import hmac
 import hashlib
+import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 from html import escape
@@ -17,6 +18,13 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from trading_system.config import Settings
+from trading_system.hotcoin import (
+    HOTCOIN_SESSION_KEY,
+    HotcoinWebSession,
+    ensure_hotcoin_session_schema,
+    load_hotcoin_session,
+    save_hotcoin_session,
+)
 from trading_system.runtime_config import RUNTIME_FIELDS, runtime_defaults, validate_runtime_config
 
 
@@ -115,6 +123,7 @@ async def ensure_dashboard_schema(conn: asyncpg.Connection) -> None:
         )
         """
     )
+    await ensure_hotcoin_session_schema(conn)
 
 
 async def fetch_dashboard_data() -> dict[str, Any]:
@@ -143,14 +152,22 @@ async def fetch_dashboard_data() -> dict[str, Any]:
         )
         order_count = await conn.fetchval("select count(*) from order_tracks")
         runtime_rows = await conn.fetch("select setting_key, setting_value, updated_at from runtime_settings")
+        exchange_rows = await conn.fetch(
+            "select exchange_id, account_key, session_data, updated_at from exchange_sessions order by updated_at desc"
+        )
     finally:
         await conn.close()
 
+    runtime_values = {
+        str(row["setting_key"]): str(row["setting_value"])
+        for row in runtime_rows
+    }
     runtime_config = defaults | {
         str(row["setting_key"]): str(row["setting_value"])
         for row in runtime_rows
         if str(row["setting_key"]) in defaults
     }
+    selected_exchange = runtime_values.get("selected_exchange_id") or os.getenv("EXCHANGE_ID", settings.exchange_id)
 
     return {
         "now": datetime.now(timezone.utc).isoformat(),
@@ -158,6 +175,8 @@ async def fetch_dashboard_data() -> dict[str, Any]:
         "mode": {
             "dry_run": os.getenv("DRY_RUN", ""),
             "okx_demo": os.getenv("OKX_DEMO", ""),
+            "exchange_id": os.getenv("EXCHANGE_ID", settings.exchange_id),
+            "selected_exchange_id": selected_exchange,
             "symbols": os.getenv("SYMBOLS", ""),
             "llm_enabled": os.getenv("LLM_REGIME_REVIEW_ENABLED", ""),
             "llm_provider": os.getenv("LLM_REGIME_PROVIDER", ""),
@@ -169,6 +188,7 @@ async def fetch_dashboard_data() -> dict[str, Any]:
         "orders": [normalize_row(row) for row in orders],
         "order_count": int(order_count or 0),
         "runtime_config": runtime_config,
+        "exchange_sessions": [safe_exchange_session(row) for row in exchange_rows],
         "runtime_fields": [
             {
                 "key": field.key,
@@ -185,6 +205,17 @@ async def fetch_dashboard_data() -> dict[str, Any]:
         ],
         "latest_tuning_report": latest_tuning_report(),
     }
+
+
+def safe_exchange_session(row: asyncpg.Record) -> dict[str, Any]:
+    data = normalize_row(row) or {}
+    session = parse_memory(str(data.get("session_data") or "{}"))
+    if isinstance(session, dict):
+        data["connected"] = bool(session.get("token"))
+        data["token"] = "已保存" if session.get("token") else "未保存"
+        data["device_id"] = session.get("device_id", "")
+    data.pop("session_data", None)
+    return data
 
 
 def normalize_row(row) -> dict[str, Any] | None:
@@ -241,6 +272,82 @@ async def api_update_runtime_config(request: Request, payload: dict[str, Any] = 
     finally:
         await conn.close()
     return JSONResponse({"ok": True, "runtime_config": values})
+
+
+@app.post("/api/exchange/select")
+async def api_select_exchange(request: Request, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    require_dashboard_auth(request)
+    exchange_id = str(payload.get("exchange_id") or "").lower().strip()
+    if exchange_id not in {"okx", "hotcoin"}:
+        raise HTTPException(status_code=400, detail="exchange_id must be okx or hotcoin")
+    conn = await asyncpg.connect(dsn())
+    try:
+        await ensure_dashboard_schema(conn)
+        await conn.execute(
+            """
+            insert into runtime_settings(setting_key, setting_value, updated_at)
+            values('selected_exchange_id', $1, now())
+            on conflict(setting_key)
+            do update set setting_value = excluded.setting_value, updated_at = excluded.updated_at
+            """,
+            exchange_id,
+        )
+    finally:
+        await conn.close()
+    return JSONResponse({"ok": True, "exchange_id": exchange_id, "restart_required": True})
+
+
+@app.post("/api/hotcoin/qr/start")
+async def api_hotcoin_qr_start(request: Request) -> JSONResponse:
+    require_dashboard_auth(request)
+    settings = Settings()
+    client = HotcoinWebSession(
+        base_url=settings.hotcoin_base_url,
+        device_id=settings.hotcoin_device_id,
+        timeout=settings.exchange_request_timeout_seconds,
+    )
+    try:
+        qr = await asyncio.to_thread(client.start_qr_login)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return JSONResponse({"ok": True, "qr_token": qr.token, "image": qr.image_data, "expires_at": qr.expires_at})
+
+
+@app.post("/api/hotcoin/qr/poll")
+async def api_hotcoin_qr_poll(request: Request, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    require_dashboard_auth(request)
+    qr_token = str(payload.get("qr_token") or "").strip()
+    if not qr_token:
+        raise HTTPException(status_code=400, detail="qr_token is required")
+    settings = Settings()
+    client = HotcoinWebSession(
+        base_url=settings.hotcoin_base_url,
+        device_id=settings.hotcoin_device_id,
+        timeout=settings.exchange_request_timeout_seconds,
+    )
+    try:
+        result = await asyncio.to_thread(client.poll_qr_login, qr_token)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if result.get("status") == "connected":
+        await save_hotcoin_session(settings.postgres_dsn, HOTCOIN_SESSION_KEY, result["session"])
+        user = result.get("user") if isinstance(result.get("user"), dict) else {}
+        return JSONResponse({"ok": True, "status": "connected", "user": {"fid": user.get("fid")}})
+    return JSONResponse({"ok": True, "status": result.get("status", "pending"), "message": result.get("message", "")})
+
+
+@app.get("/api/hotcoin/session")
+async def api_hotcoin_session(request: Request) -> JSONResponse:
+    require_dashboard_auth(request)
+    session = await load_hotcoin_session(Settings().postgres_dsn)
+    return JSONResponse(
+        {
+            "ok": True,
+            "connected": bool(session and session.get("token")),
+            "saved_at": session.get("saved_at") if isinstance(session, dict) else None,
+            "device_id": session.get("device_id") if isinstance(session, dict) else "",
+        }
+    )
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -314,6 +421,7 @@ def render_page(data: dict[str, Any]) -> str:
     mode = data["mode"]
     runtime_config = data["runtime_config"]
     runtime_fields = data["runtime_fields"]
+    exchange_sessions = data.get("exchange_sessions", [])
     latest_tuning = data["latest_tuning_report"]
     overview_body = (
         '<section class="grid">'
@@ -332,7 +440,6 @@ def render_page(data: dict[str, Any]) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="10">
   <link rel="icon" href="/favicon.ico" sizes="32x32">
   <title>OKX Quant Dashboard</title>
   <style>
@@ -382,8 +489,11 @@ def render_page(data: dict[str, Any]) -> str:
     button {{ border:1px solid #3c76ff; background:#2258d4; color:white; border-radius:6px; padding:10px 14px; font-weight:700; cursor:pointer; }}
     .ghost-button {{ border-color:var(--line); background:#10131a; color:var(--text); }}
     .actions {{ display:flex; align-items:center; gap:12px; margin-top:14px; }}
+    select {{ width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; background:#10131a; color:var(--text); padding:10px 11px; font-size:14px; }}
+    .qr-box {{ display:grid; grid-template-columns:180px minmax(0,1fr); gap:16px; align-items:start; margin-top:14px; }}
+    .qr-box img {{ display:none; width:180px; height:180px; background:white; border-radius:8px; padding:8px; box-sizing:border-box; }}
     pre {{ overflow:auto; margin:0; font-size:12px; color:#c8d1dc; }}
-    @media (max-width:900px) {{ .grid,.cards,.form-grid,.diag-list {{ grid-template-columns:1fr; }} header {{ flex-direction:column; }} }}
+    @media (max-width:900px) {{ .grid,.cards,.form-grid,.diag-list,.qr-box {{ grid-template-columns:1fr; }} header {{ flex-direction:column; }} }}
   </style>
 </head>
 <body>
@@ -412,6 +522,8 @@ def render_page(data: dict[str, Any]) -> str:
   {collapsible_panel("最近订单", orders_table(orders), "dashboard-panel-orders")}
 
   {collapsible_panel("动态风控配置", runtime_config_form(runtime_fields, runtime_config), "dashboard-panel-runtime")}
+
+  {collapsible_panel("交易所连接", exchange_panel(mode, exchange_sessions), "dashboard-panel-exchange")}
 
   {collapsible_panel("自动调参建议", tuning_report_panel(latest_tuning), "dashboard-panel-tuning")}
 
@@ -451,6 +563,65 @@ def render_page(data: dict[str, Any]) -> str:
       }}
     }});
   }}
+  const exchangeForm = document.getElementById("exchange-select-form");
+  const hotcoinQrButton = document.getElementById("hotcoin-qr-start");
+  let hotcoinQrToken = "";
+  let hotcoinPollTimer = null;
+  if (exchangeForm) {{
+    exchangeForm.addEventListener("submit", async (event) => {{
+      event.preventDefault();
+      const status = document.getElementById("exchange-select-status");
+      const payload = Object.fromEntries(new FormData(exchangeForm).entries());
+      status.textContent = "保存中...";
+      const response = await fetch("/api/exchange/select", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify(payload)
+      }});
+      const data = await response.json().catch(() => ({{detail: "保存失败"}}));
+      status.textContent = response.ok ? "已保存；实盘 app 需要重启才会切换交易所" : (data.detail || "保存失败");
+    }});
+  }}
+  if (hotcoinQrButton) {{
+    hotcoinQrButton.addEventListener("click", async () => {{
+      const status = document.getElementById("hotcoin-login-status");
+      const image = document.getElementById("hotcoin-qr-image");
+      status.textContent = "正在生成二维码...";
+      const response = await fetch("/api/hotcoin/qr/start", {{method: "POST"}});
+      const data = await response.json().catch(() => ({{detail: "二维码生成失败"}}));
+      if (!response.ok) {{
+        status.textContent = data.detail || "二维码生成失败";
+        return;
+      }}
+      hotcoinQrToken = data.qr_token;
+      image.src = data.image;
+      image.style.display = "block";
+      status.textContent = "请用 Hotcoin App 扫码确认";
+      if (hotcoinPollTimer) clearInterval(hotcoinPollTimer);
+      hotcoinPollTimer = setInterval(async () => {{
+        if (!hotcoinQrToken) return;
+        const poll = await fetch("/api/hotcoin/qr/poll", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{qr_token: hotcoinQrToken}})
+        }});
+        const pollData = await poll.json().catch(() => ({{status: "error", message: "轮询失败"}}));
+        if (pollData.status === "connected") {{
+          clearInterval(hotcoinPollTimer);
+          hotcoinQrToken = "";
+          status.textContent = "扫码成功，Hotcoin token 已保存到数据库";
+        }} else if (pollData.status === "error") {{
+          clearInterval(hotcoinPollTimer);
+          status.textContent = pollData.message || "扫码失败";
+        }} else {{
+          status.textContent = "等待扫码确认...";
+        }}
+      }}, 2000);
+    }});
+  }}
+  setInterval(() => {{
+    if (!hotcoinQrToken) window.location.reload();
+  }}, 10000);
 </script>
 </body>
 </html>"""
@@ -857,6 +1028,34 @@ def tuning_report_panel(report: dict[str, Any] | None) -> str:
         '<table style="margin-top:10px"><thead><tr><th>类型</th><th>参数档</th><th>收益</th><th>胜率</th><th>交易次数</th></tr></thead>'
         f"<tbody>{rows}</tbody></table>"
         f'<div class="muted" style="margin-top:10px">{escape(str(report.get("reason") or ""))}</div>'
+    )
+
+
+def exchange_panel(mode: dict[str, Any], sessions: list[dict[str, Any]]) -> str:
+    selected = str(mode.get("selected_exchange_id") or mode.get("exchange_id") or "okx").lower()
+    configured = str(mode.get("exchange_id") or "okx").lower()
+    hotcoin_session = next((item for item in sessions if item.get("exchange_id") == "hotcoin"), None)
+    connected = bool(hotcoin_session and hotcoin_session.get("connected"))
+    updated_at = format_local_time(hotcoin_session.get("updated_at")) if hotcoin_session else "-"
+    okx_selected = " selected" if selected == "okx" else ""
+    hotcoin_selected = " selected" if selected == "hotcoin" else ""
+    return (
+        '<form id="exchange-select-form">'
+        '<div class="form-grid">'
+        '<label><span class="field-title">交易所</span>'
+        f'<select name="exchange_id"><option value="okx"{okx_selected}>OKX</option>'
+        f'<option value="hotcoin"{hotcoin_selected}>Hotcoin</option></select>'
+        '<span class="field-note">保存后会记录到数据库；实盘 app 初始化交易所依赖 EXCHANGE_ID，切换后需要重启 app。</span></label>'
+        f'{dict_table({"当前 app 配置": configured, "网页选择": selected, "Hotcoin 登录": "已连接" if connected else "未连接", "Hotcoin 保存时间": updated_at})}'
+        '</div>'
+        '<div class="actions"><button type="submit">保存交易所选择</button>'
+        '<button id="hotcoin-qr-start" class="ghost-button" type="button">Hotcoin 扫码登录</button>'
+        '<span id="exchange-select-status" class="muted"></span></div>'
+        '<div class="qr-box">'
+        '<img id="hotcoin-qr-image" alt="Hotcoin QR Code">'
+        '<div><div id="hotcoin-login-status" class="muted">选择 Hotcoin 后点击扫码登录；token 只保存到数据库，不会显示在网页。</div></div>'
+        '</div>'
+        '</form>'
     )
 
 
