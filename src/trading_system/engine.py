@@ -1095,22 +1095,31 @@ class OKXQuantEngine:
         snapshot = await self.store.load_latest_snapshot()
         if not snapshot:
             return
+        snapshot_exchange = str(snapshot.get("exchange_id") or "okx")
+        same_exchange = snapshot_exchange == self.settings.exchange_id
         for symbol, value in snapshot.get("regimes", {}).items():
             self.regime_classifier.regimes[symbol] = Regime(value)
-        for side, value in snapshot.get("direction_risk", {}).items():
-            self.risk.direction_risk[PositionSide(side)] = float(value)
-        self.position_manager.restore_trailing_snapshot(snapshot.get("trailing_states", {}))
-        for symbol, signal in snapshot.get("last_signal", {}).items():
-            self.symbol_status.setdefault(symbol, {})["last_signal"] = signal
-        for symbol, order in snapshot.get("last_order", {}).items():
-            self.symbol_status.setdefault(symbol, {})["last_order"] = order
-        for symbol, raw in snapshot.get("hedge_locks", {}).items():
-            self.hedge_locks[symbol] = HedgeLock(
-                symbol=symbol,
-                grid_side=PositionSide(raw["grid_side"]),
-                hedge_side=PositionSide(raw["hedge_side"]),
-                contracts=float(raw["contracts"]),
-                active=bool(raw.get("active", True)),
+        if same_exchange:
+            for side, value in snapshot.get("direction_risk", {}).items():
+                self.risk.direction_risk[PositionSide(side)] = float(value)
+            self.position_manager.restore_trailing_snapshot(snapshot.get("trailing_states", {}))
+            for symbol, signal in snapshot.get("last_signal", {}).items():
+                self.symbol_status.setdefault(symbol, {})["last_signal"] = signal
+            for symbol, order in snapshot.get("last_order", {}).items():
+                self.symbol_status.setdefault(symbol, {})["last_order"] = order
+            for symbol, raw in snapshot.get("hedge_locks", {}).items():
+                self.hedge_locks[symbol] = HedgeLock(
+                    symbol=symbol,
+                    grid_side=PositionSide(raw["grid_side"]),
+                    hedge_side=PositionSide(raw["hedge_side"]),
+                    contracts=float(raw["contracts"]),
+                    active=bool(raw.get("active", True)),
+                )
+        else:
+            logger.info(
+                "skipped position state restore from different exchange snapshot=%s current=%s",
+                snapshot_exchange,
+                self.settings.exchange_id,
             )
         logger.info("restored latest account snapshot")
 

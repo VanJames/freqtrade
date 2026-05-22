@@ -70,23 +70,42 @@ class PositionManager:
                 continue
             key = (pos.symbol, pos.side)
             if key in self.trailing:
+                state = self.trailing[key]
+                if self._position_entry_changed(state.entry_price, pos.entry_price):
+                    state = self._recovered_state(pos, price=price, atr_value=atr_value, signal_hint=signal_hints.get(key))
+                    self.trailing[key] = state
+                    info = self._recovered_info(pos, state, regime)
+                    self.recovered_positions[key] = info
+                    recovered.append(info)
                 continue
             state = self._recovered_state(pos, price=price, atr_value=atr_value, signal_hint=signal_hints.get(key))
             self.trailing[key] = state
-            info = {
-                "symbol": pos.symbol,
-                "side": pos.side.value,
-                "contracts": pos.contracts,
-                "entry_price": pos.entry_price,
-                "stop_loss": state.stop_loss,
-                "take_profit": state.take_profit,
-                "atr": state.atr,
-                "regime": regime.value,
-                "risk_multiplier": state.risk_multiplier,
-            }
+            info = self._recovered_info(pos, state, regime)
             self.recovered_positions[key] = info
             recovered.append(info)
         return recovered
+
+    @staticmethod
+    def _position_entry_changed(state_entry: float, position_entry: float) -> bool:
+        if position_entry <= 0:
+            return False
+        if state_entry <= 0:
+            return True
+        return abs(state_entry - position_entry) / position_entry > 0.001
+
+    @staticmethod
+    def _recovered_info(pos: Position, state: TrailingState, regime: Regime) -> dict[str, object]:
+        return {
+            "symbol": pos.symbol,
+            "side": pos.side.value,
+            "contracts": pos.contracts,
+            "entry_price": pos.entry_price,
+            "stop_loss": state.stop_loss,
+            "take_profit": state.take_profit,
+            "atr": state.atr,
+            "regime": regime.value,
+            "risk_multiplier": state.risk_multiplier,
+        }
 
     def exit_signals(
         self,
