@@ -11,6 +11,7 @@ from trading_system.engine import OKXQuantEngine
 from trading_system.logging import configure_logging
 from trading_system.cache import StateCache
 from trading_system.backtest import BacktestConfig, OKXBacktester
+from trading_system.runtime_config import apply_runtime_config
 from trading_system.store import StateStore
 from trading_system.tuner import (
     RuntimeTuningCandidate,
@@ -21,6 +22,20 @@ from trading_system.tuner import (
 )
 
 app = typer.Typer(no_args_is_help=True)
+
+
+async def settings_with_runtime_overrides(settings: Settings) -> Settings:
+    store = StateStore(settings.postgres_dsn, settings.exchange_id)
+    try:
+        runtime_values = await store.load_runtime_settings()
+    finally:
+        await store.close()
+    if runtime_values:
+        apply_runtime_config(settings, runtime_values)
+        selected_exchange = runtime_values.get("selected_exchange_id")
+        if selected_exchange in {"okx", "hotcoin"}:
+            settings.exchange_id = selected_exchange
+    return settings
 
 
 @app.command()
@@ -233,7 +248,7 @@ def tune_runtime(
     ),
 ) -> None:
     configure_logging(logging.INFO)
-    settings = Settings()
+    settings = asyncio.run(settings_with_runtime_overrides(Settings()))
     selected_symbols = [item.strip() for item in symbols.split(",") if item.strip()] if symbols else settings.symbols
     base = build_backtest_config_from_settings(
         settings=settings,
@@ -274,20 +289,23 @@ def tune_runtime_loop(
     once: bool = typer.Option(False, help="Run one loop cycle and exit."),
 ) -> None:
     configure_logging(logging.INFO)
-    settings = Settings()
-    selected_symbols = [item.strip() for item in symbols.split(",") if item.strip()] if symbols else settings.symbols
-    base = build_backtest_config_from_settings(
-        settings=settings,
-        days=days,
-        symbols=selected_symbols,
-        initial_equity=initial_equity,
-        confirmation_position_sizing=True,
-        llm_review=llm_review,
-        llm_max_calls=llm_max_calls,
-    )
+
+    async def base_factory() -> BacktestConfig:
+        settings = await settings_with_runtime_overrides(Settings())
+        selected_symbols = [item.strip() for item in symbols.split(",") if item.strip()] if symbols else settings.symbols
+        return build_backtest_config_from_settings(
+            settings=settings,
+            days=days,
+            symbols=selected_symbols,
+            initial_equity=initial_equity,
+            confirmation_position_sizing=True,
+            llm_review=llm_review,
+            llm_max_calls=llm_max_calls,
+        )
+
     asyncio.run(
         run_runtime_tuning_loop(
-            base,
+            base_factory,
             interval_seconds=max(1, int(interval_hours * 3600)),
             llm_propose=llm_propose,
             max_iterations=max_iterations,

@@ -39,13 +39,15 @@ services:
 
   runtime-tuner:
     build: .
+    environment:
+      POSTGRES_DSN: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/trading
     command:
       [
         "tune-runtime-loop",
         "--days",
         "${TUNER_DAYS:-30}",
         "--interval-hours",
-        "${TUNER_INTERVAL_HOURS:-48}",
+        "${TUNER_INTERVAL_HOURS:-24}",
         "--max-iterations",
         "${TUNER_MAX_ITERATIONS:-1}",
         "--min-improvement-score",
@@ -53,6 +55,9 @@ services:
       ]
     secrets:
       - app_env
+    depends_on:
+      init-db:
+        condition: service_completed_successfully
     volumes:
       - ./reports:/app/reports
       - ohlcv_cache:/app/.cache/okx_ohlcv

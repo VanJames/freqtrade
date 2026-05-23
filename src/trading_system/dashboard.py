@@ -573,13 +573,21 @@ def render_page(data: dict[str, Any]) -> str:
     price_above_ema20_5m:"价格站上 5m EMA20", price_below_ema20_5m:"价格压在 5m EMA20 下方", price_above_ema20_1h:"价格站上 1h EMA20",
     price_below_ema20_1h:"价格压在 1h EMA20 下方", ema_slope_up:"5m EMA20 斜率向上", ema_slope_down:"5m EMA20 斜率向下",
     rsi_40_66:"5m RSI 在 40-66", rsi_34_60:"5m RSI 在 34-60", rsi_42_66:"5m RSI 在 42-66", rsi_35_58:"5m RSI 在 35-58",
-    range_position_not_chasing:"72h 区间位置未追高", range_position_short_room:"72h 区间还有做空空间", down_momentum:"短线下跌动量达标", sol_filter:"SOL 专属过滤通过"
+    range_position_not_chasing:"72h 区间位置未追高", range_position_short_room:"72h 区间还有做空空间", down_momentum:"短线下跌动量达标",
+    low_range_rebound:"低位追空保护通过", sol_filter:"SOL 专属过滤通过"
   };
   const actionLabels = { none:"不下单", data_wait:"等待数据", engine_started:"引擎已启动", live_5m_wait:"等待 5m 行情", refresh_higher_timeframes:"刷新 1h/4h 行情", fetch_positions:"读取持仓", symbol_loop_error:"品种循环报错", llm_review:"LLM 复核", shock_long:"震荡逢低做多", shock_short:"震荡逢高做空", trend_long:"单边上涨回调做多", trend_short:"单边下跌反弹做空", shock_trend_up:"震荡上行回调做多", shock_trend_down:"震荡下行反弹做空" };
   const summaryLabels = { waiting_for_conditions:"等待条件", waiting_live_check:"等待检查", waiting_market_data:"等待行情", waiting_positions:"等待持仓", waiting_llm_review:"等待LLM", entry_conditions_met:"条件满足", signal_ready:"信号已触发", release_hedge_signal_ready:"解锁信号", exit_signal_ready:"退出信号", risk_rejected:"风控拒单", order_submitted:"已提交订单", llm_rejected:"LLM 拒绝", symbol_loop_error:"循环异常" };
   const metricLabels = { price:"价格", rsi_5m:"RSI", opportunity_score:"评分", min_score:"最低分", close_position_72h:"72h位置", ret_24h:"24h涨跌", ret_72h:"72h涨跌", volatility_tier:"波动级别" };
 
   function value(v, fallback) { return v === undefined || v === null || v === "" ? (fallback || "-") : v; }
+  function boolEnabled(v) {
+    if (v === true) return true;
+    if (v === false || v === null || v === undefined || v === "") return false;
+    if (typeof v === "number") return v > 0;
+    const normalized = String(v).trim().toLowerCase();
+    return ["1", "1.0", "true", "on", "yes"].indexOf(normalized) >= 0;
+  }
   function snapshot(data) { return data.latest_snapshot || {}; }
   function memory(data) {
     const raw = snapshot(data).serialized_memory;
@@ -773,7 +781,7 @@ def render_page(data: dict[str, Any]) -> str:
     }
     return e(Panel, { title:"动态风控配置" }, e("form", { onSubmit:submit },
       e("div", { className:"form-grid" }, (data.runtime_fields || []).map((field) => {
-        const checked = ["1","true","True",true,1].indexOf(form[field.key]) >= 0;
+        const checked = boolEnabled(form[field.key]);
         if (field.boolean) return e("label", { className:"field switch-row", key:field.key }, e("span", null, e("span", { className:"field-title" }, field.label), e("div", { className:"field-note" }, field.description || "")), e("input", { type:"checkbox", checked, onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.checked ? "1" : "0" })) }));
         return e("label", { className:"field", key:field.key }, e("span", { className:"field-title" }, field.label), e("input", { type:field.text ? "text" : "number", min:field.min, max:field.max, step:field.step || "any", value:value(form[field.key], ""), onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.value })) }), e("span", { className:"field-note" }, field.description || ""));
       })),
@@ -1200,6 +1208,7 @@ def condition_label(code: str) -> str:
         "range_position_not_chasing": "72h 区间位置未追高",
         "range_position_short_room": "72h 区间还有做空空间",
         "down_momentum": "短线下跌动量达标",
+        "low_range_rebound": "低位追空保护通过",
         "sol_filter": "SOL 专属过滤通过",
     }
     if code.endswith("_timeout"):

@@ -388,6 +388,15 @@ class StrategyEngine:
                 if symbol.startswith("SOL/")
                 else True
             )
+            low_range_short = features.close_position_72h < 0.35
+            rebound_ready = (
+                not low_range_short
+                or (
+                    last_rsi >= 45
+                    and price >= ema_now * 0.998
+                    and self._timeframe_aligned(self._aggregate_bars(df, 3), PositionSide.SHORT, min_bars=12)
+                )
+            )
             opportunity = score_opportunity(
                 symbol=symbol,
                 regime=regime,
@@ -406,6 +415,7 @@ class StrategyEngine:
                     "rsi_quality": rsi_quality,
                     "not_chasing": last_rsi >= 24,
                     "range_position": range_ok,
+                    "low_range_rebound": rebound_ready,
                 },
                 penalties={
                     "directional_conflict": self._directional_breakout_active(features)
@@ -435,6 +445,7 @@ class StrategyEngine:
                     {"code": "rsi_35_58", "passed": rsi_quality, "value": round(last_rsi, 2)},
                     {"code": "range_position_short_room", "passed": range_ok, "value": round(features.close_position_72h, 4)},
                     {"code": "down_momentum", "passed": momentum_ok, "value": round(features.ret_24h, 5)},
+                    {"code": "low_range_rebound", "passed": rebound_ready, "value": round(features.close_position_72h, 4)},
                     {"code": "sol_filter", "passed": sol_allowed},
                 ],
                 {

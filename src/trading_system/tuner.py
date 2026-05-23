@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Callable, Iterable
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Awaitable, NotRequired, TypedDict
 
 import ccxt
 from pydantic import BaseModel, Field
@@ -78,34 +78,41 @@ class LLMParameterProposal(BaseModel):
 
 
 def runtime_tuning_candidates(base: BacktestConfig) -> list[RuntimeTuningCandidate]:
-    current = RuntimeTuningCandidate("current", "当前实盘参数快照，不修改风险上限。", base)
-    conservative = RuntimeTuningCandidate(
-        "conservative_2x",
-        "温和动态仓位：只把高确认信号放大到 2x，适合先观察实盘稳定性。",
-        replace(
-            base,
-            confirmation_position_sizing=True,
-            max_signal_risk_multiplier=2.0,
-            confirmation_max_risk_multiplier=max(base.confirmation_max_risk_multiplier, 2.0),
-            same_direction_risk_limit=max(base.same_direction_risk_limit, 0.04),
-            shock_leverage_limit=max(base.shock_leverage_limit, 3.0),
-            trend_symbol_leverage_limit=max(base.trend_symbol_leverage_limit, 5.0),
+    candidate_specs = [
+        (
+            "current",
+            "当前实盘参数快照，不修改风险上限。",
+            base.max_signal_risk_multiplier,
+            base.confirmation_max_risk_multiplier,
+            base.same_direction_risk_limit,
         ),
-    )
-    balanced = RuntimeTuningCandidate(
-        "balanced_3x",
-        "均衡动态仓位：高确认信号最高 3x，同方向风险提高到 6%。",
-        replace(
-            base,
-            confirmation_position_sizing=True,
-            max_signal_risk_multiplier=3.0,
-            confirmation_max_risk_multiplier=max(base.confirmation_max_risk_multiplier, 3.0),
-            same_direction_risk_limit=max(base.same_direction_risk_limit, 0.06),
-            shock_leverage_limit=max(base.shock_leverage_limit, 3.0),
-            trend_symbol_leverage_limit=max(base.trend_symbol_leverage_limit, 5.0),
-        ),
-    )
-    candidates = [current, conservative, balanced]
+        ("conservative_2x", "温和动态仓位：高确认信号最高 2x，同方向风险提高到 4%。", 2.0, 2.0, 0.04),
+        ("balanced_3x", "均衡动态仓位：高确认信号最高 3x，同方向风险提高到 6%。", 3.0, 3.0, 0.06),
+        ("growth_4x", "增长动态仓位：高确认信号最高 4x，同方向风险提高到 8%。", 4.0, 4.0, 0.08),
+        ("aggressive_5x", "进攻动态仓位：高确认信号最高 5x，同方向风险提高到 10%。", 5.0, 5.0, 0.10),
+        ("wide_3x", "更宽同向风险：高确认信号最高 3x，同方向风险提高到 10%。", 3.0, 3.0, 0.10),
+        ("focused_4x", "更集中单信号：高确认信号最高 4x，同方向风险保持 6%。", 4.0, 4.0, 0.06),
+    ]
+    candidates = [
+        RuntimeTuningCandidate(
+            name,
+            description,
+            replace(
+                base,
+                confirmation_position_sizing=True,
+                max_signal_risk_multiplier=max(base.max_signal_risk_multiplier, max_signal_risk_multiplier),
+                confirmation_max_risk_multiplier=max(
+                    base.confirmation_max_risk_multiplier,
+                    confirmation_max_risk_multiplier,
+                ),
+                same_direction_risk_limit=max(base.same_direction_risk_limit, same_direction_risk_limit),
+                shock_leverage_limit=max(base.shock_leverage_limit, 3.0),
+                trend_symbol_leverage_limit=max(base.trend_symbol_leverage_limit, 5.0),
+            ),
+        )
+        for name, description, max_signal_risk_multiplier, confirmation_max_risk_multiplier, same_direction_risk_limit
+        in candidate_specs
+    ]
     unique: dict[tuple[tuple[str, float | bool], ...], RuntimeTuningCandidate] = {}
     for candidate in candidates:
         unique.setdefault(tuple(sorted(candidate.params.items())), candidate)
@@ -225,8 +232,11 @@ def run_runtime_tuning(
     return results, report_path
 
 
+RuntimeBaseFactory = Callable[[], BacktestConfig | Awaitable[BacktestConfig]]
+
+
 async def run_runtime_tuning_loop(
-    base: BacktestConfig,
+    base: BacktestConfig | RuntimeBaseFactory,
     interval_seconds: int,
     llm_propose: bool = False,
     max_iterations: int = 1,
@@ -235,12 +245,13 @@ async def run_runtime_tuning_loop(
     once: bool = False,
 ) -> None:
     while True:
-        candidates = runtime_tuning_candidates(base)
+        cycle_base = await resolve_runtime_base(base)
+        candidates = runtime_tuning_candidates(cycle_base)
         results, _ = await run_tuning_agent_once(candidates, progress=progress)
         iteration = 1
         while llm_propose and iteration < max(1, max_iterations) and not has_clear_improvement(results, min_improvement_score):
             try:
-                proposals = propose_llm_candidates(base, results)
+                proposals = propose_llm_candidates(cycle_base, results)
             except Exception as exc:
                 if progress:
                     progress(f"llm proposal skipped: {type(exc).__name__}")
@@ -251,7 +262,7 @@ async def run_runtime_tuning_loop(
             candidates = dedupe_candidates(
                 [
                     *candidates,
-                    *(candidate_from_llm_proposal(base, item) for item in proposals),
+                    *(candidate_from_llm_proposal(cycle_base, item) for item in proposals),
                 ]
             )
             if progress:
@@ -260,6 +271,15 @@ async def run_runtime_tuning_loop(
         if once:
             return
         await asyncio.sleep(interval_seconds)
+
+
+async def resolve_runtime_base(base: BacktestConfig | RuntimeBaseFactory) -> BacktestConfig:
+    if isinstance(base, BacktestConfig):
+        return base
+    value = base()
+    if hasattr(value, "__await__"):
+        return await value  # type: ignore[no-any-return]
+    return value
 
 
 async def run_tuning_agent_once(

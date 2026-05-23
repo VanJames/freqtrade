@@ -96,6 +96,40 @@ def test_entry_diagnostics_reports_missing_conditions_for_trend_long() -> None:
     assert any(item["code"] == "macd_cross_up" for item in diagnostics["blockers"])
 
 
+def test_shock_trend_down_diagnostics_reports_low_range_rebound_gate() -> None:
+    engine = StrategyEngine()
+    candles = []
+    price = 104.0
+    for i in range(60):
+        open_price = price
+        close_price = price - 0.12
+        candles.append([i * 300000, open_price, open_price + 0.03, close_price - 0.03, close_price, 1.0])
+        price = close_price
+    features = MarketFeatures(
+        atr_1h=1.0,
+        close_1h=100.0,
+        ema20_1h=101.0,
+        ema60_1h=102.0,
+        range_high_4h=110.0,
+        range_low_4h=95.0,
+        previous_1h_low=98.0,
+        previous_1h_high=102.0,
+        current_4h_low=96.0,
+        current_4h_high=104.0,
+        last_4h_close=99.0,
+        prev_4h_close=100.0,
+        close_position_72h=0.09,
+        ret_24h=-0.02,
+        ret_72h=-0.01,
+    )
+
+    diagnostics = engine.entry_diagnostics("BTC/USDT:USDT", Regime.SHOCK_TREND_DOWN, features, candles, [])
+
+    assert diagnostics["action"] == "shock_trend_down"
+    assert diagnostics["summary"] == "waiting_for_conditions"
+    assert any(item["code"] == "low_range_rebound" for item in diagnostics["blockers"])
+
+
 def test_liquidity_sweep_reversal_detects_downside_reclaim() -> None:
     engine = StrategyEngine(enable_liquidity_sweep_reversal=True, max_stop_loss_pct=0.015)
     candles = []
