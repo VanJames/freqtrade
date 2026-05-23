@@ -53,7 +53,7 @@ class RecordingExchange(ExchangeClient):
     async def fetch_balance_equity(self) -> float:
         return 1000.0
 
-    async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
+    async def fetch_positions(self, symbol: str | None = None, *, refresh: bool = False) -> list[Position]:
         return []
 
     async def fetch_funding_rate(self, symbol: str) -> float:

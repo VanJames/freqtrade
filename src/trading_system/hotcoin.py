@@ -351,7 +351,10 @@ class HotcoinExchange(ExchangeClient):
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.public_data = CcxtOkxExchange({"enableRateLimit": True, "options": {"defaultType": "swap"}})
+        self.public_data = CcxtOkxExchange(
+            {"enableRateLimit": True, "options": {"defaultType": "swap"}},
+            positions_cache_ttl_seconds=settings.positions_cache_ttl_seconds,
+        )
         self.client = HotcoinWebSession(
             base_url=settings.hotcoin_base_url,
             device_id=settings.hotcoin_device_id,
@@ -450,7 +453,7 @@ class HotcoinExchange(ExchangeClient):
 
     async def close_all_positions(self) -> list[OrderResult]:
         results: list[OrderResult] = []
-        for position in await self.fetch_positions():
+        for position in await self.fetch_positions(refresh=True):
             order = await self.close_position(position)
             if order:
                 results.append(order)
@@ -463,7 +466,7 @@ class HotcoinExchange(ExchangeClient):
             return 0.0
         return self._float_value(data.get("totalAccountRights"), data.get("totalMarginBalance"), data.get("equity"), 0.0)
 
-    async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
+    async def fetch_positions(self, symbol: str | None = None, *, refresh: bool = False) -> list[Position]:
         rows = await asyncio.to_thread(self.client.get_positions, symbol)
         return [self._parse_position(row) for row in rows if isinstance(row, dict) and self._position_amount(row) > 0]
 

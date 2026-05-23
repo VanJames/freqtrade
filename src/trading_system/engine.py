@@ -41,7 +41,7 @@ def build_exchange(settings: Settings) -> ExchangeClient:
         return HotcoinExchange(settings)
     if exchange_id != "okx":
         raise ValueError(f"unsupported exchange_id={settings.exchange_id!r}; expected okx or hotcoin")
-    return CcxtOkxExchange(settings.okx_config())
+    return CcxtOkxExchange(settings.okx_config(), positions_cache_ttl_seconds=settings.positions_cache_ttl_seconds)
 
 
 class OKXQuantEngine:
@@ -372,7 +372,7 @@ class OKXQuantEngine:
         positions = await self._await_exchange_step(
             symbol,
             "fetch_positions",
-            self.exchange.fetch_positions(symbol),
+            self.exchange.fetch_positions(symbol, refresh=True),
             self.settings.exchange_request_timeout_seconds,
         )
         recovered_positions = self.position_manager.recover_missing_states(
@@ -612,7 +612,7 @@ class OKXQuantEngine:
             positions = await self._await_exchange_step(
                 symbol,
                 "monitor_fetch_positions",
-                self.exchange.fetch_positions(symbol),
+                self.exchange.fetch_positions(symbol, refresh=True),
                 self.settings.exchange_request_timeout_seconds,
             )
             if not positions:
@@ -952,6 +952,7 @@ class OKXQuantEngine:
                 "confirmation_position_sizing": self.settings.confirmation_position_sizing,
                 "confirmation_max_risk_multiplier": self.settings.confirmation_max_risk_multiplier,
                 "position_monitor_interval_seconds": self.settings.position_monitor_interval_seconds,
+                "positions_cache_ttl_seconds": self.settings.positions_cache_ttl_seconds,
                 "llm_regime_review_enabled": self.settings.llm_regime_review_enabled,
                 "llm_regime_provider": self.settings.llm_regime_provider,
                 "llm_regime_model": self.settings.llm_regime_model,

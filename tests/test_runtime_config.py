@@ -50,3 +50,11 @@ def test_runtime_config_applies_position_monitor_interval() -> None:
     apply_runtime_config(settings, {"position_monitor_interval_seconds": "1.5"})
 
     assert settings.position_monitor_interval_seconds == 1.5
+
+
+def test_runtime_config_applies_positions_cache_ttl() -> None:
+    settings = Settings(dry_run=True)
+
+    apply_runtime_config(settings, {"positions_cache_ttl_seconds": "1.0"})
+
+    assert settings.positions_cache_ttl_seconds == 1.0

@@ -136,6 +136,15 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
         description="移动止盈/止损独立监控循环的检查间隔。越小越及时，但 OKX 请求更频繁。",
     ),
     RuntimeField(
+        "positions_cache_ttl_seconds",
+        "持仓缓存秒数",
+        2.0,
+        0.0,
+        30.0,
+        0.5,
+        description="普通持仓查询的缓存时间。持仓止损/移动止盈监控会强制刷新，不受该缓存影响。",
+    ),
+    RuntimeField(
         "llm_regime_review_enabled",
         "启用 LLM 行情复核",
         0.0,

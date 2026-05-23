@@ -62,7 +62,7 @@ class ExchangeClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
+    async def fetch_positions(self, symbol: str | None = None, *, refresh: bool = False) -> list[Position]:
         raise NotImplementedError
 
     @abstractmethod
@@ -178,7 +178,7 @@ class DryRunExchange(ExchangeClient):
     async def fetch_balance_equity(self) -> float:
         return self.equity
 
-    async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
+    async def fetch_positions(self, symbol: str | None = None, *, refresh: bool = False) -> list[Position]:
         if symbol is None:
             return list(self.positions)
         return [pos for pos in self.positions if pos.symbol == symbol]
@@ -194,12 +194,12 @@ class DryRunExchange(ExchangeClient):
 
 
 class CcxtOkxExchange(ExchangeClient):
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any], *, positions_cache_ttl_seconds: float = 2.0) -> None:
         self.config = config
         self.exchange: Any | None = None
         self._positions_cache: tuple[float, list[Position]] | None = None
         self._positions_lock = asyncio.Lock()
-        self._positions_cache_ttl_seconds = 10.0
+        self._positions_cache_ttl_seconds = max(0.0, float(positions_cache_ttl_seconds))
 
     async def initialize(self) -> None:
         import ccxt.pro as ccxtpro
@@ -287,7 +287,7 @@ class CcxtOkxExchange(ExchangeClient):
 
     async def close_all_positions(self) -> list[OrderResult]:
         results: list[OrderResult] = []
-        for position in await self.fetch_positions():
+        for position in await self.fetch_positions(refresh=True):
             order = await self.close_position(position)
             if order:
                 results.append(order)
@@ -301,10 +301,14 @@ class CcxtOkxExchange(ExchangeClient):
             return float(details[0].get("eq") or details[0].get("cashBal") or 0.0)
         return float(balance.get("USDT", {}).get("total") or 0.0)
 
-    async def fetch_positions(self, symbol: str | None = None) -> list[Position]:
+    async def fetch_positions(self, symbol: str | None = None, *, refresh: bool = False) -> list[Position]:
         now = time.monotonic()
         async with self._positions_lock:
-            if self._positions_cache and now - self._positions_cache[0] <= self._positions_cache_ttl_seconds:
+            if (
+                not refresh
+                and self._positions_cache
+                and now - self._positions_cache[0] <= self._positions_cache_ttl_seconds
+            ):
                 return self._filter_positions(self._positions_cache[1], symbol)
             raw_positions = await self.api.fetch_positions()
             positions = self._parse_positions(raw_positions)
