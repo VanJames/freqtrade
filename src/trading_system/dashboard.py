@@ -502,6 +502,18 @@ def render_page(data: dict[str, Any]) -> str:
     .diag-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:8px; }
     .diag-title { font-weight:800; overflow-wrap:anywhere; }
     .diag-action { color:var(--muted); font-size:12px; margin-top:2px; }
+    .diag-progress { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 10px; }
+    .condition-group { margin-top:10px; }
+    .condition-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:12px; font-weight:800; }
+    .condition-list { list-style:none; margin:7px 0 0; padding:0; display:grid; gap:6px; color:#dce4ee; font-size:13px; line-height:1.45; }
+    .condition-item { display:grid; grid-template-columns:18px minmax(0,1fr); gap:7px; align-items:start; border:1px solid rgba(255,255,255,.06); border-radius:8px; padding:8px; background:#10151f; }
+    .condition-item.good { border-color:rgba(51,209,122,.22); }
+    .condition-item.wait { border-color:rgba(247,201,72,.28); background:#14181e; }
+    .condition-icon { width:18px; height:18px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:12px; font-weight:900; }
+    .condition-item.good .condition-icon { color:#07120d; background:var(--good); }
+    .condition-item.wait .condition-icon { color:#141006; background:var(--warn); }
+    .condition-main { overflow-wrap:anywhere; }
+    .condition-hint { margin-top:3px; color:var(--muted); font-size:12px; }
     .blockers { margin:8px 0 0; padding-left:18px; color:#dce4ee; font-size:13px; line-height:1.55; }
     .metric-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
     .form-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
@@ -636,6 +648,39 @@ def render_page(data: dict[str, Any]) -> str:
     if (!item || item.value === undefined) return label;
     return label + "，当前值 " + formatNumber(item.value, 4);
   }
+  function conditionHint(item, metrics) {
+    const code = String((item && item.code) || "unknown");
+    const passed = !!(item && item.passed);
+    if (code === "opportunity_score") {
+      const minScore = metrics && metrics.min_score !== undefined ? formatNumber(metrics.min_score, 0) : "-";
+      return passed ? "评分达到入场门槛。" : "评分不足，需要达到 " + minScore + " 才允许进入下一步。";
+    }
+    if (code === "rsi_35_58") return passed ? "RSI 位于反弹做空的可接受区间。" : "RSI 低于区间时容易在低位追空，等待反弹修复。";
+    if (code === "rsi_42_66") return passed ? "RSI 位于回调做多的可接受区间。" : "RSI 不在做多确认区间，等待回调或动量修复。";
+    if (code === "range_position_short_room") return passed ? "72h 区间仍有向下空间。" : "价格太靠近 72h 低位，继续追空空间不足。";
+    if (code === "range_position_not_chasing") return passed ? "72h 区间位置没有明显追高。" : "价格太靠近 72h 高位，继续追多风险偏高。";
+    if (code === "low_range_rebound") return passed ? "低位追空保护放行。" : "价格处在低位，需要先看到反弹后再转弱。";
+    if (code === "multi_timeframe") return passed ? "5m、15m、1h 方向已经一致。" : "短中周期方向还没有完全一致。";
+    if (code === "pullback_up") return passed ? "已经出现反弹，符合做空等待形态。" : "还没有出现足够反弹，避免直接追空。";
+    if (code === "pullback_down") return passed ? "已经出现回调，符合做多等待形态。" : "还没有出现足够回调，避免直接追多。";
+    if (code === "macd_cross_down") return passed ? "5m MACD 已给出转弱信号。" : "等待 5m MACD 死叉确认。";
+    if (code === "macd_cross_up") return passed ? "5m MACD 已给出转强信号。" : "等待 5m MACD 金叉确认。";
+    if (code === "bearish_candle") return passed ? "当前 5m K 线已转弱。" : "等待当前 5m K 线收成阴线。";
+    if (code === "bullish_candle") return passed ? "当前 5m K 线已转强。" : "等待当前 5m K 线收成阳线。";
+    if (code.indexOf("risk_") === 0) return passed ? "风控允许。" : "风控拒绝，通常是仓位、同向风险或盈亏比不达标。";
+    return passed ? "已满足。" : "未满足，继续等待下一轮检查。";
+  }
+  function ConditionList({ title, items, metrics, kind }) {
+    if (!items.length) return null;
+    const icon = kind === "good" ? "✓" : "!";
+    return e("div", { className:"condition-group" },
+      e("div", { className:"condition-heading" }, e("span", null, title), e("span", null, items.length + " 项")),
+      e("ul", { className:"condition-list" }, items.map((item, idx) => e("li", { className:"condition-item " + kind, key:idx },
+        e("span", { className:"condition-icon" }, icon),
+        e("span", { className:"condition-main" }, conditionText(item), e("div", { className:"condition-hint" }, conditionHint(item, metrics)))
+      )))
+    );
+  }
   function summaryClass(summary) {
     if (["entry_conditions_met","signal_ready","release_hedge_signal_ready","exit_signal_ready","order_submitted"].indexOf(summary) >= 0) return "good";
     if (["risk_rejected","llm_rejected","symbol_loop_error"].indexOf(summary) >= 0) return "bad";
@@ -718,12 +763,21 @@ def render_page(data: dict[str, Any]) -> str:
           e("div", { className:"diag-head" }, e("div", null, e("div", { className:"diag-title" }, symbol), e("div", { className:"diag-action" }, "等待下一轮策略检查")), e("span", { className:"tag warn" }, "暂无数据")),
           e("div", { className:"muted small" }, "引擎还没有写入该品种的入场诊断。通常是 app 尚未重启到新版本，或该品种循环还没跑到行情/仓位检查。")
         );
-        const blockers = Array.isArray(item.blockers) ? item.blockers : [];
+        const requirements = Array.isArray(item.requirements) ? item.requirements : [];
+        const blockers = Array.isArray(item.blockers) ? item.blockers : requirements.filter((req) => !req.passed);
+        const passedItems = requirements.filter((req) => req && req.passed);
         const metrics = item.metrics && typeof item.metrics === "object" ? item.metrics : {};
         const keys = ["price","rsi_5m","opportunity_score","min_score","close_position_72h","ret_24h","ret_72h","volatility_tier"];
+        const total = requirements.length || (passedItems.length + blockers.length);
+        const passedCount = passedItems.length;
         return e("div", { className:"diag-card", key:symbol },
           e("div", { className:"diag-head" }, e("div", null, e("div", { className:"diag-title" }, symbol), e("div", { className:"diag-action" }, actionLabels[item.action] || value(item.action))), e("span", { className:"tag " + summaryClass(item.summary) }, summaryLabels[item.summary] || value(item.summary))),
-          blockers.length ? e("ul", { className:"blockers" }, blockers.map((blocker, idx) => e("li", { key:idx }, conditionText(blocker)))) : e("div", { className:"muted small" }, "当前入场条件已满足，等待风控、交易执行或下一轮检查。"),
+          e("div", { className:"diag-progress" },
+            e("span", { className:"tag " + (blockers.length ? "warn" : "good") }, total ? "条件 " + passedCount + "/" + total : "等待条件数据"),
+            metrics.opportunity_score !== undefined ? e("span", { className:"tag" }, "评分 " + formatNumber(metrics.opportunity_score, 0) + " / " + formatNumber(metrics.min_score, 0)) : null
+          ),
+          blockers.length ? e(ConditionList, { title:"还在等待", items:blockers, metrics, kind:"wait" }) : e("div", { className:"muted small" }, "当前入场条件已满足，等待风控、交易执行或下一轮检查。"),
+          e(ConditionList, { title:"已经满足", items:passedItems, metrics, kind:"good" }),
           e("div", { className:"metric-tags" }, keys.filter((key) => metrics[key] !== undefined).map((key) => e("span", { className:"tag", key:key }, (metricLabels[key] || key) + ": " + formatNumber(metrics[key], 4))))
         );
       }))
