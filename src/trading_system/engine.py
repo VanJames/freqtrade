@@ -112,6 +112,10 @@ class OKXQuantEngine:
         self._diagnostic_log_state: dict[tuple[str, str], tuple[str, float]] = {}
         self._exit_lock = asyncio.Lock()
         self._pending_exit_keys: set[tuple[str, PositionSide]] = set()
+        self._order_guard_lock = asyncio.Lock()
+        self._pending_entry_keys: set[tuple[str, PositionSide]] = set()
+        self._entry_order_cooldowns: dict[tuple[str, PositionSide], float] = {}
+        self._exit_order_cooldowns: dict[tuple[str, PositionSide], float] = {}
         self.position_monitor_status: dict[str, object] = {
             "interval_seconds": settings.position_monitor_interval_seconds,
             "last_checked_at": None,
@@ -475,10 +479,16 @@ class OKXQuantEngine:
 
         for signal in signals:
             exit_key: tuple[str, PositionSide] | None = None
+            entry_key: tuple[str, PositionSide] | None = None
+            order_attempted = False
+            signal_is_entry = signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}
             if signal.signal_type in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
                 exit_key = (signal.symbol, signal.position_side)
                 async with self._exit_lock:
-                    if exit_key in self._pending_exit_keys:
+                    if exit_key in self._pending_exit_keys or self._cooldown_active(
+                        self._exit_order_cooldowns,
+                        exit_key,
+                    ):
                         logger.info(
                             "duplicate exit skipped symbol=%s side=%s reason=%s",
                             signal.symbol,
@@ -487,6 +497,21 @@ class OKXQuantEngine:
                         )
                         continue
                     self._pending_exit_keys.add(exit_key)
+            if signal_is_entry:
+                entry_key = (signal.symbol, signal.position_side)
+                async with self._order_guard_lock:
+                    if entry_key in self._pending_entry_keys or self._cooldown_active(
+                        self._entry_order_cooldowns,
+                        entry_key,
+                    ):
+                        logger.info(
+                            "duplicate entry skipped symbol=%s side=%s reason=%s",
+                            signal.symbol,
+                            signal.position_side.value,
+                            signal.reason,
+                        )
+                        continue
+                    self._pending_entry_keys.add(entry_key)
             try:
                 funding = await self.exchange.fetch_funding_rate(signal.symbol)
                 decision = self.risk.assess(signal, equity, funding)
@@ -525,13 +550,23 @@ class OKXQuantEngine:
                         status["entry_diagnostics"] = diagnostics
                         status["last_completed_entry_diagnostics"] = diagnostics
                     continue
+                if signal_is_entry and await self._has_live_position(signal):
+                    logger.info(
+                        "entry skipped because live position already exists symbol=%s side=%s reason=%s",
+                        signal.symbol,
+                        signal.position_side.value,
+                        signal.reason,
+                    )
+                    continue
                 if signal.signal_type == SignalType.ENTER_GRID:
                     orders = []
                     atr_value = abs(signal.price - signal.stop_loss) / 1.5
                     for price, amount in self.grid_planner.orders_for_signal(signal, decision.size, atr_value):
+                        order_attempted = True
                         orders.append(await self.execution.execute_limit(signal, amount, price))
                     order = orders[0]
                 else:
+                    order_attempted = True
                     order = await self.execution.execute(signal, decision)
                 if signal.signal_type == SignalType.RELEASE_HEDGE:
                     lock = self.hedge_locks.get(signal.symbol)
@@ -591,7 +626,64 @@ class OKXQuantEngine:
             finally:
                 if exit_key is not None:
                     async with self._exit_lock:
+                        if order_attempted:
+                            self._start_cooldown(
+                                self._exit_order_cooldowns,
+                                exit_key,
+                                self.settings.live_exit_order_cooldown_seconds,
+                            )
                         self._pending_exit_keys.discard(exit_key)
+                if entry_key is not None:
+                    async with self._order_guard_lock:
+                        if order_attempted:
+                            self._start_cooldown(
+                                self._entry_order_cooldowns,
+                                entry_key,
+                                self.settings.live_entry_order_cooldown_seconds,
+                            )
+                        self._pending_entry_keys.discard(entry_key)
+
+    async def _has_live_position(self, signal: TradeSignal) -> bool:
+        try:
+            positions = await self._await_exchange_step(
+                signal.symbol,
+                "pre_order_fetch_positions",
+                self.exchange.fetch_positions(signal.symbol, refresh=True),
+                self.settings.exchange_request_timeout_seconds,
+            )
+        except Exception:
+            logger.debug(
+                "pre-order live position check failed symbol=%s side=%s",
+                signal.symbol,
+                signal.position_side.value,
+                exc_info=True,
+            )
+            return False
+        return any(
+            position.side == signal.position_side and abs(position.contracts) > 0
+            for position in positions
+        )
+
+    @staticmethod
+    def _cooldown_active(
+        cooldowns: dict[tuple[str, PositionSide], float],
+        key: tuple[str, PositionSide],
+    ) -> bool:
+        until = cooldowns.get(key)
+        if until is None:
+            return False
+        if time.monotonic() < until:
+            return True
+        cooldowns.pop(key, None)
+        return False
+
+    @staticmethod
+    def _start_cooldown(
+        cooldowns: dict[tuple[str, PositionSide], float],
+        key: tuple[str, PositionSide],
+        seconds: float,
+    ) -> None:
+        cooldowns[key] = time.monotonic() + max(0.0, float(seconds))
 
     async def _position_monitor_loop(self) -> None:
         while self.running and not self.risk.fused():
@@ -953,6 +1045,8 @@ class OKXQuantEngine:
                 "confirmation_max_risk_multiplier": self.settings.confirmation_max_risk_multiplier,
                 "position_monitor_interval_seconds": self.settings.position_monitor_interval_seconds,
                 "positions_cache_ttl_seconds": self.settings.positions_cache_ttl_seconds,
+                "live_entry_order_cooldown_seconds": self.settings.live_entry_order_cooldown_seconds,
+                "live_exit_order_cooldown_seconds": self.settings.live_exit_order_cooldown_seconds,
                 "llm_regime_review_enabled": self.settings.llm_regime_review_enabled,
                 "llm_regime_provider": self.settings.llm_regime_provider,
                 "llm_regime_model": self.settings.llm_regime_model,

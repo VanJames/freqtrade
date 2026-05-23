@@ -14,6 +14,8 @@ from trading_system.tuner import (
     run_tuning_agent_once,
     runtime_tuning_candidates,
     score_runtime_result,
+    walk_forward_stats,
+    write_research_ledger,
     write_runtime_tuning_report,
 )
 from trading_system.config import Settings
@@ -155,6 +157,49 @@ def test_backtest_quality_calculates_drawdown_and_profit_factor() -> None:
     assert round(quality.max_drawdown_pct, 4) == 0.0286
 
 
+def test_walk_forward_stats_splits_last_third_as_validation() -> None:
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    ended_at = datetime(2026, 1, 31, tzinfo=timezone.utc)
+    result = BacktestResult(
+        started_at=started_at,
+        ended_at=ended_at,
+        trades=[
+            SimTrade(
+                symbol="BTC/USDT:USDT",
+                side=PositionSide.LONG,
+                regime=Regime.SHOCK_TREND_UP,
+                entry_time=datetime(2026, 1, 5, tzinfo=timezone.utc),
+                exit_time=datetime(2026, 1, 5, tzinfo=timezone.utc),
+                entry_price=100.0,
+                exit_price=101.0,
+                qty=1.0,
+                pnl=100.0,
+                pnl_pct_equity=0.01,
+                reason="take_profit",
+            ),
+            SimTrade(
+                symbol="BTC/USDT:USDT",
+                side=PositionSide.LONG,
+                regime=Regime.SHOCK_TREND_UP,
+                entry_time=datetime(2026, 1, 25, tzinfo=timezone.utc),
+                exit_time=datetime(2026, 1, 25, tzinfo=timezone.utc),
+                entry_price=100.0,
+                exit_price=99.0,
+                qty=1.0,
+                pnl=-30.0,
+                pnl_pct_equity=-0.003,
+                reason="stop_loss",
+            ),
+        ],
+    )
+
+    stats = walk_forward_stats(result)
+
+    assert stats.train_pnl == 100.0
+    assert stats.validation_pnl == -30.0
+    assert stats.validation_trades == 1
+
+
 def test_build_backtest_config_from_settings_preserves_runtime_values() -> None:
     settings = Settings(
         dry_run=True,
@@ -252,4 +297,22 @@ def test_runtime_tuning_report_includes_live_vs_recommended_diff(tmp_path) -> No
 
     text = report_path.read_text(encoding="utf-8")
     assert "## 实盘参数与推荐参数差异" in text
+    assert "## Walk-forward 验证说明" in text
     assert "| max_signal_risk_multiplier | `1.5` | `3` | `+1.5` |" in text
+
+
+def test_write_research_ledger_appends_jsonl(tmp_path) -> None:
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    ended_at = datetime(2026, 1, 31, tzinfo=timezone.utc)
+    item = RuntimeTuningResult(
+        RuntimeTuningCandidate("current", "current", BacktestConfig(symbols=["BTC/USDT:USDT"], output_dir=tmp_path)),
+        BacktestResult(started_at=started_at, ended_at=ended_at),
+        tmp_path / "current.md",
+        100.0,
+    )
+
+    ledger_path = write_research_ledger([item], tmp_path / "runtime.md", 1779233200000)
+
+    text = ledger_path.read_text(encoding="utf-8")
+    assert '"recommended": "current"' in text
+    assert '"walk_forward"' in text

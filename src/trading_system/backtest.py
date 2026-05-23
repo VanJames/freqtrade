@@ -98,6 +98,11 @@ class SimTrade:
     opportunity_score: int = 0
     opportunity_grade: str = ""
     risk_multiplier: float = 1.0
+    attribution: str = ""
+    attribution_detail: str = ""
+    entry_close_position_72h: float = 0.0
+    entry_ret_24h: float = 0.0
+    entry_ret_72h: float = 0.0
 
 
 @dataclass(slots=True)
@@ -437,7 +442,14 @@ class OKXBacktester:
             risk_multiplier = risk.signal_risk_multiplier(trade_signal)
             qty = decision.size
             risk.reserve_risk(trade_signal.position_side, risk_multiplier)
-            open_position = trade_signal_to_position(trade_signal, qty, now, features["atr_1h"], risk_multiplier)
+            open_position = trade_signal_to_position(
+                trade_signal,
+                qty,
+                now,
+                features["atr_1h"],
+                risk_multiplier,
+                features,
+            )
 
         if open_position:
             now = df5.index[-1]
@@ -503,11 +515,29 @@ class OKXBacktester:
             f"- 行情趋势准确度: `{result.regime_accuracy:.2%}`，样本 `{len(result.regime_hits)}`",
             f"- 行情状态计数: `{result.regime_counts}`",
             "",
+            "## 亏损归因",
+            "",
+            "| attribution | 亏损笔数 | 净利润 | 平均亏损 |",
+            "|---|---:|---:|---:|",
+        ]
+        loss_groups = trade_attribution_summary([trade for trade in result.trades if trade.pnl <= 0])
+        if loss_groups:
+            for name, stats in sorted(loss_groups.items(), key=lambda item: item[1]["pnl"]):
+                lines.append(
+                    f"| {name} | {int(stats['count'])} | {stats['pnl']:.2f} | "
+                    f"{stats['pnl'] / stats['count']:.2f} |"
+                )
+        else:
+            lines.append("| 无亏损 | 0 | 0.00 | 0.00 |")
+        lines.extend(
+            [
+                "",
             "## 行情状态次数",
             "",
             "| regime | 次数 | 占比 |",
             "|---|---:|---:|",
-        ]
+            ]
+        )
         total_regimes = sum(result.regime_counts.values()) or 1
         for regime, count in sorted(result.regime_counts.items(), key=lambda item: item[0]):
             lines.append(f"| {regime} | {count} | {count / total_regimes:.2%} |")
@@ -602,13 +632,14 @@ class OKXBacktester:
         if not result.trades:
             lines.append("本次回测未触发交易。")
         else:
-            lines.append("| symbol | side | regime | score | risk | entry | exit | pnl | reason |")
-            lines.append("|---|---:|---|---:|---:|---:|---:|---:|---|")
+            lines.append("| symbol | side | regime | score | risk | entry | exit | pnl | reason | attribution | 72h_pos |")
+            lines.append("|---|---:|---|---:|---:|---:|---:|---:|---|---|---:|")
             for trade in result.trades:
                 lines.append(
                     f"| {trade.symbol} | {trade.side.value} | {trade.regime.value} | "
                     f"{trade.opportunity_grade}{trade.opportunity_score} | {trade.risk_multiplier:.2f} | "
-                    f"{trade.entry_price:.4f} | {trade.exit_price:.4f} | {trade.pnl:.2f} | {trade.reason} |"
+                    f"{trade.entry_price:.4f} | {trade.exit_price:.4f} | {trade.pnl:.2f} | "
+                    f"{trade.reason} | {trade.attribution or '-'} | {trade.entry_close_position_72h:.4f} |"
                 )
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return report_path
@@ -720,8 +751,10 @@ def trade_signal_to_position(
     entry_time: pd.Timestamp,
     atr_1h: float,
     risk_multiplier: float,
+    features: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metadata = signal.metadata or {}
+    features = features or {}
     return {
         "side": signal.position_side,
         "regime": signal.regime,
@@ -740,6 +773,9 @@ def trade_signal_to_position(
         "opportunity_score": int(metadata.get("opportunity_score", 0) or 0),
         "opportunity_grade": str(metadata.get("opportunity_grade", "")),
         "risk_multiplier": risk_multiplier,
+        "entry_close_position_72h": float(features.get("close_position_72h", 0.0) or 0.0),
+        "entry_ret_24h": float(features.get("ret_24h", 0.0) or 0.0),
+        "entry_ret_72h": float(features.get("ret_72h", 0.0) or 0.0),
     }
 
 
@@ -1614,6 +1650,7 @@ def close_position(
         gross = (entry - exit_price) * position["qty"]
     fees = (entry + exit_price) * position["qty"] * config.fee_rate
     pnl = gross - fees
+    attribution, attribution_detail = classify_trade_attribution(position, raw_exit_price, reason, pnl)
     return SimTrade(
         symbol=symbol,
         side=position["side"],
@@ -1629,7 +1666,48 @@ def close_position(
         opportunity_score=int(position.get("opportunity_score", 0)),
         opportunity_grade=str(position.get("opportunity_grade", "")),
         risk_multiplier=float(position.get("risk_multiplier", 1.0)),
+        attribution=attribution,
+        attribution_detail=attribution_detail,
+        entry_close_position_72h=float(position.get("entry_close_position_72h", 0.0) or 0.0),
+        entry_ret_24h=float(position.get("entry_ret_24h", 0.0) or 0.0),
+        entry_ret_72h=float(position.get("entry_ret_72h", 0.0) or 0.0),
     )
+
+
+def classify_trade_attribution(position: dict[str, Any], raw_exit_price: float, reason: str, pnl: float) -> tuple[str, str]:
+    if pnl > 0:
+        return "profit", reason
+    regime = position.get("regime")
+    side = position.get("side")
+    pos72 = float(position.get("entry_close_position_72h", 0.0) or 0.0)
+    ret24 = float(position.get("entry_ret_24h", 0.0) or 0.0)
+    ret72 = float(position.get("entry_ret_72h", 0.0) or 0.0)
+    entry = float(position.get("entry", 0.0) or 0.0)
+    stop = float(position.get("stop", 0.0) or 0.0)
+    stop_pct = abs(stop - entry) / entry if entry else 0.0
+    if reason == "end_of_backtest":
+        return "period_end", "回测结束强制平仓"
+    if side == PositionSide.LONG and pos72 >= 0.88:
+        return "chase_high_long", f"多单入场接近72h高位 pos72={pos72:.4f}"
+    if side == PositionSide.SHORT and pos72 <= 0.12:
+        return "chase_low_short", f"空单入场接近72h低位 pos72={pos72:.4f}"
+    if stop_pct <= 0.0035:
+        return "stop_too_tight", f"止损距离偏窄 stop_pct={stop_pct:.4%}"
+    if regime in {Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_DOWN} and ret24 * ret72 < 0:
+        return "mixed_trend", f"24h/72h方向冲突 ret24={ret24:.4%} ret72={ret72:.4%}"
+    if reason in {"stop_loss", "trailing_stop"}:
+        return "stopped_by_reversal", f"{reason} exit={raw_exit_price:.8f}"
+    return "other_loss", reason
+
+
+def trade_attribution_summary(trades: list[SimTrade]) -> dict[str, dict[str, float]]:
+    values: dict[str, dict[str, float]] = {}
+    for trade in trades:
+        key = trade.attribution or "unknown"
+        item = values.setdefault(key, {"count": 0.0, "pnl": 0.0})
+        item["count"] += 1
+        item["pnl"] += trade.pnl
+    return values
 
 
 def evaluate_regime_hit(

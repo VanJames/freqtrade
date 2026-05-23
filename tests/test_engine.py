@@ -7,7 +7,7 @@ import pytest
 from trading_system.config import Settings
 from trading_system.engine import OKXQuantEngine
 from trading_system.exchange import ExchangeClient, okx_setting_blocked
-from trading_system.models import OrderResult, Position, PositionSide, Regime, Side, TrailingState
+from trading_system.models import OrderResult, Position, PositionSide, Regime, Side, SignalType, TradeSignal, TrailingState
 from trading_system.position_manager import PositionManager
 
 
@@ -297,6 +297,68 @@ async def test_position_monitor_uses_order_book_price_for_trailing_exit() -> Non
     assert len(exchange.orders) == 1
     assert exchange.orders[0].side == Side.SELL
     assert exchange.orders[0].position_side == PositionSide.LONG
+
+
+@pytest.mark.asyncio
+async def test_engine_skips_duplicate_entry_during_order_cooldown() -> None:
+    exchange = PositionMonitorExchange()
+    exchange.position = Position(
+        symbol="BTC/USDT:USDT",
+        side=PositionSide.SHORT,
+        contracts=0.0,
+        entry_price=0.0,
+    )
+    settings = Settings(
+        dry_run=True,
+        symbols=["BTC/USDT:USDT"],
+        live_entry_order_cooldown_seconds=60,
+    )
+    engine = OKXQuantEngine(settings, exchange=exchange)
+    engine.execution.twap_timeout = 0
+    signal = TradeSignal(
+        symbol="BTC/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.SHOCK_TREND_UP,
+        price=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        reason="same_signal",
+    )
+
+    await engine._execute_signals([signal, signal])
+    await engine.shutdown()
+
+    assert len(exchange.orders) == 1
+    assert exchange.orders[0].position_side == PositionSide.LONG
+
+
+@pytest.mark.asyncio
+async def test_engine_skips_duplicate_exit_during_order_cooldown() -> None:
+    exchange = PositionMonitorExchange()
+    settings = Settings(
+        dry_run=True,
+        symbols=["BTC/USDT:USDT"],
+        live_exit_order_cooldown_seconds=60,
+    )
+    engine = OKXQuantEngine(settings, exchange=exchange)
+    signal = TradeSignal(
+        symbol="BTC/USDT:USDT",
+        signal_type=SignalType.EXIT,
+        side=Side.SELL,
+        position_side=PositionSide.LONG,
+        regime=Regime.SHOCK_TREND_UP,
+        price=103.0,
+        stop_loss=104.0,
+        reason="long_stop_loss",
+        metadata={"contracts": 0.01, "reduce_only": True},
+    )
+
+    await engine._execute_signals([signal, signal])
+
+    assert len(exchange.orders) == 1
+    assert exchange.orders[0].side == Side.SELL
 
 
 class FailingInitializeExchange(ExchangeClient):

@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     diagnostics_log_interval_seconds: float = 60.0
     position_monitor_interval_seconds: float = 3.0
     positions_cache_ttl_seconds: float = 2.0
+    live_entry_order_cooldown_seconds: float = 60.0
+    live_exit_order_cooldown_seconds: float = 30.0
 
     risk_percent: float = 0.01
     same_direction_risk_limit: float = 0.03

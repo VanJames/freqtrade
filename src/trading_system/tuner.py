@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable
 from typing import Any, Awaitable, NotRequired, TypedDict
 
 import ccxt
+import pandas as pd
 from pydantic import BaseModel, Field
 
 from trading_system.backtest import BacktestConfig, BacktestResult, OKXBacktester, SimTrade
@@ -54,6 +55,17 @@ class BacktestQuality:
     max_drawdown: float
     max_drawdown_pct: float
     worst_trade: float
+
+
+@dataclass(frozen=True, slots=True)
+class WalkForwardStats:
+    train_pnl: float
+    train_win_rate: float
+    train_trades: int
+    validation_pnl: float
+    validation_win_rate: float
+    validation_trades: int
+    validation_score: float
 
 
 class TuningAgentState(TypedDict):
@@ -153,6 +165,12 @@ def score_runtime_result(result: BacktestResult, initial_equity: float) -> float
     score -= max(0.0, abs(quality.worst_trade) - initial_equity * 0.015) * 2.0
     score -= max(0.0, quality.max_drawdown_pct - 0.08) * initial_equity * 2.0
     score -= max(0.0, 1.35 - quality.profit_factor) * initial_equity * 0.15
+    walk = walk_forward_stats(result)
+    if walk.validation_trades == 0:
+        score -= 500.0
+    if walk.validation_pnl < 0:
+        score += walk.validation_pnl * 1.2
+    score -= max(0.0, 0.55 - walk.validation_win_rate) * initial_equity * 0.12
     return score
 
 
@@ -229,6 +247,7 @@ def run_runtime_tuning(
             )
     results.sort(key=lambda item: item.score, reverse=True)
     report_path = write_runtime_tuning_report(results, end_ms)
+    write_research_ledger(results, report_path, end_ms)
     return results, report_path
 
 
@@ -372,6 +391,7 @@ def propose_llm_candidates(
 def tuning_result_summary(item: RuntimeTuningResult) -> dict[str, Any]:
     trades = item.result.trades
     quality = backtest_quality(item.result, item.candidate.config.initial_equity)
+    walk = walk_forward_stats(item.result)
     return {
         "candidate": item.candidate.name,
         "score": round(item.score, 2),
@@ -384,6 +404,15 @@ def tuning_result_summary(item: RuntimeTuningResult) -> dict[str, Any]:
         "profit_factor": round(quality.profit_factor, 3),
         "max_drawdown": round(quality.max_drawdown, 2),
         "max_drawdown_pct": round(quality.max_drawdown_pct, 4),
+        "walk_forward": {
+            "train_pnl": round(walk.train_pnl, 2),
+            "train_win_rate": round(walk.train_win_rate, 4),
+            "train_trades": walk.train_trades,
+            "validation_pnl": round(walk.validation_pnl, 2),
+            "validation_win_rate": round(walk.validation_win_rate, 4),
+            "validation_trades": walk.validation_trades,
+            "validation_score": round(walk.validation_score, 2),
+        },
         "pnl_by_symbol": {symbol: round(pnl, 2) for symbol, pnl in pnl_by_symbol(trades).items()},
         "pnl_by_regime": {regime: round(pnl, 2) for regime, pnl in pnl_by_regime(trades).items()},
         "params": item.candidate.params,
@@ -411,16 +440,18 @@ def write_runtime_tuning_report(results: list[RuntimeTuningResult], end_ms: int)
         "",
         "## 参数对比",
         "",
-        "| rank | candidate | score | pnl | win_rate | trades | max_dd | max_dd_pct | profit_factor | avg_win | avg_loss | worst | avg_risk | BTC | ETH | SOL | report |",
-        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| rank | candidate | score | pnl | val_pnl | val_win | win_rate | trades | max_dd | max_dd_pct | profit_factor | avg_win | avg_loss | worst | avg_risk | BTC | ETH | SOL | report |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for rank, item in enumerate(results, start=1):
         trades = item.result.trades
         by_symbol = pnl_by_symbol(trades)
         quality = backtest_quality(item.result, item.candidate.config.initial_equity)
+        walk = walk_forward_stats(item.result)
         avg_risk = sum(trade.risk_multiplier for trade in trades) / len(trades) if trades else 0.0
         lines.append(
             f"| {rank} | {item.candidate.name} | {item.score:.2f} | {item.result.total_pnl:.2f} | "
+            f"{walk.validation_pnl:.2f} | {walk.validation_win_rate:.2%} | "
             f"{item.result.win_rate:.2%} | {len(trades)} | {quality.max_drawdown:.2f} | "
             f"{quality.max_drawdown_pct:.2%} | {format_profit_factor(quality.profit_factor)} | "
             f"{item.result.avg_win:.2f} | {item.result.avg_loss:.2f} | {quality.worst_trade:.2f} | {avg_risk:.2f} | "
@@ -489,8 +520,34 @@ def write_runtime_tuning_report(results: list[RuntimeTuningResult], end_ms: int)
     lines.extend(["", "## 候选说明", ""])
     for item in results:
         lines.append(f"- `{item.candidate.name}`: {item.candidate.description}")
+    lines.extend(
+        [
+            "",
+            "## Walk-forward 验证说明",
+            "",
+            "- 本报告把每个候选的 30 天交易按时间切成前 2/3 训练段、后 1/3 验证段。",
+            "- 评分会惩罚验证段亏损、验证段无交易和验证段胜率偏低，避免只选中前半段过拟合参数。",
+        ]
+    )
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return report_path
+
+
+def write_research_ledger(results: list[RuntimeTuningResult], report_path: Path, end_ms: int) -> Path:
+    if not results:
+        raise ValueError("results cannot be empty")
+    ledger_path = results[0].candidate.config.output_dir / "runtime_tuning_ledger.jsonl"
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "end_time": datetime.fromtimestamp(end_ms / 1000, timezone.utc).isoformat(),
+        "report_path": str(report_path),
+        "recommended": results[0].candidate.name,
+        "candidates": [tuning_result_summary(item) for item in results],
+    }
+    with ledger_path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    return ledger_path
 
 
 def has_clear_improvement(results: list[RuntimeTuningResult], min_improvement_score: float) -> bool:
@@ -545,6 +602,36 @@ def backtest_quality(result: BacktestResult, initial_equity: float) -> BacktestQ
         max_drawdown_pct=max_drawdown_pct,
         worst_trade=worst_trade,
     )
+
+
+def walk_forward_stats(result: BacktestResult) -> WalkForwardStats:
+    split_time = result.started_at + (result.ended_at - result.started_at) * (2 / 3)
+    train = [trade for trade in result.trades if trade_datetime(trade.entry_time) < split_time]
+    validation = [trade for trade in result.trades if trade_datetime(trade.entry_time) >= split_time]
+    train_pnl = sum(trade.pnl for trade in train)
+    validation_pnl = sum(trade.pnl for trade in validation)
+    train_win_rate = sum(1 for trade in train if trade.pnl > 0) / len(train) if train else 0.0
+    validation_win_rate = sum(1 for trade in validation if trade.pnl > 0) / len(validation) if validation else 0.0
+    validation_score = validation_pnl
+    validation_score -= max(0, 5 - len(validation)) * 50.0
+    validation_score -= max(0.0, 0.55 - validation_win_rate) * 500.0
+    return WalkForwardStats(
+        train_pnl=train_pnl,
+        train_win_rate=train_win_rate,
+        train_trades=len(train),
+        validation_pnl=validation_pnl,
+        validation_win_rate=validation_win_rate,
+        validation_trades=len(validation),
+        validation_score=validation_score,
+    )
+
+
+def trade_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if hasattr(value, "to_pydatetime"):
+        return value.to_pydatetime()
+    return pd.Timestamp(value).to_pydatetime()
 
 
 def format_profit_factor(value: float) -> str:
