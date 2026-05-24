@@ -517,6 +517,13 @@ def render_page(data: dict[str, Any]) -> str:
     .blockers { margin:8px 0 0; padding-left:18px; color:#dce4ee; font-size:13px; line-height:1.55; }
     .metric-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
     .form-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+    .preset-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:14px; }
+    .preset-card { text-align:left; border-color:var(--line); background:#10151f; color:var(--text); padding:12px; min-height:126px; display:flex; flex-direction:column; gap:8px; align-items:flex-start; }
+    .preset-card:hover { border-color:#4f8cff; background:#121b2a; transform:translateY(-1px); }
+    .preset-card.active { border-color:rgba(51,209,122,.55); box-shadow:0 0 0 1px rgba(51,209,122,.16) inset; }
+    .preset-title { font-weight:800; font-size:14px; }
+    .preset-desc { color:var(--muted); font-size:12px; line-height:1.45; font-weight:500; }
+    .preset-values { display:flex; flex-wrap:wrap; gap:6px; margin-top:auto; }
     .field { display:flex; flex-direction:column; gap:7px; color:var(--muted); font-size:13px; }
     .field-title { color:var(--text); font-weight:700; }
     .field-note { min-height:34px; line-height:1.45; color:var(--muted); font-size:12px; }
@@ -537,7 +544,7 @@ def render_page(data: dict[str, Any]) -> str:
     @keyframes pulse { 0%,100% { transform:translateY(0); opacity:.6; } 50% { transform:translateY(-14px); opacity:1; } }
     @keyframes blink { 0%,100% { transform:scale(.86); } 50% { transform:scale(1.12); } }
     @keyframes flowline { from { filter:hue-rotate(0deg); } to { filter:hue-rotate(45deg); } }
-    @media (max-width:1100px) { .grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .diag-list,.form-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .trade-flow { grid-template-columns:1fr; } .trade-flow::before { display:none; } }
+    @media (max-width:1100px) { .grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .diag-list,.form-grid,.preset-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .trade-flow { grid-template-columns:1fr; } .trade-flow::before { display:none; } }
     @media (max-width:860px) {
       .app-shell { display:block; }
       .mobile-top { display:flex; }
@@ -547,7 +554,7 @@ def render_page(data: dict[str, Any]) -> str:
       .content { padding:16px 14px 28px; }
       .page-head { flex-direction:column; }
       .top-actions { justify-content:flex-start; }
-      .grid,.two-col,.diag-list,.form-grid,.qr-box { grid-template-columns:1fr; }
+      .grid,.two-col,.diag-list,.form-grid,.preset-grid,.qr-box { grid-template-columns:1fr; }
       .metric-value { font-size:20px; }
     }
   </style>
@@ -821,10 +828,64 @@ def render_page(data: dict[str, Any]) -> str:
     const rows = Object.entries(data || {}).map(([key, val]) => ({ key, val }));
     return e(Table, { rows, empty:"暂无数据", columns:[{key:"key", label:"字段"}, {key:"val", label:"值", render:(row) => typeof row.val === "object" ? e("pre", null, JSON.stringify(row.val, null, 2)) : String(value(row.val))}] });
   }
+  const runtimePresets = [
+    {
+      key:"balanced_3x_scout",
+      title:"推荐均衡 3x",
+      desc:"当前建议实盘档：启用动态仓位和 SHOCK 趋势先遣单，追求收益同时限制单信号放大。",
+      values:{
+        same_direction_risk_limit:"0.06",
+        max_signal_risk_multiplier:"3",
+        confirmation_position_sizing:"1",
+        confirmation_max_risk_multiplier:"3",
+        enable_shock_trend_scout:"1",
+        shock_trend_scout_risk_multiplier:"1.5"
+      }
+    },
+    {
+      key:"conservative_2x",
+      title:"保守 2x",
+      desc:"降低同向风险和单信号放大，适合新参数观察期或连续回撤后临时降风险。",
+      values:{
+        same_direction_risk_limit:"0.04",
+        max_signal_risk_multiplier:"2",
+        confirmation_position_sizing:"1",
+        confirmation_max_risk_multiplier:"2",
+        enable_shock_trend_scout:"1",
+        shock_trend_scout_risk_multiplier:"1"
+      }
+    },
+    {
+      key:"aggressive_reference",
+      title:"旧激进参考",
+      desc:"接近早期高收益回测的风险参数，回撤会明显放大；只建议短期手动验证。",
+      values:{
+        same_direction_risk_limit:"0.20",
+        max_signal_risk_multiplier:"20",
+        confirmation_position_sizing:"1",
+        confirmation_max_risk_multiplier:"20",
+        enable_shock_trend_scout:"1",
+        shock_trend_scout_risk_multiplier:"1.5"
+      }
+    }
+  ];
+  function normalizedPresetValue(val) {
+    if (val === true) return "1";
+    if (val === false) return "0";
+    if (typeof val === "number") return String(Number(val.toFixed(8)));
+    return String(value(val, ""));
+  }
+  function presetActive(form, preset) {
+    return Object.entries(preset.values).every(([key, val]) => normalizedPresetValue(form[key]) === String(val));
+  }
   function RuntimeConfig({ data, onData }) {
     const [form, setForm] = React.useState(data.runtime_config || {});
     const [status, setStatus] = React.useState("");
     React.useEffect(() => setForm(data.runtime_config || {}), [data.runtime_config]);
+    function applyPreset(preset) {
+      setForm(Object.assign({}, form, preset.values));
+      setStatus("已填充：" + preset.title + "，点击保存后生效");
+    }
     async function submit(event) {
       event.preventDefault();
       setStatus("保存中...");
@@ -834,6 +895,15 @@ def render_page(data: dict[str, Any]) -> str:
       else setStatus(body.detail || "保存失败");
     }
     return e(Panel, { title:"动态风控配置" }, e("form", { onSubmit:submit },
+      e("div", { className:"preset-grid" }, runtimePresets.map((preset) => e("button", { type:"button", key:preset.key, className:"preset-card " + (presetActive(form, preset) ? "active" : ""), onClick:() => applyPreset(preset) },
+        e("span", { className:"preset-title" }, preset.title),
+        e("span", { className:"preset-desc" }, preset.desc),
+        e("span", { className:"preset-values" },
+          e("span", { className:"tag" }, "信号 " + preset.values.max_signal_risk_multiplier + "x"),
+          e("span", { className:"tag" }, "同向 " + formatNumber(Number(preset.values.same_direction_risk_limit) * 100, 1) + "%"),
+          e("span", { className:"tag good" }, preset.values.enable_shock_trend_scout === "1" ? "Scout 开" : "Scout 关")
+        )
+      ))),
       e("div", { className:"form-grid" }, (data.runtime_fields || []).map((field) => {
         const checked = boolEnabled(form[field.key]);
         if (field.boolean) return e("label", { className:"field switch-row", key:field.key }, e("span", null, e("span", { className:"field-title" }, field.label), e("div", { className:"field-note" }, field.description || "")), e("input", { type:"checkbox", checked, onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.checked ? "1" : "0" })) }));

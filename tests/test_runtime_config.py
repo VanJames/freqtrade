@@ -38,9 +38,17 @@ def test_runtime_config_rejects_unknown_llm_provider() -> None:
 def test_runtime_config_boolean_accepts_float_roundtrip() -> None:
     settings = Settings(dry_run=True)
 
-    apply_runtime_config(settings, {"confirmation_position_sizing": 1.0, "llm_regime_review_enabled": 1.0})
+    apply_runtime_config(
+        settings,
+        {
+            "confirmation_position_sizing": 1.0,
+            "enable_shock_trend_scout": 1.0,
+            "llm_regime_review_enabled": 1.0,
+        },
+    )
 
     assert settings.confirmation_position_sizing is True
+    assert settings.enable_shock_trend_scout is True
     assert settings.llm_regime_review_enabled is True
 
 
