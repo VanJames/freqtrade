@@ -79,6 +79,25 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
         description="限制单个信号最终风险倍数。中等动态仓位建议 3；旧激进回测为 20。",
     ),
     RuntimeField(
+        "enable_shock_trend_scout",
+        "启用 SHOCK 趋势先遣单",
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        boolean=True,
+        description="开启后在 SHOCK_TREND_UP/DOWN 中允许小仓位先遣单，等待确认后允许加仓。和主信号不冲突，仍保留风控门槛与确认门槛。",
+    ),
+    RuntimeField(
+        "shock_trend_scout_risk_multiplier",
+        "SHOCK 趋势先遣单风险倍数",
+        1.5,
+        0.1,
+        5.0,
+        0.1,
+        description="SHOCK 先遣单单笔最大风险倍数（相对单笔基础风险）。建议 1.0-1.5。",
+    ),
+    RuntimeField(
         "confirmation_position_sizing",
         "启用确认级别动态仓位",
         0.0,
@@ -253,6 +272,7 @@ def apply_runtime_config(settings: Settings, values: dict[str, Any]) -> None:
             "confirmation_position_sizing",
             "enable_liquidity_sweep_reversal",
             "liquidity_sweep_require_confirmation",
+            "enable_shock_trend_scout",
             "llm_regime_review_enabled",
         }:
             setattr(settings, key, bool(value))
