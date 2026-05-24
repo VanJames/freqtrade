@@ -15,6 +15,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
+import ccxt.async_support as ccxt
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
@@ -33,6 +34,8 @@ app = FastAPI(title="Quant Dashboard")
 FAVICON_PATH = Path(__file__).with_name("assets") / "favicon.ico"
 REPORTS_DIR = Path(os.getenv("REPORTS_DIR", "reports"))
 DASHBOARD_SESSION_COOKIE = "okx_quant_dashboard_session"
+OKX_BILL_CACHE: tuple[float, list[dict[str, Any]]] | None = None
+OKX_BILL_CACHE_TTL_SECONDS = 60.0
 
 
 def dashboard_password() -> str:
@@ -235,7 +238,112 @@ async def fetch_orders_for_exchange(exchange_id: str) -> dict[str, Any]:
             count = await conn.fetchval("select count(*) from order_tracks where exchange_id in ('', 'okx')")
     finally:
         await conn.close()
-    return {"orders": [normalize_row(row) for row in rows], "count": int(count or 0)}
+    orders = [normalize_row(row) for row in rows]
+    if exchange_id != "hotcoin":
+        orders = await merge_okx_realized_pnl_bills(orders)
+        orders.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        orders = orders[:30]
+    return {"orders": orders, "count": int(count or 0)}
+
+
+async def merge_okx_realized_pnl_bills(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    bills = await fetch_okx_realized_pnl_bills()
+    if not bills:
+        return orders
+    by_order_id = {str(order.get("order_id")): order for order in orders if order.get("order_id")}
+    for bill in bills:
+        order_id = str(bill.get("order_id") or "")
+        if not order_id:
+            continue
+        existing = by_order_id.get(order_id)
+        if existing is not None:
+            if bill.get("realized_pnl") not in {None, 0, 0.0}:
+                existing["realized_pnl"] = bill["realized_pnl"]
+            if float(existing.get("fee_paid") or 0.0) == 0.0:
+                existing["fee_paid"] = bill.get("fee_paid", existing.get("fee_paid", 0.0))
+            continue
+        orders.append(bill)
+        by_order_id[order_id] = bill
+    return orders
+
+
+async def fetch_okx_realized_pnl_bills(limit: int = 80) -> list[dict[str, Any]]:
+    global OKX_BILL_CACHE
+    now = asyncio.get_running_loop().time()
+    if OKX_BILL_CACHE and now - OKX_BILL_CACHE[0] <= OKX_BILL_CACHE_TTL_SECONDS:
+        return [dict(item) for item in OKX_BILL_CACHE[1]]
+    settings = Settings()
+    if not settings.okx_api_key:
+        return []
+    exchange = ccxt.okx(settings.okx_config())
+    try:
+        payload = await exchange.private_get_account_bills({"limit": str(limit)})
+    except Exception:
+        return []
+    finally:
+        await exchange.close()
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    aggregated: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        order_id = str(row.get("ordId") or "")
+        inst_id = str(row.get("instId") or "")
+        if not order_id or not inst_id.endswith("-SWAP"):
+            continue
+        pnl_value = _float(row.get("pnl"))
+        fee_value = _float(row.get("fee"))
+        if pnl_value == 0.0 and fee_value == 0.0:
+            continue
+        item = aggregated.setdefault(
+            order_id,
+            {
+                "order_id": order_id,
+                "symbol": okx_inst_id_to_symbol(inst_id),
+                "regime_mode": "OKX_BILL",
+                "initial_qty": 0.0,
+                "maker_filled": 0.0,
+                "taker_twap_filled": 0.0,
+                "fee_paid": 0.0,
+                "status": "exchange_bill",
+                "filled_qty": 0.0,
+                "avg_price": 0.0,
+                "realized_pnl": 0.0,
+                "side": "",
+                "position_side": "",
+                "signal_reason": "okx_account_bill",
+                "exchange_id": "okx",
+                "created_at": _okx_ts_to_iso(row.get("ts")),
+            },
+        )
+        item["realized_pnl"] = float(item["realized_pnl"]) + pnl_value
+        item["fee_paid"] = float(item["fee_paid"]) + abs(fee_value)
+        current_time = str(item.get("created_at") or "")
+        row_time = _okx_ts_to_iso(row.get("ts"))
+        if row_time > current_time:
+            item["created_at"] = row_time
+    result = list(aggregated.values())
+    OKX_BILL_CACHE = (now, [dict(item) for item in result])
+    return result
+
+
+def okx_inst_id_to_symbol(inst_id: str) -> str:
+    base = inst_id.removesuffix("-SWAP").replace("-", "/")
+    return f"{base}:USDT" if base.endswith("/USDT") else base
+
+
+def _okx_ts_to_iso(value: Any) -> str:
+    try:
+        return datetime.fromtimestamp(float(value) / 1000.0, timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc).isoformat()
+
+
+def _float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def safe_exchange_session(row: asyncpg.Record) -> dict[str, Any]:
@@ -655,6 +763,7 @@ def render_page(data: dict[str, Any]) -> str:
     return (positionSide === "long" && side === "sell") || (positionSide === "short" && side === "buy");
   }
   function orderPnl(row) {
+    if (row.status === "exchange_bill") return pnl(row.realized_pnl);
     return isClosingOrder(row) ? pnl(row.realized_pnl) : "-";
   }
   function conditionText(item) {
