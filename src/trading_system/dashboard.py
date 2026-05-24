@@ -496,6 +496,8 @@ def render_page(data: dict[str, Any]) -> str:
     .tag.good { color:var(--good); border-color:rgba(51,209,122,.35); }
     .tag.warn { color:var(--warn); border-color:rgba(247,201,72,.35); }
     .tag.bad { color:var(--bad); border-color:rgba(255,107,107,.35); }
+    .pnl-good { color:var(--good); font-weight:700; }
+    .pnl-bad { color:var(--bad); font-weight:700; }
     .diag-list { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
     .diag-card { padding:13px; background:var(--panel2); transition:transform .18s ease,border-color .18s ease; }
     .diag-card:hover { transform:translateY(-2px); border-color:#3f4b60; }
@@ -645,7 +647,15 @@ def render_page(data: dict[str, Any]) -> str:
     if (raw === null || raw === undefined || raw === "") return "-";
     const num = Number(raw);
     if (!Number.isFinite(num)) return String(raw);
-    return (num >= 0 ? "+" : "") + num.toFixed(4);
+    return e("span", { className:num < 0 ? "pnl-bad" : "pnl-good" }, (num >= 0 ? "+" : "") + num.toFixed(4));
+  }
+  function isClosingOrder(row) {
+    const side = String(row.side || "").toLowerCase();
+    const positionSide = String(row.position_side || "").toLowerCase();
+    return (positionSide === "long" && side === "sell") || (positionSide === "short" && side === "buy");
+  }
+  function orderPnl(row) {
+    return isClosingOrder(row) ? pnl(row.realized_pnl) : "-";
   }
   function conditionText(item) {
     const code = String((item && item.code) || "unknown");
@@ -821,7 +831,7 @@ def render_page(data: dict[str, Any]) -> str:
     return e(Panel, { title:"最近订单", extra:e("span", { className:"tag" }, "最多 30 条") }, e(Table, { rows:data.orders || [], empty:"暂无订单", columns:[
       {key:"created_at", label:"时间", render:(row) => localTime(row.created_at)}, {key:"symbol", label:"品种"}, {key:"regime_mode", label:"行情"}, {key:"side", label:"方向"}, {key:"position_side", label:"持仓方向"},
       {key:"initial_qty", label:"数量", render:(row) => formatNumber(row.initial_qty, 6)}, {key:"avg_price", label:"均价", render:(row) => price(row.avg_price)}, {key:"fee_paid", label:"手续费", render:(row) => formatNumber(row.fee_paid, 6)},
-      {key:"realized_pnl", label:"已实现盈亏", render:(row) => pnl(row.realized_pnl)}, {key:"status", label:"状态"}, {key:"order_id", label:"订单ID"}
+      {key:"realized_pnl", label:"已实现盈亏", render:(row) => orderPnl(row)}, {key:"status", label:"状态"}, {key:"order_id", label:"订单ID"}
     ]}));
   }
   function DictTable({ data }) {

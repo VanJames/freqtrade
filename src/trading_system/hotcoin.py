@@ -394,7 +394,7 @@ class HotcoinExchange(ExchangeClient):
         price: float,
         params: dict[str, Any],
     ) -> OrderResult:
-        hotcoin_amount = max(amount * 100.0, 0.0)
+        hotcoin_amount = max(self._base_to_hotcoin_units(symbol, amount), 0.0)
         reduce_only = str(params.get("reduceOnly", "")).lower() == "true" or bool(params.get("reduceOnly"))
         payload = await asyncio.to_thread(
             self.client.place_order,
@@ -482,14 +482,35 @@ class HotcoinExchange(ExchangeClient):
     def _parse_position(self, row: dict[str, Any]) -> Position:
         raw_side = str(row.get("side") or row.get("positionSide") or row.get("direction") or "").lower()
         side = PositionSide.SHORT if "short" in raw_side or raw_side in {"sell", "open_short"} else PositionSide.LONG
+        symbol = ccxt_symbol(str(row.get("contractCode") or row.get("symbol") or ""))
         return Position(
-            symbol=ccxt_symbol(str(row.get("contractCode") or row.get("symbol") or "")),
+            symbol=symbol,
             side=side,
-            contracts=self._position_amount(row) / 100.0,
+            contracts=self._hotcoin_units_to_base(symbol, self._position_amount(row)),
             entry_price=self._float_value(row.get("entryPrice"), row.get("avgPrice"), row.get("openPrice"), row.get("price"), 0.0),
             unrealized_pnl=self._float_value(row.get("unrealizedPnl"), row.get("unRealizedSurplus"), row.get("profit"), 0.0),
             metadata=row,
         )
+
+    def _base_to_hotcoin_units(self, symbol: str, amount: float) -> float:
+        contract_size = self._contract_size(symbol)
+        contracts = amount / contract_size if contract_size > 0 else amount
+        return contracts * 100.0
+
+    def _hotcoin_units_to_base(self, symbol: str, amount: float) -> float:
+        return (amount / 100.0) * self._contract_size(symbol)
+
+    def _contract_size(self, symbol: str) -> float:
+        try:
+            market = self.public_data.api.market(symbol)
+        except Exception:
+            return 1.0
+        if not market.get("contract"):
+            return 1.0
+        try:
+            return float(market.get("contractSize") or 1.0)
+        except (TypeError, ValueError):
+            return 1.0
 
     @staticmethod
     def _position_amount(row: dict[str, Any]) -> float:

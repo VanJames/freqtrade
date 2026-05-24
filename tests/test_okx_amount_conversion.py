@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from trading_system.config import Settings
 from trading_system.exchange import CcxtOkxExchange
+from trading_system.hotcoin import HotcoinExchange
 from trading_system.models import PositionSide, Side
 
 
@@ -103,6 +105,31 @@ def test_okx_positions_convert_contracts_to_base_amount() -> None:
     )
 
     assert positions[0].contracts == pytest.approx(0.064)
+
+
+def test_hotcoin_units_convert_through_contract_size() -> None:
+    exchange = HotcoinExchange(Settings(dry_run=True))
+    exchange.public_data.exchange = FakeOkxApi()
+
+    assert exchange._base_to_hotcoin_units("ETH/USDT:USDT", 0.04) == pytest.approx(400.0)
+    assert exchange._hotcoin_units_to_base("ETH/USDT:USDT", 400.0) == pytest.approx(0.04)
+
+
+def test_hotcoin_positions_convert_exchange_units_to_base_amount() -> None:
+    exchange = HotcoinExchange(Settings(dry_run=True))
+    exchange.public_data.exchange = FakeOkxApi()
+
+    position = exchange._parse_position(
+        {
+            "contractCode": "ETHUSDT",
+            "side": "long",
+            "availablePosition": "400",
+            "entryPrice": "2130",
+        }
+    )
+
+    assert position.symbol == "ETH/USDT:USDT"
+    assert position.contracts == pytest.approx(0.04)
 
 
 @pytest.mark.asyncio
