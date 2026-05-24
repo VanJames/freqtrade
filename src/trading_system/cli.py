@@ -112,6 +112,15 @@ def backtest(
         "--liquidity-sweep-confirmation/--no-liquidity-sweep-confirmation",
         help="Wait one extra 5m candle to confirm liquidity-sweep reversal entries.",
     ),
+    shock_trend_scout: Optional[bool] = typer.Option(
+        None,
+        "--shock-trend-scout/--no-shock-trend-scout",
+        help="Enable small planned scout entries for SHOCK_TREND regimes before confirmation add-ons.",
+    ),
+    shock_trend_scout_risk_multiplier: Optional[float] = typer.Option(
+        None,
+        help="Risk multiplier for SHOCK_TREND scout entries.",
+    ),
     funding_rate: float = typer.Option(0.0, help="Backtest funding rate assumption."),
     funding_block_threshold: Optional[float] = typer.Option(None, help="Funding rate threshold used by risk checks."),
     llm_review: Optional[bool] = typer.Option(None, help="Enable LLM regime review during backtest. Defaults to .env."),
@@ -165,6 +174,14 @@ def backtest(
                 liquidity_sweep_confirmation
                 if liquidity_sweep_confirmation is not None
                 else settings.liquidity_sweep_require_confirmation
+            ),
+            enable_shock_trend_scout=(
+                shock_trend_scout if shock_trend_scout is not None else settings.enable_shock_trend_scout
+            ),
+            shock_trend_scout_risk_multiplier=(
+                shock_trend_scout_risk_multiplier
+                if shock_trend_scout_risk_multiplier is not None
+                else settings.shock_trend_scout_risk_multiplier
             ),
             funding_block_threshold=(
                 funding_block_threshold if funding_block_threshold is not None else settings.funding_block_threshold

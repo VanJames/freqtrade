@@ -12,7 +12,7 @@ import pandas as pd
 
 from trading_system.indicators import atr, ema, macd, ohlcv_frame, rsi
 from trading_system.llm_regime import LLMRegimeReviewer, RegimeReviewInput
-from trading_system.models import PositionSide, Regime, Side, SignalType, TradeSignal
+from trading_system.models import Position, PositionSide, Regime, Side, SignalType, TradeSignal
 from trading_system.opportunity import opportunity_metadata, score_opportunity, sol_structure_stop, sol_trade_allowed
 from trading_system.regime import classify_user_4h_market, market_features_to_backtest_dict
 from trading_system.risk import RiskManager
@@ -23,6 +23,7 @@ from trading_system.volatility import build_volatility_policy, needs_llm_review
 TIMEFRAME_MS = {
     "5m": 5 * 60 * 1000,
 }
+CACHE_END_TOLERANCE_MS = 2 * 60 * 60 * 1000
 
 
 @dataclass(slots=True)
@@ -71,6 +72,8 @@ class BacktestConfig:
     defensive_risk_multiplier: float = 0.7
     shock_trend_risk_multiplier: float = 0.1
     shock_trend_down_risk_multiplier: float = 0.1
+    enable_shock_trend_scout: bool = False
+    shock_trend_scout_risk_multiplier: float = 1.5
     enable_liquidity_sweep_reversal: bool = False
     liquidity_sweep_risk_multiplier: float = 0.8
     liquidity_sweep_require_confirmation: bool = True
@@ -213,6 +216,8 @@ class OKXBacktester:
             defensive_risk_multiplier=config.defensive_risk_multiplier,
             shock_trend_risk_multiplier=config.shock_trend_risk_multiplier,
             shock_trend_down_risk_multiplier=config.shock_trend_down_risk_multiplier,
+            enable_shock_trend_scout=config.enable_shock_trend_scout,
+            shock_trend_scout_risk_multiplier=config.shock_trend_scout_risk_multiplier,
             enable_liquidity_sweep_reversal=config.enable_liquidity_sweep_reversal,
             liquidity_sweep_risk_multiplier=config.liquidity_sweep_risk_multiplier,
             liquidity_sweep_require_confirmation=config.liquidity_sweep_require_confirmation,
@@ -363,7 +368,7 @@ class OKXBacktester:
                 cached_end = int(parts[-1])
             except ValueError:
                 continue
-            if cached_since <= since_ms and cached_end >= end_ms:
+            if cached_since <= since_ms and cached_end + CACHE_END_TOLERANCE_MS >= end_ms:
                 return path
         return None
 
@@ -386,6 +391,11 @@ class OKXBacktester:
         regime_counts: dict[str, int] = {}
         open_position: dict[str, Any] | None = None
         last_regime_check: pd.Timestamp | None = None
+        previous_regime: Regime = Regime.UNKNOWN
+        last_feature_key: tuple[pd.Timestamp, pd.Timestamp] | None = None
+        cached_regime: Regime = Regime.UNKNOWN
+        cached_market_features = None
+        cached_features: dict[str, Any] = {}
         risk = RiskManager(self.config)
         risk.update_equity(equity)
 
@@ -401,8 +411,16 @@ class OKXBacktester:
             if len(history_1h) < 80 or len(history_4h) < 50:
                 continue
 
-            regime, market_features = classify_user_4h_market(history_1h, history_4h, symbol)
-            features = market_features_to_backtest_dict(market_features, history_1h, history_4h)
+            feature_key = (history_1h.index[-1], history_4h.index[-1])
+            if feature_key != last_feature_key:
+                cached_regime, cached_market_features = classify_user_4h_market(history_1h, history_4h, symbol)
+                cached_features = market_features_to_backtest_dict(cached_market_features, history_1h, history_4h)
+                last_feature_key = feature_key
+            regime = cached_regime
+            market_features = cached_market_features
+            features = cached_features
+            if market_features is None:
+                continue
             if last_regime_check is None or now - last_regime_check >= pd.Timedelta(hours=1):
                 regime_counts[regime.value] = regime_counts.get(regime.value, 0) + 1
                 hit = evaluate_regime_hit(symbol, now, regime, features, df5, idx)
@@ -419,37 +437,48 @@ class OKXBacktester:
                     curve.append((now, equity))
                     risk.release_risk(open_position["side"], float(open_position.get("risk_multiplier", 1.0)))
                     open_position = None
-                continue
+                    previous_regime = regime
+                    continue
 
             review = self.review_regime_sync(symbol, regime, features)
             if not review.allow_trade or review.proposed_regime != regime:
+                previous_regime = regime
                 continue
 
             strategy_signals = self.strategy.build_signals(
                 symbol=symbol,
                 regime=regime,
-                previous_regime=regime,
+                previous_regime=previous_regime,
                 features=market_features,
                 candles_5m=history_5m.iloc[-200:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
-                positions=[],
+                positions=backtest_positions(symbol, open_position),
             )
             if not strategy_signals:
+                previous_regime = regime
                 continue
             trade_signal = strategy_signals[0]
+            if open_position and not can_add_to_position(open_position, trade_signal):
+                previous_regime = regime
+                continue
             decision = risk.assess(trade_signal, equity, self.config.backtest_funding_rate)
             if not decision.allowed:
+                previous_regime = regime
                 continue
             risk_multiplier = risk.signal_risk_multiplier(trade_signal)
             qty = decision.size
             risk.reserve_risk(trade_signal.position_side, risk_multiplier)
-            open_position = trade_signal_to_position(
-                trade_signal,
-                qty,
-                now,
-                features["atr_1h"],
-                risk_multiplier,
-                features,
-            )
+            if open_position:
+                add_to_position(open_position, trade_signal, qty, risk_multiplier)
+            else:
+                open_position = trade_signal_to_position(
+                    trade_signal,
+                    qty,
+                    now,
+                    features["atr_1h"],
+                    risk_multiplier,
+                    features,
+                )
+            previous_regime = regime
 
         if open_position:
             now = df5.index[-1]
@@ -490,6 +519,7 @@ class OKXBacktester:
             f"- 确认级别动态仓位: `{self.config.confirmation_position_sizing}`, max risk `{self.config.confirmation_max_risk_multiplier:.1f}x`",
             f"- 风控约束: same direction `{self.config.same_direction_risk_limit:.2%}`, daily drawdown `{self.config.daily_drawdown_limit:.2%}`, funding block `{self.config.funding_block_threshold:.4%}`, backtest funding `{self.config.backtest_funding_rate:.4%}`",
             f"- 插针/扫单反转策略: `{self.config.enable_liquidity_sweep_reversal}`, risk `{self.config.liquidity_sweep_risk_multiplier:.2f}x`, next confirmation `{self.config.liquidity_sweep_require_confirmation}`",
+            f"- SHOCK_TREND scout: `{self.config.enable_shock_trend_scout}`, risk `{self.config.shock_trend_scout_risk_multiplier:.2f}x`",
             f"- 手续费假设: maker `{self.config.fee_rate:.4%}` 每边，滑点 `{self.config.slippage_rate:.4%}` 每边",
             f"- SHOCK 参数: stop `{self.config.shock_stop_atr} ATR`, take_profit `{self.config.shock_take_profit_atr} ATR`, "
             f"long zone `{self.config.shock_long_zone_min:.0%}-{self.config.shock_long_zone_max:.0%}`, "
@@ -776,7 +806,87 @@ def trade_signal_to_position(
         "entry_close_position_72h": float(features.get("close_position_72h", 0.0) or 0.0),
         "entry_ret_24h": float(features.get("ret_24h", 0.0) or 0.0),
         "entry_ret_72h": float(features.get("ret_72h", 0.0) or 0.0),
+        "entry_stage": str(metadata.get("entry_stage", "confirmed")),
+        "add_count": 0,
     }
+
+
+def backtest_positions(symbol: str, open_position: dict[str, Any] | None) -> list[Position]:
+    if not open_position:
+        return []
+    return [
+        Position(
+            symbol=symbol,
+            side=open_position["side"],
+            contracts=float(open_position["qty"]),
+            entry_price=float(open_position["entry"]),
+            metadata={
+                "entry_stage": open_position.get("entry_stage", "confirmed"),
+                "add_count": int(open_position.get("add_count", 0) or 0),
+            },
+        )
+    ]
+
+
+def can_add_to_position(position: dict[str, Any], signal: TradeSignal) -> bool:
+    if position["side"] != signal.position_side:
+        return False
+    if position.get("entry_stage") != "scout":
+        return False
+    if int(position.get("add_count", 0) or 0) >= 1:
+        return False
+    return signal.metadata.get("entry_stage") == "confirmed"
+
+
+def add_to_position(
+    position: dict[str, Any],
+    signal: TradeSignal,
+    qty: float,
+    risk_multiplier: float,
+) -> None:
+    old_qty = float(position["qty"])
+    new_qty = old_qty + qty
+    if new_qty <= 0:
+        return
+    old_entry = float(position["entry"])
+    new_entry = float(signal.price)
+    position["entry"] = (old_entry * old_qty + new_entry * qty) / new_qty
+    position["qty"] = new_qty
+    position["highest"] = max(float(position["highest"]), new_entry)
+    position["lowest"] = min(float(position["lowest"]), new_entry)
+    if signal.position_side == PositionSide.LONG:
+        position["stop"] = max(float(position["stop"]), float(signal.stop_loss))
+        if signal.take_profit is not None:
+            position["take_profit"] = max(float(position.get("take_profit") or 0.0), float(signal.take_profit))
+    else:
+        position["stop"] = min(float(position["stop"]), float(signal.stop_loss))
+        if signal.take_profit is not None:
+            current_take_profit = position.get("take_profit")
+            position["take_profit"] = (
+                float(signal.take_profit)
+                if current_take_profit is None
+                else min(float(current_take_profit), float(signal.take_profit))
+            )
+    metadata = signal.metadata or {}
+    position["trailing_gap_pct"] = float(metadata.get("trailing_gap_pct", position.get("trailing_gap_pct", 0.0)) or 0.0)
+    position["min_trailing_activate_r"] = float(
+        metadata.get("min_trailing_activate_r", position.get("min_trailing_activate_r", 1.0)) or 1.0
+    )
+    position["breakeven_activate_r"] = float(
+        metadata.get("breakeven_activate_r", position.get("breakeven_activate_r", 0.0)) or 0.0
+    )
+    position["breakeven_buffer_pct"] = float(
+        metadata.get("breakeven_buffer_pct", position.get("breakeven_buffer_pct", 0.0)) or 0.0
+    )
+    position["opportunity_score"] = max(
+        int(position.get("opportunity_score", 0) or 0),
+        int(metadata.get("opportunity_score", 0) or 0),
+    )
+    if metadata.get("opportunity_grade"):
+        position["opportunity_grade"] = str(metadata.get("opportunity_grade"))
+    position["risk_multiplier"] = float(position.get("risk_multiplier", 0.0) or 0.0) + risk_multiplier
+    position["entry_stage"] = "scaled"
+    position["add_count"] = int(position.get("add_count", 0) or 0) + 1
 
 
 def classify_user_4h_rules(
@@ -1303,6 +1413,13 @@ def build_user_rule_signal(
 
     shock_trend_up_rsi_quality = 42 <= last_rsi_5m <= 66
     recent_5h_position = recent_range_position(history_5m, price, bars=60)
+    shock_trend_up_late_entry_ok = late_shock_trend_entry_ok(
+        PositionSide.LONG,
+        features.get("close_position_72h", 0.5),
+        features.get("ret_24h", 0.0),
+        features.get("ret_72h", 0.0),
+        recent_5h_position,
+    )
     shock_trend_up_risk_throttle = 1.0
     if features.get("close_position_72h", 0.5) >= 0.75 and features.get("ret_72h", 0.0) <= 0:
         shock_trend_up_risk_throttle *= 0.70
@@ -1376,10 +1493,19 @@ def build_user_rule_signal(
             "risk_throttle": shock_trend_up_risk_throttle,
             **opportunity_metadata(shock_trend_up_opportunity),
             "risk_multiplier": max(config.shock_trend_risk_multiplier, shock_trend_up_opportunity.risk_multiplier),
+            "late_entry_risk": "HIGH" if not shock_trend_up_late_entry_ok else "NORMAL",
+            "recent_5h_position": round(recent_5h_position, 4),
         }
     shock_trend_down_rsi_quality = 35 <= last_rsi_5m <= 58
-    shock_trend_down_range_ok = features.get("close_position_72h", 0.5) >= (
-        0.18 if symbol.startswith("SOL/") else 0.08
+    shock_trend_down_range_floor = 0.18 if symbol.startswith("SOL/") else 0.08
+    shock_trend_down_range_ok = features.get("close_position_72h", 0.5) >= shock_trend_down_range_floor
+    shock_trend_down_recent_5h_position = recent_range_position(history_5m, price, bars=60)
+    shock_trend_down_late_entry_ok = late_shock_trend_entry_ok(
+        PositionSide.SHORT,
+        features.get("close_position_72h", 0.5),
+        features.get("ret_24h", 0.0),
+        features.get("ret_72h", 0.0),
+        shock_trend_down_recent_5h_position,
     )
     shock_trend_down_momentum_ok = (
         features.get("ret_24h", 0.0) <= -0.003 or features.get("close_position_72h", 0.5) >= 0.30
@@ -1409,6 +1535,8 @@ def build_user_rule_signal(
         shock_trend_down_risk_throttle *= 0.65
     if close_position_72h < 0.35 and ret_24h <= -0.018:
         shock_trend_down_risk_throttle *= 0.75
+    if not shock_trend_down_late_entry_ok:
+        shock_trend_down_risk_throttle *= 0.30
     if volatility_policy.tier == "HIGH":
         shock_trend_down_risk_throttle *= 0.85
     elif volatility_policy.tier == "EXTREME":
@@ -1495,8 +1623,34 @@ def build_user_rule_signal(
             "close_position_72h": round(close_position_72h, 4),
             "ret_24h": round(ret_24h, 6),
             "ret_72h": round(ret_72h, 6),
+            "late_entry_risk": "HIGH" if not shock_trend_down_late_entry_ok else "NORMAL",
+            "recent_5h_position": round(shock_trend_down_recent_5h_position, 4),
         }
     return None
+
+
+def late_shock_trend_entry_ok(
+    side: PositionSide,
+    close_position_72h: float,
+    ret_24h: float,
+    ret_72h: float,
+    recent_5h_position: float,
+) -> bool:
+    if side == PositionSide.LONG:
+        if close_position_72h >= 0.88 and recent_5h_position >= 0.45:
+            return False
+        if close_position_72h >= 0.78 and ret_24h >= 0.018 and recent_5h_position >= 0.55:
+            return False
+        if close_position_72h >= 0.75 and ret_72h >= 0.045 and recent_5h_position >= 0.60:
+            return False
+        return True
+    if close_position_72h <= 0.12:
+        return False
+    if close_position_72h <= 0.25 and ret_24h <= -0.018:
+        return False
+    if close_position_72h <= 0.28 and ret_72h <= -0.045:
+        return False
+    return True
 
 
 def recent_range_position(history: pd.DataFrame, price: float, bars: int) -> float:

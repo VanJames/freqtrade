@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     defensive_risk_multiplier: float = 0.7
     shock_trend_risk_multiplier: float = 0.1
     shock_trend_down_risk_multiplier: float = 0.1
+    enable_shock_trend_scout: bool = False
+    shock_trend_scout_risk_multiplier: float = 1.5
     enable_liquidity_sweep_reversal: bool = False
     liquidity_sweep_risk_multiplier: float = 0.8
     liquidity_sweep_require_confirmation: bool = True

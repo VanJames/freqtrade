@@ -124,6 +124,10 @@ def quality_risk_cap(signal: TradeSignal | dict[str, Any], settings: SizingSetti
             return max(0.1, cap)
         return cap
 
+    symbol = str(signal_value(signal, "symbol") or "")
+    if symbol.startswith(("SOL/", "XAU/")):
+        cap = min(cap, 0.35)
+
     close_position = metadata_float(signal, "close_position_72h", 0.5)
     ret_72h = metadata_float(signal, "ret_72h", 0.0)
     ret_24h = metadata_float(signal, "ret_24h", 0.0)

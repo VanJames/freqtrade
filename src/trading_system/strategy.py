@@ -26,6 +26,8 @@ class StrategyEngine:
         defensive_risk_multiplier: float = 0.7,
         shock_trend_risk_multiplier: float = 0.1,
         shock_trend_down_risk_multiplier: float = 0.1,
+        enable_shock_trend_scout: bool = False,
+        shock_trend_scout_risk_multiplier: float = 1.5,
         enable_liquidity_sweep_reversal: bool = False,
         liquidity_sweep_risk_multiplier: float = 0.8,
         liquidity_sweep_require_confirmation: bool = True,
@@ -45,6 +47,8 @@ class StrategyEngine:
         self.defensive_risk_multiplier = defensive_risk_multiplier
         self.shock_trend_risk_multiplier = shock_trend_risk_multiplier
         self.shock_trend_down_risk_multiplier = shock_trend_down_risk_multiplier
+        self.enable_shock_trend_scout = enable_shock_trend_scout
+        self.shock_trend_scout_risk_multiplier = shock_trend_scout_risk_multiplier
         self.enable_liquidity_sweep_reversal = enable_liquidity_sweep_reversal
         self.liquidity_sweep_risk_multiplier = liquidity_sweep_risk_multiplier
         self.liquidity_sweep_require_confirmation = liquidity_sweep_require_confirmation
@@ -66,11 +70,11 @@ class StrategyEngine:
         if signals:
             return signals
 
-        signal = self._liquidity_sweep_reversal_signal(symbol, regime, features, candles_5m)
+        signal = self._liquidity_sweep_reversal_signal(symbol, regime, features, candles_5m, positions)
         if signal:
             return [signal]
 
-        signal = self._user_4h_signal(symbol, regime, features, candles_5m)
+        signal = self._user_4h_signal(symbol, regime, features, candles_5m, positions)
         return [signal] if signal else []
 
     def entry_diagnostics(
@@ -319,6 +323,14 @@ class StrategyEngine:
     ) -> dict[str, Any]:
         if regime == Regime.SHOCK_TREND_UP:
             rsi_quality = 42 <= last_rsi <= 66
+            recent_5h_position = self._recent_range_position(df, price, bars=60)
+            late_entry_ok = self._late_shock_trend_entry_ok(
+                PositionSide.LONG,
+                features.close_position_72h,
+                features.ret_24h,
+                features.ret_72h,
+                recent_5h_position,
+            )
             opportunity = score_opportunity(
                 symbol=symbol,
                 regime=regime,
@@ -365,6 +377,7 @@ class StrategyEngine:
                     {"code": "ema_slope_up", "passed": ema_now >= ema_prev},
                     {"code": "rsi_42_66", "passed": rsi_quality, "value": round(last_rsi, 2)},
                     {"code": "range_position_not_chasing", "passed": features.close_position_72h <= 0.92, "value": round(features.close_position_72h, 4)},
+                    {"code": "late_entry_risk", "passed": True, "value": "HIGH" if not late_entry_ok else "NORMAL"},
                     {"code": "sol_filter", "passed": sol_allowed},
                 ],
                 {
@@ -376,13 +389,22 @@ class StrategyEngine:
                     "ema60_1h": round(features.ema60_1h, 8),
                     "last_4h_close": round(features.last_4h_close, 8),
                     "prev_4h_close": round(features.prev_4h_close, 8),
-                    "recent_5h_position": round(self._recent_range_position(df, price, bars=60), 4),
+                    "recent_5h_position": round(recent_5h_position, 4),
                 },
             )
 
         if regime == Regime.SHOCK_TREND_DOWN:
             rsi_quality = 35 <= last_rsi <= 58
-            range_ok = features.close_position_72h >= (0.18 if symbol.startswith("SOL/") else 0.08)
+            recent_5h_position = self._recent_range_position(df, price, bars=60)
+            late_entry_ok = self._late_shock_trend_entry_ok(
+                PositionSide.SHORT,
+                features.close_position_72h,
+                features.ret_24h,
+                features.ret_72h,
+                recent_5h_position,
+            )
+            range_floor = 0.18 if symbol.startswith("SOL/") else 0.08
+            range_ok = features.close_position_72h >= range_floor
             momentum_ok = (
                 features.ret_24h <= -0.003 or features.close_position_72h >= 0.30
                 if symbol.startswith("SOL/")
@@ -446,6 +468,7 @@ class StrategyEngine:
                     {"code": "range_position_short_room", "passed": range_ok, "value": round(features.close_position_72h, 4)},
                     {"code": "down_momentum", "passed": momentum_ok, "value": round(features.ret_24h, 5)},
                     {"code": "low_range_rebound", "passed": rebound_ready, "value": round(features.close_position_72h, 4)},
+                    {"code": "late_entry_risk", "passed": True, "value": "HIGH" if not late_entry_ok else "NORMAL"},
                     {"code": "sol_filter", "passed": sol_allowed},
                 ],
                 {
@@ -457,6 +480,7 @@ class StrategyEngine:
                     "ema60_1h": round(features.ema60_1h, 8),
                     "last_4h_close": round(features.last_4h_close, 8),
                     "prev_4h_close": round(features.prev_4h_close, 8),
+                    "recent_5h_position": round(recent_5h_position, 4),
                 },
             )
 
@@ -569,6 +593,7 @@ class StrategyEngine:
         regime: Regime,
         features: MarketFeatures,
         candles_5m: list[list[float]],
+        positions: list[Position],
     ) -> TradeSignal | None:
         if not self.enable_liquidity_sweep_reversal:
             return None
@@ -770,6 +795,7 @@ class StrategyEngine:
         regime: Regime,
         features: MarketFeatures,
         candles_5m: list[list[float]],
+        positions: list[Position],
     ) -> TradeSignal | None:
         df = ohlcv_frame(candles_5m)
         if len(df) < 35 or features.atr_1h <= 0:
@@ -1025,6 +1051,7 @@ class StrategyEngine:
             ema_prev,
             last_rsi,
             volatility_policy,
+            positions,
         )
         return signal
 
@@ -1048,11 +1075,20 @@ class StrategyEngine:
         ema_prev: float,
         last_rsi: float,
         volatility_policy,
+        positions: list[Position],
     ) -> TradeSignal | None:
+        scout_symbol_allowed = not symbol.startswith("XAU/")
         shock_trend_up_rsi_quality = 42 <= last_rsi <= 66
         recent_5h_position = self._recent_range_position(df, price, bars=60)
         quiet_weak_up_drift = features.range_72h < 0.06 and features.ret_24h < 0.008
         local_top_without_impulse = recent_5h_position >= 0.94 and quiet_weak_up_drift
+        shock_trend_up_late_entry_ok = self._late_shock_trend_entry_ok(
+            PositionSide.LONG,
+            features.close_position_72h,
+            features.ret_24h,
+            features.ret_72h,
+            recent_5h_position,
+        )
         shock_trend_up_risk_throttle = 1.0
         if features.close_position_72h >= 0.75 and features.ret_72h <= 0:
             shock_trend_up_risk_throttle *= 0.70
@@ -1135,12 +1171,71 @@ class StrategyEngine:
                     "ret_72h": round(features.ret_72h, 6),
                     "range_72h": round(features.range_72h, 6),
                     "recent_5h_position": round(recent_5h_position, 4),
+                    "late_entry_risk": "HIGH" if not shock_trend_up_late_entry_ok else "NORMAL",
+                    "entry_stage": "confirmed",
+                },
+            )
+        if (
+            self.enable_shock_trend_scout
+            and scout_symbol_allowed
+            and regime == Regime.SHOCK_TREND_UP
+            and not self._has_same_side_position(positions, PositionSide.LONG)
+            and trend_up_aligned
+            and features.ema20_1h >= features.ema60_1h
+            and features.last_4h_close > features.prev_4h_close
+            and recent_pullback_down
+            and price >= features.ema20_1h * 0.995
+            and price <= ema_now * 1.002
+            and ema_now >= ema_prev * 0.999
+            and long_momentum_positive
+            and 38 <= last_rsi <= 62
+            and 0.25 <= recent_5h_position <= 0.72
+            and features.close_position_72h <= 0.82
+            and not local_top_without_impulse
+            and self._sol_allowed(symbol, PositionSide.LONG, regime, 72, features)
+        ):
+            stop = self._cap_stop(price, features.current_4h_low, PositionSide.LONG)
+            stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
+            return self._entry_signal(
+                symbol,
+                Side.BUY,
+                PositionSide.LONG,
+                regime,
+                price,
+                stop,
+                price + self._reward(price, stop, self.trend_reward_risk),
+                "user_4h_shock_trend_up_scout_plan",
+                {
+                    "trailing_gap_pct": self.trailing_gap_pct,
+                    "min_trailing_activate_r": 0.85,
+                    "breakeven_activate_r": 0.55,
+                    "breakeven_buffer_pct": 0.0003,
+                    "opportunity_score": 72,
+                    "opportunity_grade": "C",
+                    "opportunity_confidence": 0.72,
+                    "opportunity_reasons": "scout_plan,pullback,one_hour_trend,four_hour_trend",
+                    "risk_multiplier": self.shock_trend_scout_risk_multiplier,
+                    "volatility_tier": volatility_policy.tier,
+                    "entry_stage": "scout",
+                    "close_position_72h": round(features.close_position_72h, 4),
+                    "ret_24h": round(features.ret_24h, 6),
+                    "ret_72h": round(features.ret_72h, 6),
+                    "range_72h": round(features.range_72h, 6),
+                    "recent_5h_position": round(recent_5h_position, 4),
+                    "late_entry_risk": "HIGH" if not shock_trend_up_late_entry_ok else "NORMAL",
                 },
             )
 
         shock_trend_down_rsi_quality = 35 <= last_rsi <= 58
-        shock_trend_down_range_ok = features.close_position_72h >= (
-            0.18 if symbol.startswith("SOL/") else 0.08
+        shock_trend_down_range_floor = 0.18 if symbol.startswith("SOL/") else 0.08
+        shock_trend_down_range_ok = features.close_position_72h >= shock_trend_down_range_floor
+        shock_trend_down_recent_5h_position = self._recent_range_position(df, price, bars=60)
+        shock_trend_down_late_entry_ok = self._late_shock_trend_entry_ok(
+            PositionSide.SHORT,
+            features.close_position_72h,
+            features.ret_24h,
+            features.ret_72h,
+            shock_trend_down_recent_5h_position,
         )
         shock_trend_down_momentum_ok = (
             features.ret_24h <= -0.003 or features.close_position_72h >= 0.30
@@ -1167,6 +1262,8 @@ class StrategyEngine:
             shock_trend_down_risk_throttle *= 0.65
         if features.close_position_72h < 0.35 and features.ret_24h <= -0.018:
             shock_trend_down_risk_throttle *= 0.75
+        if not shock_trend_down_late_entry_ok:
+            shock_trend_down_risk_throttle *= 0.30
         if volatility_policy.tier == "HIGH":
             shock_trend_down_risk_throttle *= 0.85
         elif volatility_policy.tier == "EXTREME":
@@ -1254,9 +1351,88 @@ class StrategyEngine:
                     "close_position_72h": round(features.close_position_72h, 4),
                     "ret_24h": round(features.ret_24h, 6),
                     "ret_72h": round(features.ret_72h, 6),
+                    "late_entry_risk": "HIGH" if not shock_trend_down_late_entry_ok else "NORMAL",
+                    "recent_5h_position": round(shock_trend_down_recent_5h_position, 4),
+                    "entry_stage": "confirmed",
+                },
+            )
+        if (
+            self.enable_shock_trend_scout
+            and scout_symbol_allowed
+            and regime == Regime.SHOCK_TREND_DOWN
+            and not self._has_same_side_position(positions, PositionSide.SHORT)
+            and trend_down_aligned
+            and features.ema20_1h <= features.ema60_1h
+            and features.last_4h_close < features.prev_4h_close
+            and recent_pullback_up
+            and price <= features.ema20_1h * 1.005
+            and price >= ema_now * 0.998
+            and ema_now <= ema_prev * 1.001
+            and short_momentum_positive
+            and 38 <= last_rsi <= 62
+            and 0.22 <= shock_trend_down_recent_5h_position <= 0.82
+            and shock_trend_down_range_ok
+            and self._sol_allowed(symbol, PositionSide.SHORT, regime, 72, features)
+        ):
+            stop = self._cap_stop(price, features.current_4h_high, PositionSide.SHORT)
+            stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
+            return self._entry_signal(
+                symbol,
+                Side.SELL,
+                PositionSide.SHORT,
+                regime,
+                price,
+                stop,
+                price - self._reward(price, stop, self.trend_reward_risk),
+                "user_4h_shock_trend_down_scout_plan",
+                {
+                    "trailing_gap_pct": self.trailing_gap_pct,
+                    "min_trailing_activate_r": 0.85,
+                    "breakeven_activate_r": 0.55,
+                    "breakeven_buffer_pct": 0.0003,
+                    "opportunity_score": 72,
+                    "opportunity_grade": "C",
+                    "opportunity_confidence": 0.72,
+                    "opportunity_reasons": "scout_plan,pullback,one_hour_trend,four_hour_trend",
+                    "risk_multiplier": self.shock_trend_scout_risk_multiplier,
+                    "volatility_tier": volatility_policy.tier,
+                    "entry_stage": "scout",
+                    "close_position_72h": round(features.close_position_72h, 4),
+                    "ret_24h": round(features.ret_24h, 6),
+                    "ret_72h": round(features.ret_72h, 6),
+                    "late_entry_risk": "HIGH" if not shock_trend_down_late_entry_ok else "NORMAL",
+                    "recent_5h_position": round(shock_trend_down_recent_5h_position, 4),
                 },
             )
         return None
+
+    @staticmethod
+    def _has_same_side_position(positions: list[Position], side: PositionSide) -> bool:
+        return any(position.side == side and position.contracts > 0 for position in positions)
+
+    @staticmethod
+    def _late_shock_trend_entry_ok(
+        side: PositionSide,
+        close_position_72h: float,
+        ret_24h: float,
+        ret_72h: float,
+        recent_5h_position: float,
+    ) -> bool:
+        if side == PositionSide.LONG:
+            if close_position_72h >= 0.88 and recent_5h_position >= 0.45:
+                return False
+            if close_position_72h >= 0.78 and ret_24h >= 0.018 and recent_5h_position >= 0.55:
+                return False
+            if close_position_72h >= 0.75 and ret_72h >= 0.045 and recent_5h_position >= 0.60:
+                return False
+            return True
+        if close_position_72h <= 0.12:
+            return False
+        if close_position_72h <= 0.25 and ret_24h <= -0.018:
+            return False
+        if close_position_72h <= 0.28 and ret_72h <= -0.045:
+            return False
+        return True
 
     @staticmethod
     def _recent_range_position(df, price: float, bars: int) -> float:
