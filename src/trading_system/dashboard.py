@@ -599,7 +599,7 @@ def render_page(data: dict[str, Any]) -> str:
   const summaryLabels = { waiting_for_conditions:"等待条件", waiting_live_check:"等待检查", waiting_market_data:"等待行情", waiting_positions:"等待持仓", waiting_llm_review:"等待LLM", entry_conditions_met:"条件满足", signal_ready:"信号已触发", release_hedge_signal_ready:"解锁信号", exit_signal_ready:"退出信号", risk_rejected:"风控拒单", order_submitted:"已提交订单", llm_rejected:"LLM 拒绝", symbol_loop_error:"循环异常" };
   const metricLabels = { price:"价格", rsi_5m:"RSI", opportunity_score:"评分", min_score:"最低分", close_position_72h:"72h位置", ret_24h:"24h涨跌", ret_72h:"72h涨跌", volatility_tier:"波动级别" };
 
-  function value(v, fallback) { return v === undefined || v === null || v === "" ? (fallback || "-") : v; }
+  function value(v, fallback) { return v === undefined || v === null || v === "" ? (arguments.length > 1 ? fallback : "-") : v; }
   function boolEnabled(v) {
     if (v === true) return true;
     if (v === false || v === null || v === undefined || v === "") return false;
@@ -906,8 +906,8 @@ def render_page(data: dict[str, Any]) -> str:
       ))),
       e("div", { className:"form-grid" }, (data.runtime_fields || []).map((field) => {
         const checked = boolEnabled(form[field.key]);
-        if (field.boolean) return e("label", { className:"field switch-row", key:field.key }, e("span", null, e("span", { className:"field-title" }, field.label), e("div", { className:"field-note" }, field.description || "")), e("input", { type:"checkbox", checked, onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.checked ? "1" : "0" })) }));
-        return e("label", { className:"field", key:field.key }, e("span", { className:"field-title" }, field.label), e("input", { type:field.text ? "text" : "number", min:field.min, max:field.max, step:field.step || "any", value:value(form[field.key], ""), onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.value })) }), e("span", { className:"field-note" }, field.description || ""));
+        if (field.boolean) return e("label", { className:"field switch-row", key:field.key }, e("span", null, e("span", { className:"field-title" }, field.label), e("div", { className:"field-note" }, field.description || "")), e("input", { type:"checkbox", name:field.key, checked, onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.checked ? "1" : "0" })) }));
+        return e("label", { className:"field", key:field.key }, e("span", { className:"field-title" }, field.label), e("input", { type:field.text ? "text" : "number", name:field.key, min:field.min, max:field.max, step:field.step || "any", value:value(form[field.key], ""), onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.value })) }), e("span", { className:"field-note" }, field.description || ""));
       })),
       e("div", { className:"actions" }, e("button", { type:"submit" }, "保存配置"), e("span", { className:"muted small" }, status))
     ));
