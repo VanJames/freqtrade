@@ -274,10 +274,78 @@ def test_confirmation_sizing_does_not_cap_wide_range_shock_trend_up_longs() -> N
             "recent_5h_position": 0.95,
             "close_position_72h": 0.75,
             "ret_24h": 0.004,
-            "ret_72h": -0.006,
+            "ret_72h": 0.006,
             "range_72h": 0.12,
             "volatility_tier": "HIGH",
         },
     )
 
     assert adjusted_risk_multiplier(long_signal, settings) == pytest.approx(1.5)
+
+
+def test_confirmation_sizing_caps_mixed_shock_trend_up_longs_near_72h_high() -> None:
+    settings = Settings(
+        dry_run=True,
+        confirmation_position_sizing=True,
+        max_signal_risk_multiplier=3.0,
+        confirmation_max_risk_multiplier=3.0,
+    )
+    long_signal = TradeSignal(
+        symbol="ETH/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.SHOCK_TREND_UP,
+        price=2300.0,
+        stop_loss=2250.0,
+        metadata={
+            "opportunity_score": 98,
+            "opportunity_reasons": (
+                "multi_timeframe,one_hour_trend,pullback,confirmation_candle,"
+                "momentum_cross,momentum_positive,not_chasing,rr_good"
+            ),
+            "risk_multiplier": 1.0,
+            "risk_throttle": 1.0,
+            "recent_5h_position": 0.80,
+            "close_position_72h": 0.79,
+            "ret_24h": 0.047,
+            "ret_72h": -0.002,
+            "range_72h": 0.12,
+            "volatility_tier": "NORMAL",
+        },
+    )
+
+    assert adjusted_risk_multiplier(long_signal, settings) == pytest.approx(1.0)
+
+
+def test_confirmation_sizing_caps_mixed_shock_trend_down_shorts() -> None:
+    settings = Settings(
+        dry_run=True,
+        confirmation_position_sizing=True,
+        max_signal_risk_multiplier=3.0,
+        confirmation_max_risk_multiplier=3.0,
+    )
+    short_signal = TradeSignal(
+        symbol="BTC/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.SELL,
+        position_side=PositionSide.SHORT,
+        regime=Regime.SHOCK_TREND_DOWN,
+        price=100.0,
+        stop_loss=101.0,
+        metadata={
+            "opportunity_score": 98,
+            "opportunity_reasons": (
+                "multi_timeframe,one_hour_trend,pullback,confirmation_candle,"
+                "momentum_cross,momentum_positive,not_chasing,rr_good"
+            ),
+            "risk_multiplier": 1.0,
+            "risk_throttle": 1.0,
+            "close_position_72h": 0.50,
+            "ret_24h": -0.006,
+            "ret_72h": 0.012,
+            "volatility_tier": "NORMAL",
+        },
+    )
+
+    assert adjusted_risk_multiplier(short_signal, settings) == pytest.approx(0.75)

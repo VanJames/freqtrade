@@ -114,6 +114,13 @@ def quality_risk_cap(signal: TradeSignal | dict[str, Any], settings: SizingSetti
             ret_24h = metadata_float(signal, "ret_24h", 0.0)
             ret_72h = metadata_float(signal, "ret_72h", 0.0)
             range_72h = metadata_float(signal, "range_72h", 1.0)
+            mixed_trend = ret_24h * ret_72h < 0
+            if mixed_trend:
+                cap = min(cap, 1.5)
+            if mixed_trend and close_position >= 0.75:
+                cap = min(cap, 1.0)
+            if mixed_trend and recent_position >= 0.85:
+                cap = min(cap, 0.9)
             quiet_weak_up_drift = range_72h < 0.06 and ret_24h < 0.008
             if quiet_weak_up_drift and recent_position >= 0.90:
                 cap = min(cap, 0.90)
@@ -132,6 +139,10 @@ def quality_risk_cap(signal: TradeSignal | dict[str, Any], settings: SizingSetti
     ret_72h = metadata_float(signal, "ret_72h", 0.0)
     ret_24h = metadata_float(signal, "ret_24h", 0.0)
     volatility_tier = str(signal_metadata(signal).get("volatility_tier", "NORMAL")).upper()
+    mixed_trend = ret_24h * ret_72h < 0
+
+    if mixed_trend:
+        cap = min(cap, 0.75)
 
     if close_position < 0.20:
         cap = min(cap, 0.35)

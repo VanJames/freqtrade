@@ -835,6 +835,14 @@ def can_add_to_position(position: dict[str, Any], signal: TradeSignal) -> bool:
         return False
     if int(position.get("add_count", 0) or 0) >= 1:
         return False
+    entry_ret_24h = float(position.get("entry_ret_24h", 0.0) or 0.0)
+    entry_ret_72h = float(position.get("entry_ret_72h", 0.0) or 0.0)
+    entry_pos_72h = float(position.get("entry_close_position_72h", 0.5) or 0.5)
+    mixed_trend = position.get("regime") in {Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_DOWN} and entry_ret_24h * entry_ret_72h < 0
+    mixed_long_near_high = position["side"] == PositionSide.LONG and entry_pos_72h >= 0.75
+    mixed_short_near_low = position["side"] == PositionSide.SHORT and entry_pos_72h <= 0.25
+    if mixed_trend and (mixed_long_near_high or mixed_short_near_low):
+        return False
     return signal.metadata.get("entry_stage") == "confirmed"
 
 
@@ -1850,7 +1858,7 @@ def classify_trade_attribution(position: dict[str, Any], raw_exit_price: float, 
     if regime in {Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_DOWN} and ret24 * ret72 < 0:
         return "mixed_trend", f"24h/72h方向冲突 ret24={ret24:.4%} ret72={ret72:.4%}"
     if reason in {"stop_loss", "trailing_stop"}:
-        return "stopped_by_reversal", f"{reason} exit={raw_exit_price:.8f}"
+        return "stop_loss_reversal_candidate", f"{reason} exit={raw_exit_price:.8f}"
     return "other_loss", reason
 
 
