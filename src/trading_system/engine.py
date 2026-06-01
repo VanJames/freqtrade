@@ -594,16 +594,6 @@ class OKXQuantEngine:
                 else:
                     order_attempted = True
                     order = await self.execution.execute(signal, decision)
-                if signal.signal_type == SignalType.RELEASE_HEDGE:
-                    lock = self.hedge_locks.get(signal.symbol)
-                    if lock:
-                        lock.active = False
-                if signal.signal_type in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
-                    self.risk.release_risk(
-                        signal.position_side,
-                        float(signal.metadata.get("risk_multiplier", 1.0)),
-                    )
-                    self.position_manager.trailing.pop((signal.symbol, signal.position_side), None)
                 if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
                     self._last_entry_submitted_at = datetime.now(timezone.utc)
                     self.position_manager.register_entry(signal, abs(signal.price - signal.stop_loss))
@@ -615,6 +605,25 @@ class OKXQuantEngine:
                 synced_order = await self._sync_submitted_order(order, signal)
                 if synced_order:
                     order = synced_order
+                if signal.signal_type == SignalType.RELEASE_HEDGE and self._order_has_fill(order):
+                    lock = self.hedge_locks.get(signal.symbol)
+                    if lock:
+                        lock.active = False
+                if signal.signal_type in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
+                    if self._order_has_fill(order):
+                        self.risk.release_risk(
+                            signal.position_side,
+                            float(signal.metadata.get("risk_multiplier", 1.0)),
+                        )
+                        self.position_manager.trailing.pop((signal.symbol, signal.position_side), None)
+                    else:
+                        logger.warning(
+                            "exit order not filled; keeping trailing state symbol=%s order_id=%s status=%s reason=%s",
+                            signal.symbol,
+                            order.id,
+                            order.status,
+                            signal.reason,
+                        )
                 status = self.symbol_status.setdefault(signal.symbol, {})
                 status["last_order"] = {
                     "id": order.id,
@@ -1224,6 +1233,10 @@ class OKXQuantEngine:
         except Exception:
             logger.exception("order sync failed order_id=%s symbol=%s", order.id, order.symbol)
             return None
+
+    @staticmethod
+    def _order_has_fill(order: OrderResult) -> bool:
+        return order.filled > 0 or str(order.status).lower() in {"closed", "filled"}
 
     async def _sync_recent_orders(self) -> None:
         if not self.store:

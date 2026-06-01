@@ -272,6 +272,31 @@ class PositionMonitorExchange(ExchangeClient):
         return None
 
 
+class CanceledExitExchange(PositionMonitorExchange):
+    async def create_order(
+        self,
+        symbol: str,
+        order_type: str,
+        side: Side,
+        amount: float,
+        price: float,
+        params: dict[str, object],
+    ) -> OrderResult:
+        order = OrderResult(
+            "exit-canceled",
+            symbol,
+            side,
+            PositionSide(str(params["posSide"])),
+            amount,
+            price,
+            "canceled",
+            filled=0.0,
+            average=price,
+        )
+        self.orders.append(order)
+        return order
+
+
 @pytest.mark.asyncio
 async def test_position_monitor_uses_order_book_price_for_trailing_exit() -> None:
     exchange = PositionMonitorExchange()
@@ -359,6 +384,42 @@ async def test_engine_skips_duplicate_exit_during_order_cooldown() -> None:
 
     assert len(exchange.orders) == 1
     assert exchange.orders[0].side == Side.SELL
+
+
+@pytest.mark.asyncio
+async def test_engine_keeps_trailing_state_when_exit_order_is_canceled() -> None:
+    exchange = CanceledExitExchange()
+    settings = Settings(dry_run=True, symbols=["BTC/USDT:USDT"])
+    engine = OKXQuantEngine(settings, exchange=exchange)
+    key = ("BTC/USDT:USDT", PositionSide.LONG)
+    engine.position_manager.trailing[key] = TrailingState(
+        symbol="BTC/USDT:USDT",
+        position_side=PositionSide.LONG,
+        entry_price=100.0,
+        atr=1.0,
+        stop_loss=104.0,
+        highest_price=105.0,
+        lowest_price=100.0,
+        active=True,
+    )
+    signal = TradeSignal(
+        symbol="BTC/USDT:USDT",
+        signal_type=SignalType.EXIT,
+        side=Side.SELL,
+        position_side=PositionSide.LONG,
+        regime=Regime.UNKNOWN,
+        price=103.0,
+        stop_loss=104.0,
+        reason="long_trailing_stop",
+        metadata={"contracts": 0.01, "risk_multiplier": 0.7},
+    )
+
+    await engine._execute_signals([signal])
+
+    assert len(exchange.orders) == 1
+    assert exchange.orders[0].status == "canceled"
+    assert key in engine.position_manager.trailing
+    assert engine.position_manager.trailing[key].active is True
 
 
 class FailingInitializeExchange(ExchangeClient):
