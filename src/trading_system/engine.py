@@ -139,7 +139,7 @@ class OKXQuantEngine:
                 await self.cache.ping()
             for symbol in self.settings.symbols:
                 await self.exchange.set_leverage(symbol, self.settings.trend_symbol_leverage_limit)
-                for timeframe, limit in {"5m": 150, "1h": 120, "4h": 100}.items():
+                for timeframe, limit in {"5m": 300, "1h": 120, "4h": 100}.items():
                     self.klines[symbol][timeframe] = await self.exchange.fetch_ohlcv(symbol, timeframe, limit)
                 latest_price = (
                     float(self.klines[symbol]["5m"][-1][4])
@@ -408,6 +408,8 @@ class OKXQuantEngine:
             features,
             self.klines[symbol]["5m"],
             positions,
+            self.klines[symbol]["1h"],
+            self.klines[symbol]["4h"],
         )
         self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
         self._log_entry_diagnostics(symbol, diagnostics)
@@ -448,6 +450,8 @@ class OKXQuantEngine:
             features,
             self.klines[symbol]["5m"],
             positions,
+            self.klines[symbol]["1h"],
+            self.klines[symbol]["4h"],
         )
         if not signals:
             return []
@@ -781,8 +785,9 @@ class OKXQuantEngine:
             cache[-1] = row
         else:
             cache.append(row)
-        if len(cache) > 200:
-            del cache[:-200]
+        max_items = 300 if timeframe == "5m" else 200
+        if len(cache) > max_items:
+            del cache[:-max_items]
 
     def _set_entry_status(
         self,

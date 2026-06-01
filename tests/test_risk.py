@@ -318,6 +318,41 @@ def test_confirmation_sizing_caps_mixed_shock_trend_up_longs_near_72h_high() -> 
     assert adjusted_risk_multiplier(long_signal, settings) == pytest.approx(1.0)
 
 
+def test_confirmation_sizing_caps_late_burst_without_72h_followthrough() -> None:
+    settings = Settings(
+        dry_run=True,
+        confirmation_position_sizing=True,
+        max_signal_risk_multiplier=3.0,
+        confirmation_max_risk_multiplier=3.0,
+    )
+    long_signal = TradeSignal(
+        symbol="ETH/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.SHOCK_TREND_UP,
+        price=2300.0,
+        stop_loss=2250.0,
+        metadata={
+            "opportunity_score": 98,
+            "opportunity_reasons": (
+                "multi_timeframe,one_hour_trend,pullback,confirmation_candle,"
+                "momentum_cross,momentum_positive,not_chasing,rr_good"
+            ),
+            "risk_multiplier": 1.0,
+            "risk_throttle": 1.0,
+            "recent_5h_position": 0.70,
+            "close_position_72h": 0.80,
+            "ret_24h": 0.045,
+            "ret_72h": 0.004,
+            "range_72h": 0.12,
+            "volatility_tier": "NORMAL",
+        },
+    )
+
+    assert adjusted_risk_multiplier(long_signal, settings) == pytest.approx(1.0)
+
+
 def test_confirmation_sizing_caps_mixed_shock_trend_down_shorts() -> None:
     settings = Settings(
         dry_run=True,

@@ -31,6 +31,7 @@ class StrategyEngine:
         enable_liquidity_sweep_reversal: bool = False,
         liquidity_sweep_risk_multiplier: float = 0.8,
         liquidity_sweep_require_confirmation: bool = True,
+        enable_two_candle_momentum: bool = False,
     ) -> None:
         self.min_stop_loss_pct = min_stop_loss_pct
         self.high_vol_min_stop_loss_pct = high_vol_min_stop_loss_pct
@@ -52,6 +53,9 @@ class StrategyEngine:
         self.enable_liquidity_sweep_reversal = enable_liquidity_sweep_reversal
         self.liquidity_sweep_risk_multiplier = liquidity_sweep_risk_multiplier
         self.liquidity_sweep_require_confirmation = liquidity_sweep_require_confirmation
+        self.enable_two_candle_momentum = enable_two_candle_momentum
+        self._pre_cross_cache: dict[tuple[str, str, int, int, float], bool] = {}
+        self._frame_cache: dict[tuple[str, int, int], Any] = {}
 
     def build_signals(
         self,
@@ -61,21 +65,35 @@ class StrategyEngine:
         features: MarketFeatures,
         candles_5m: list[list[float]],
         positions: list[Position],
+        candles_1h: list[list[float]] | None = None,
+        candles_4h: list[list[float]] | None = None,
     ) -> list[TradeSignal]:
+        signals: list[TradeSignal] = []
+        if regime != Regime.UNKNOWN:
+            signals.extend(self._transition_hedges(symbol, regime, previous_regime, features.close_1h, positions))
+            if signals:
+                return signals
+
+        signal = self._pre_cross_trend_signal(symbol, features, candles_5m, candles_1h, candles_4h, positions)
+        if signal:
+            return [self._with_strategy_route(signal, "pre_cross_trend")]
+
         if regime == Regime.UNKNOWN:
             return []
 
-        signals: list[TradeSignal] = []
-        signals.extend(self._transition_hedges(symbol, regime, previous_regime, features.close_1h, positions))
-        if signals:
-            return signals
-
         signal = self._liquidity_sweep_reversal_signal(symbol, regime, features, candles_5m, positions)
         if signal:
-            return [signal]
+            return [self._with_strategy_route(signal, "liquidity_sweep_reversal")]
 
         signal = self._user_4h_signal(symbol, regime, features, candles_5m, positions)
-        return [signal] if signal else []
+        if signal:
+            return [self._with_strategy_route(signal, "user_4h_core")]
+
+        signal = self._two_candle_momentum_signal(symbol, regime, features, candles_5m, positions)
+        if signal:
+            return [self._with_strategy_route(signal, "two_candle_momentum_experimental")]
+
+        return []
 
     def entry_diagnostics(
         self,
@@ -84,6 +102,8 @@ class StrategyEngine:
         features: MarketFeatures,
         candles_5m: list[list[float]],
         positions: list[Position],
+        candles_1h: list[list[float]] | None = None,
+        candles_4h: list[list[float]] | None = None,
     ) -> dict[str, Any]:
         if regime == Regime.UNKNOWN:
             return self._diagnostics(
@@ -1082,6 +1102,12 @@ class StrategyEngine:
         recent_5h_position = self._recent_range_position(df, price, bars=60)
         quiet_weak_up_drift = features.range_72h < 0.06 and features.ret_24h < 0.008
         local_top_without_impulse = recent_5h_position >= 0.94 and quiet_weak_up_drift
+        mixed_uptrend = features.ret_24h * features.ret_72h < 0
+        late_burst_without_72h_followthrough = (
+            features.close_position_72h >= 0.76
+            and features.ret_24h >= 0.015
+            and features.ret_72h <= 0.015
+        )
         shock_trend_up_late_entry_ok = self._late_shock_trend_entry_ok(
             PositionSide.LONG,
             features.close_position_72h,
@@ -1138,6 +1164,9 @@ class StrategyEngine:
             and ema_now >= ema_prev
             and shock_trend_up_rsi_quality
             and not local_top_without_impulse
+            and features.close_position_72h <= 0.85
+            and not (mixed_uptrend and features.close_position_72h >= 0.58)
+            and not late_burst_without_72h_followthrough
             and self._sol_allowed(symbol, PositionSide.LONG, regime, shock_trend_up_opportunity.score, features)
         ):
             stop = self._cap_stop(price, features.current_4h_low, PositionSide.LONG)
@@ -1192,6 +1221,7 @@ class StrategyEngine:
             and 0.25 <= recent_5h_position <= 0.72
             and features.close_position_72h <= 0.82
             and not local_top_without_impulse
+            and not (mixed_uptrend and features.close_position_72h >= 0.74)
             and self._sol_allowed(symbol, PositionSide.LONG, regime, 72, features)
         ):
             stop = self._cap_stop(price, features.current_4h_low, PositionSide.LONG)
@@ -1242,6 +1272,7 @@ class StrategyEngine:
             if symbol.startswith("SOL/")
             else True
         )
+        shock_trend_down_72h_not_bullish_pullback = not (features.ret_72h > 0.003 and features.ret_24h < 0)
         low_range_short = features.close_position_72h < 0.35
         shock_trend_down_rebound_ready = (
             not low_range_short
@@ -1315,7 +1346,9 @@ class StrategyEngine:
             and shock_trend_down_rsi_quality
             and shock_trend_down_range_ok
             and shock_trend_down_momentum_ok
+            and shock_trend_down_72h_not_bullish_pullback
             and shock_trend_down_rebound_ready
+            and not symbol.startswith(("SOL/", "XAU/"))
             and self._sol_allowed(symbol, PositionSide.SHORT, regime, shock_trend_down_opportunity.score, features)
         ):
             stop = self._cap_stop(price, features.current_4h_high, PositionSide.SHORT)
@@ -1371,7 +1404,9 @@ class StrategyEngine:
             and short_momentum_positive
             and 38 <= last_rsi <= 62
             and 0.22 <= shock_trend_down_recent_5h_position <= 0.82
+            and features.close_position_72h >= 0.15
             and shock_trend_down_range_ok
+            and shock_trend_down_72h_not_bullish_pullback
             and self._sol_allowed(symbol, PositionSide.SHORT, regime, 72, features)
         ):
             stop = self._cap_stop(price, features.current_4h_high, PositionSide.SHORT)
@@ -1470,6 +1505,260 @@ class StrategyEngine:
             reason=reason,
             metadata=metadata,
         )
+
+    def _with_strategy_route(self, signal: TradeSignal, route: str) -> TradeSignal:
+        signal.metadata = {**(signal.metadata or {}), "strategy_route": route}
+        return signal
+
+    def _pre_cross_trend_signal(
+        self,
+        symbol: str,
+        features: MarketFeatures,
+        candles_5m: list[list[float]],
+        candles_1h: list[list[float]] | None,
+        candles_4h: list[list[float]] | None,
+        positions: list[Position],
+    ) -> TradeSignal | None:
+        if positions:
+            return None
+        if not self._on_15m_boundary(candles_5m):
+            return None
+        df5 = ohlcv_frame(candles_5m)
+        df1h = self._cached_ohlcv_frame("1h", candles_1h or [])
+        df4h = self._cached_ohlcv_frame("4h", candles_4h or [])
+        if len(df5) < 80 or len(df1h) < 40 or len(df4h) < 35 or features.atr_1h <= 0:
+            return None
+        df15 = self._aggregate_bars(df5, 3)
+        if len(df15) < 40:
+            return None
+        frames = {"5m": df5, "15m": df15, "1h": df1h, "4h": df4h}
+        long_setups = {name: self._macd_pre_cross_state(frame, PositionSide.LONG) for name, frame in frames.items()}
+        short_setups = {name: self._macd_pre_cross_state(frame, PositionSide.SHORT) for name, frame in frames.items()}
+        price = float(df5.close.iloc[-1])
+        if all(long_setups.values()) and self._multi_frame_price_drift(frames, PositionSide.LONG):
+            raw_stop = min(float(df5.low.iloc[-18:].min()), price - 1.1 * features.atr_1h)
+            stop = self._cap_stop(price, raw_stop, PositionSide.LONG)
+            stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
+            reward = self._reward(price, stop, 2.4)
+            return self._entry_signal(
+                symbol,
+                Side.BUY,
+                PositionSide.LONG,
+                Regime.TREND_LONG,
+                price,
+                stop,
+                price + reward,
+                "multi_timeframe_macd_pre_cross_long",
+                {
+                    "opportunity_score": 96,
+                    "opportunity_grade": "A",
+                    "opportunity_confidence": 0.96,
+                    "opportunity_reasons": "macd_pre_cross_5m_15m_1h_4h,trend_not_crossed,early_entry",
+                    "risk_multiplier": 2.5,
+                    "trailing_gap_pct": max(self.trailing_gap_pct, 0.0025),
+                    "min_trailing_activate_r": 0.75,
+                    "breakeven_activate_r": 0.45,
+                    "breakeven_buffer_pct": 0.0003,
+                    "entry_stage": "pre_cross_trend",
+                },
+            )
+        if all(short_setups.values()) and self._multi_frame_price_drift(frames, PositionSide.SHORT):
+            raw_stop = max(float(df5.high.iloc[-18:].max()), price + 1.1 * features.atr_1h)
+            stop = self._cap_stop(price, raw_stop, PositionSide.SHORT)
+            stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
+            reward = self._reward(price, stop, 2.4)
+            return self._entry_signal(
+                symbol,
+                Side.SELL,
+                PositionSide.SHORT,
+                Regime.TREND_SHORT,
+                price,
+                stop,
+                price - reward,
+                "multi_timeframe_macd_pre_cross_short",
+                {
+                    "opportunity_score": 96,
+                    "opportunity_grade": "A",
+                    "opportunity_confidence": 0.96,
+                    "opportunity_reasons": "macd_pre_cross_5m_15m_1h_4h,trend_not_crossed,early_entry",
+                    "risk_multiplier": 2.5,
+                    "trailing_gap_pct": max(self.trailing_gap_pct, 0.0025),
+                    "min_trailing_activate_r": 0.75,
+                    "breakeven_activate_r": 0.45,
+                    "breakeven_buffer_pct": 0.0003,
+                    "entry_stage": "pre_cross_trend",
+                },
+            )
+        return None
+
+    def _two_candle_momentum_signal(
+        self,
+        symbol: str,
+        regime: Regime,
+        features: MarketFeatures,
+        candles_5m: list[list[float]],
+        positions: list[Position],
+    ) -> TradeSignal | None:
+        if not self.enable_two_candle_momentum:
+            return None
+        if positions:
+            return None
+        if not self._on_15m_boundary(candles_5m):
+            return None
+        df5 = ohlcv_frame(candles_5m)
+        if len(df5) < 36 or features.atr_1h <= 0:
+            return None
+        df15 = self._aggregate_bars(df5, 3)
+        if len(df15) < 8:
+            return None
+        price = float(df5.close.iloc[-1])
+        atr_5m = float(atr(df5.high, df5.low, df5.close).iloc[-1]) or features.atr_1h / 12
+        long_allowed = (
+            regime in {Regime.TREND_LONG, Regime.SHOCK_TREND_UP}
+            and features.ema20_1h >= features.ema60_1h
+            and features.close_position_72h <= 0.82
+            and features.ret_24h >= -0.006
+        )
+        short_allowed = (
+            regime in {Regime.TREND_SHORT, Regime.SHOCK_TREND_DOWN}
+            and features.ema20_1h <= features.ema60_1h
+            and features.close_position_72h >= 0.18
+            and features.ret_24h <= 0.006
+        )
+        if (
+            long_allowed
+            and self._two_expanding_candles(df5, PositionSide.LONG)
+            and self._two_expanding_candles(df15, PositionSide.LONG)
+        ):
+            stop = min(float(df5.low.iloc[-2:].min()), price - 1.2 * atr_5m)
+            stop = self._cap_stop(price, stop, PositionSide.LONG)
+            return self._entry_signal(
+                symbol,
+                Side.BUY,
+                PositionSide.LONG,
+                Regime.SHOCK_TREND_UP if regime == Regime.UNKNOWN else regime,
+                price,
+                stop,
+                price + self._reward(price, stop, 1.2),
+                "two_candle_5m_15m_momentum_long",
+                {
+                    "opportunity_score": 78,
+                    "opportunity_grade": "C",
+                    "opportunity_confidence": 0.78,
+                    "opportunity_reasons": "two_green_5m,two_green_15m,higher_high",
+                    "risk_multiplier": 0.35,
+                    "trailing_gap_pct": 0.0025,
+                    "min_trailing_activate_r": 0.85,
+                    "breakeven_activate_r": 0.55,
+                    "breakeven_buffer_pct": 0.0002,
+                    "entry_stage": "short_term_momentum",
+                },
+            )
+        if (
+            short_allowed
+            and self._two_expanding_candles(df5, PositionSide.SHORT)
+            and self._two_expanding_candles(df15, PositionSide.SHORT)
+        ):
+            stop = max(float(df5.high.iloc[-2:].max()), price + 1.2 * atr_5m)
+            stop = self._cap_stop(price, stop, PositionSide.SHORT)
+            return self._entry_signal(
+                symbol,
+                Side.SELL,
+                PositionSide.SHORT,
+                Regime.SHOCK_TREND_DOWN if regime == Regime.UNKNOWN else regime,
+                price,
+                stop,
+                price - self._reward(price, stop, 1.2),
+                "two_candle_5m_15m_momentum_short",
+                {
+                    "opportunity_score": 78,
+                    "opportunity_grade": "C",
+                    "opportunity_confidence": 0.78,
+                    "opportunity_reasons": "two_red_5m,two_red_15m,lower_low",
+                    "risk_multiplier": 0.35,
+                    "trailing_gap_pct": 0.0025,
+                    "min_trailing_activate_r": 0.85,
+                    "breakeven_activate_r": 0.55,
+                    "breakeven_buffer_pct": 0.0002,
+                    "entry_stage": "short_term_momentum",
+                },
+            )
+        return None
+
+    def _macd_pre_cross_state(self, frame, side: PositionSide) -> bool:
+        if len(frame) < 35:
+            return False
+        key = (
+            "macd_pre_cross",
+            side.value,
+            len(frame),
+            int(frame.ts.iloc[-1]) if "ts" in frame else len(frame),
+            round(float(frame.close.iloc[-1]), 8),
+        )
+        cached = self._pre_cross_cache.get(key)
+        if cached is not None:
+            return cached
+        close = frame.close.astype(float)
+        macd_line, signal_line, histogram = macd(close)
+        gap = float(macd_line.iloc[-1] - signal_line.iloc[-1])
+        prev_gap = float(macd_line.iloc[-2] - signal_line.iloc[-2])
+        older_gap = float(macd_line.iloc[-4] - signal_line.iloc[-4])
+        gap_limit = max(float(close.iloc[-1]) * 0.0015, float(histogram.tail(24).abs().median()) * 0.85)
+        if side == PositionSide.LONG:
+            result = gap < 0 and abs(gap) <= gap_limit and gap > prev_gap > older_gap
+        else:
+            result = gap > 0 and abs(gap) <= gap_limit and gap < prev_gap < older_gap
+        if len(self._pre_cross_cache) > 2048:
+            self._pre_cross_cache.clear()
+        self._pre_cross_cache[key] = result
+        return result
+
+    def _cached_ohlcv_frame(self, label: str, rows: list[list[float]]):
+        if not rows:
+            return ohlcv_frame(rows)
+        key = (label, len(rows), int(rows[-1][0]))
+        cached = self._frame_cache.get(key)
+        if cached is not None:
+            return cached
+        frame = ohlcv_frame(rows)
+        if len(self._frame_cache) > 512:
+            self._frame_cache.clear()
+        self._frame_cache[key] = frame
+        return frame
+
+    def _multi_frame_price_drift(self, frames: dict[str, Any], side: PositionSide) -> bool:
+        checks = []
+        for name, frame in frames.items():
+            lookback = 3 if name in {"1h", "4h"} else 5
+            if len(frame) <= lookback:
+                return False
+            current = float(frame.close.iloc[-1])
+            previous = float(frame.close.iloc[-lookback])
+            change = (current - previous) / previous if previous else 0.0
+            checks.append(change >= -0.004 if side == PositionSide.LONG else change <= 0.004)
+        return all(checks)
+
+    def _two_expanding_candles(self, frame, side: PositionSide) -> bool:
+        if len(frame) < 2:
+            return False
+        first = frame.iloc[-2]
+        second = frame.iloc[-1]
+        if side == PositionSide.LONG:
+            return bool(
+                float(first.close) > float(first.open)
+                and float(second.close) > float(second.open)
+                and float(second.high) > float(first.high)
+            )
+        return bool(
+            float(first.close) < float(first.open)
+            and float(second.close) < float(second.open)
+            and float(second.low) < float(first.low)
+        )
+
+    def _on_15m_boundary(self, candles_5m: list[list[float]]) -> bool:
+        if not candles_5m:
+            return False
+        return (int(candles_5m[-1][0]) + 300_000) % 900_000 == 0
 
     def _sol_allowed(
         self,

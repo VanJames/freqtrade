@@ -128,6 +128,9 @@ def quality_risk_cap(signal: TradeSignal | dict[str, Any], settings: SizingSetti
                 cap = min(cap, 0.75)
             if quiet_weak_up_drift and close_position >= 0.80 and ret_24h < 0.006:
                 cap = min(cap, 1.10)
+            late_burst_without_72h_followthrough = close_position >= 0.76 and ret_24h >= 0.015 and ret_72h <= 0.015
+            if late_burst_without_72h_followthrough:
+                cap = min(cap, 1.0)
             return max(0.1, cap)
         return cap
 

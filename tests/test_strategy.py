@@ -4,6 +4,7 @@ import pytest
 import pandas as pd
 
 from trading_system.backtest import BacktestConfig, cap_stop, maybe_exit, signal_reward
+from trading_system.indicators import ohlcv_frame
 from trading_system.models import MarketFeatures, PositionSide, Regime
 from trading_system.strategy import StrategyEngine
 from trading_system.volatility import build_volatility_policy
@@ -253,3 +254,94 @@ def test_liquidity_sweep_reversal_detects_downside_reclaim() -> None:
     assert signal.reason == "liquidity_sweep_downside_confirmed_long"
     assert signal.metadata["opportunity_score"] >= 92
     assert signal.metadata["confirmation_mode"] == "next_5m"
+
+
+def test_macd_pre_cross_detects_approaching_bullish_cross_before_crossing() -> None:
+    engine = StrategyEngine()
+    values = []
+    price = 100.0
+    for index in range(100):
+        if index < 55:
+            price += 0.20
+        elif index < 85:
+            price -= 0.01
+        else:
+            price += 0.02
+        values.append(price)
+    frame = ohlcv_frame([[idx * 300_000, value, value + 0.1, value - 0.1, value, 1.0] for idx, value in enumerate(values)])
+
+    assert engine._macd_pre_cross_state(frame, PositionSide.LONG)
+    assert not engine._macd_pre_cross_state(frame, PositionSide.SHORT)
+
+
+def test_two_candle_momentum_requires_5m_and_15m_expanding_candles() -> None:
+    engine = StrategyEngine(enable_two_candle_momentum=True)
+    candles = []
+    price = 100.0
+    for index in range(30):
+        close = price + 0.01
+        candles.append([index * 300_000, price, close + 0.03, price - 0.03, close, 1.0])
+        price = close
+    for index, (open_price, close_price, high, low) in enumerate(
+        [
+            (100.30, 100.36, 100.38, 100.28),
+            (100.36, 100.42, 100.44, 100.35),
+            (100.42, 100.48, 100.50, 100.40),
+            (100.48, 100.56, 100.58, 100.47),
+            (100.56, 100.66, 100.69, 100.55),
+            (100.66, 100.78, 100.82, 100.65),
+        ],
+        start=30,
+    ):
+        candles.append([index * 300_000, open_price, high, low, close_price, 1.0])
+    features = MarketFeatures(
+        atr_1h=0.5,
+        close_1h=100.78,
+        ema20_1h=101.0,
+        ema60_1h=100.0,
+        close_position_72h=0.5,
+        ret_24h=0.01,
+    )
+
+    signals = engine.build_signals("BTC/USDT:USDT", Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_UP, features, candles, [])
+
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal.position_side == PositionSide.LONG
+    assert signal.reason == "two_candle_5m_15m_momentum_long"
+    assert signal.metadata["risk_multiplier"] == 0.35
+    assert signal.metadata["strategy_route"] == "two_candle_momentum_experimental"
+
+
+def test_two_candle_momentum_is_disabled_by_default() -> None:
+    engine = StrategyEngine()
+    candles = []
+    price = 100.0
+    for index in range(30):
+        close = price + 0.01
+        candles.append([index * 300_000, price, close + 0.03, price - 0.03, close, 1.0])
+        price = close
+    for index, (open_price, close_price, high, low) in enumerate(
+        [
+            (100.30, 100.36, 100.38, 100.28),
+            (100.36, 100.42, 100.44, 100.35),
+            (100.42, 100.48, 100.50, 100.40),
+            (100.48, 100.56, 100.58, 100.47),
+            (100.56, 100.66, 100.69, 100.55),
+            (100.66, 100.78, 100.82, 100.65),
+        ],
+        start=30,
+    ):
+        candles.append([index * 300_000, open_price, high, low, close_price, 1.0])
+    features = MarketFeatures(
+        atr_1h=0.5,
+        close_1h=100.78,
+        ema20_1h=101.0,
+        ema60_1h=100.0,
+        close_position_72h=0.5,
+        ret_24h=0.01,
+    )
+
+    signals = engine.build_signals("BTC/USDT:USDT", Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_UP, features, candles, [])
+
+    assert signals == []

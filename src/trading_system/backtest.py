@@ -103,6 +103,7 @@ class SimTrade:
     risk_multiplier: float = 1.0
     attribution: str = ""
     attribution_detail: str = ""
+    signal_reason: str = ""
     entry_close_position_72h: float = 0.0
     entry_ret_24h: float = 0.0
     entry_ret_72h: float = 0.0
@@ -450,8 +451,10 @@ class OKXBacktester:
                 regime=regime,
                 previous_regime=previous_regime,
                 features=market_features,
-                candles_5m=history_5m.iloc[-200:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                candles_5m=history_5m.iloc[-300:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
                 positions=backtest_positions(symbol, open_position),
+                candles_1h=history_1h.iloc[-120:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                candles_4h=history_4h.iloc[-100:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
             )
             if not strategy_signals:
                 previous_regime = regime
@@ -662,14 +665,21 @@ class OKXBacktester:
         if not result.trades:
             lines.append("本次回测未触发交易。")
         else:
-            lines.append("| symbol | side | regime | score | risk | entry | exit | pnl | reason | attribution | 72h_pos |")
-            lines.append("|---|---:|---|---:|---:|---:|---:|---:|---|---|---:|")
+            lines.append(
+                "| entry_time | exit_time | symbol | side | regime | signal | score | risk | entry | exit | pnl | reason | attribution | 72h_pos | ret24 | ret72 |"
+            )
+            lines.append(
+                "|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|"
+            )
             for trade in result.trades:
                 lines.append(
-                    f"| {trade.symbol} | {trade.side.value} | {trade.regime.value} | "
+                    f"| {trade.entry_time.isoformat()} | {trade.exit_time.isoformat()} | "
+                    f"{trade.symbol} | {trade.side.value} | {trade.regime.value} | "
+                    f"{trade.signal_reason or '-'} | "
                     f"{trade.opportunity_grade}{trade.opportunity_score} | {trade.risk_multiplier:.2f} | "
                     f"{trade.entry_price:.4f} | {trade.exit_price:.4f} | {trade.pnl:.2f} | "
-                    f"{trade.reason} | {trade.attribution or '-'} | {trade.entry_close_position_72h:.4f} |"
+                    f"{trade.reason} | {trade.attribution or '-'} | {trade.entry_close_position_72h:.4f} | "
+                    f"{trade.entry_ret_24h:.4%} | {trade.entry_ret_72h:.4%} |"
                 )
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return report_path
@@ -803,6 +813,7 @@ def trade_signal_to_position(
         "opportunity_score": int(metadata.get("opportunity_score", 0) or 0),
         "opportunity_grade": str(metadata.get("opportunity_grade", "")),
         "risk_multiplier": risk_multiplier,
+        "signal_reason": signal.reason,
         "entry_close_position_72h": float(features.get("close_position_72h", 0.0) or 0.0),
         "entry_ret_24h": float(features.get("ret_24h", 0.0) or 0.0),
         "entry_ret_72h": float(features.get("ret_72h", 0.0) or 0.0),
@@ -1830,6 +1841,7 @@ def close_position(
         risk_multiplier=float(position.get("risk_multiplier", 1.0)),
         attribution=attribution,
         attribution_detail=attribution_detail,
+        signal_reason=str(position.get("signal_reason", "")),
         entry_close_position_72h=float(position.get("entry_close_position_72h", 0.0) or 0.0),
         entry_ret_24h=float(position.get("entry_ret_24h", 0.0) or 0.0),
         entry_ret_72h=float(position.get("entry_ret_72h", 0.0) or 0.0),
