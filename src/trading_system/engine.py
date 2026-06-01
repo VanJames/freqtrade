@@ -118,6 +118,9 @@ class OKXQuantEngine:
         self._pending_entry_keys: set[tuple[str, PositionSide]] = set()
         self._entry_order_cooldowns: dict[tuple[str, PositionSide], float] = {}
         self._exit_order_cooldowns: dict[tuple[str, PositionSide], float] = {}
+        self._last_entry_submitted_at: datetime | None = None
+        self._last_order_store_checked_at = 0.0
+        self._adaptive_log_state: dict[str, str] = {}
         self.position_monitor_status: dict[str, object] = {
             "interval_seconds": settings.position_monitor_interval_seconds,
             "last_checked_at": None,
@@ -302,7 +305,22 @@ class OKXQuantEngine:
             range_72h=features.range_72h,
         )
         review_features["volatility_tier"] = volatility_policy.tier
-        llm_review_required = needs_llm_review(volatility_policy, regime)
+        adaptive_no_trade_hours = (
+            await self._hours_since_latest_entry()
+            if self.settings.enable_adaptive_strategy_switch
+            else 0.0
+        )
+        adaptive_review_required = (
+            self.settings.enable_adaptive_strategy_switch
+            and adaptive_no_trade_hours >= float(self.settings.adaptive_no_trade_hours)
+            and features.range_24h >= float(self.settings.adaptive_min_range_24h_pct)
+        )
+        review_features["adaptive_no_trade_hours"] = round(adaptive_no_trade_hours, 2)
+        review_features["adaptive_review_required"] = adaptive_review_required
+        review_features["range_24h"] = features.range_24h
+        review_features["ret_24h"] = features.ret_24h
+        review_features["ret_72h"] = features.ret_72h
+        llm_review_required = needs_llm_review(volatility_policy, regime) or adaptive_review_required
         if llm_review_required:
             self._set_entry_status(
                 symbol,
@@ -313,10 +331,11 @@ class OKXQuantEngine:
                 blockers=[{"code": "llm_review_pending", "passed": False}],
             )
             logger.debug(
-                "llm review requested symbol=%s regime=%s volatility_tier=%s",
+                "llm review requested symbol=%s regime=%s volatility_tier=%s adaptive=%s",
                 symbol,
                 regime.value,
                 volatility_policy.tier,
+                adaptive_review_required,
             )
         review = (
             await self.llm_reviewer.review(
@@ -452,6 +471,7 @@ class OKXQuantEngine:
             positions,
             self.klines[symbol]["1h"],
             self.klines[symbol]["4h"],
+            context=await self._adaptive_strategy_context(symbol, regime, features),
         )
         if not signals:
             return []
@@ -585,6 +605,7 @@ class OKXQuantEngine:
                     )
                     self.position_manager.trailing.pop((signal.symbol, signal.position_side), None)
                 if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
+                    self._last_entry_submitted_at = datetime.now(timezone.utc)
                     self.position_manager.register_entry(signal, abs(signal.price - signal.stop_loss))
                 if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
                     self.risk.reserve_risk(
@@ -669,6 +690,76 @@ class OKXQuantEngine:
             position.side == signal.position_side and abs(position.contracts) > 0
             for position in positions
         )
+
+    async def _adaptive_strategy_context(
+        self,
+        symbol: str,
+        regime: Regime,
+        features,
+    ) -> dict[str, object]:
+        if not self.settings.enable_adaptive_strategy_switch:
+            return {}
+        no_trade_hours = await self._hours_since_latest_entry()
+        range_24h = float(getattr(features, "range_24h", 0.0) or 0.0)
+        ret_24h = float(getattr(features, "ret_24h", 0.0) or 0.0)
+        enough_inactivity = no_trade_hours >= float(self.settings.adaptive_no_trade_hours)
+        enough_motion = range_24h >= float(self.settings.adaptive_min_range_24h_pct)
+        continuation_short = (
+            enough_inactivity
+            and enough_motion
+            and regime in {Regime.SHOCK_TREND_DOWN, Regime.TREND_SHORT}
+            and ret_24h < 0
+        )
+        context = {
+            "adaptive_strategy_enabled": enough_inactivity and enough_motion,
+            "adaptive_continuation_short": continuation_short,
+            "adaptive_no_trade_hours": round(no_trade_hours, 2),
+            "adaptive_range_24h": round(range_24h, 6),
+            "adaptive_reason": (
+                "no_trade_with_downside_volatility"
+                if continuation_short
+                else "inactive_but_no_strategy_match"
+                if enough_inactivity
+                else "core_strategy_active"
+            ),
+        }
+        status = self.symbol_status.setdefault(symbol, {})
+        status["adaptive_strategy"] = context
+        state_key = f"{context['adaptive_reason']}:{continuation_short}"
+        if self._adaptive_log_state.get(symbol) != state_key:
+            self._adaptive_log_state[symbol] = state_key
+            logger.info(
+                "adaptive strategy review symbol=%s regime=%s no_trade_hours=%.2f range_24h=%.4f "
+                "ret_24h=%.4f continuation_short=%s reason=%s",
+                symbol,
+                regime.value,
+                no_trade_hours,
+                range_24h,
+                ret_24h,
+                continuation_short,
+                context["adaptive_reason"],
+            )
+        return context
+
+    async def _hours_since_latest_entry(self) -> float:
+        now = datetime.now(timezone.utc)
+        if self.store and time.monotonic() - self._last_order_store_checked_at >= 300:
+            self._last_order_store_checked_at = time.monotonic()
+            try:
+                latest = await self.store.latest_order_created_at()
+            except Exception:
+                logger.debug("latest order lookup failed", exc_info=True)
+            else:
+                if latest is not None and (
+                    self._last_entry_submitted_at is None or latest > self._last_entry_submitted_at
+                ):
+                    self._last_entry_submitted_at = latest
+        if self._last_entry_submitted_at is None:
+            return float(self.settings.adaptive_no_trade_hours)
+        latest = self._last_entry_submitted_at
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=timezone.utc)
+        return max(0.0, (now - latest).total_seconds() / 3600)
 
     @staticmethod
     def _cooldown_active(

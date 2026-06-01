@@ -199,6 +199,9 @@ def backtest(
             llm_regime_model=llm_model or settings.llm_regime_model,
             llm_regime_base_url=settings.llm_regime_base_url,
             llm_regime_api_key_env=settings.llm_regime_api_key_env,
+            enable_adaptive_strategy_switch=settings.enable_adaptive_strategy_switch,
+            adaptive_no_trade_hours=settings.adaptive_no_trade_hours,
+            adaptive_min_range_24h_pct=settings.adaptive_min_range_24h_pct,
             llm_max_calls=llm_max_calls,
         )
     ).run()

@@ -33,12 +33,12 @@ class BacktestConfig:
     warmup_days: int = 10
     initial_equity: float = 10_000.0
     risk_percent: float = 0.01
-    same_direction_risk_limit: float = 0.03
+    same_direction_risk_limit: float = 0.06
     daily_drawdown_limit: float = 0.05
     shock_leverage_limit: float = 3.0
     trend_symbol_leverage_limit: float = 5.0
-    max_signal_risk_multiplier: float = 1.5
-    confirmation_position_sizing: bool = False
+    max_signal_risk_multiplier: float = 3.0
+    confirmation_position_sizing: bool = True
     confirmation_max_risk_multiplier: float = 3.0
     funding_block_threshold: float = 0.001
     backtest_funding_rate: float = 0.0
@@ -72,11 +72,14 @@ class BacktestConfig:
     defensive_risk_multiplier: float = 0.7
     shock_trend_risk_multiplier: float = 0.1
     shock_trend_down_risk_multiplier: float = 0.1
-    enable_shock_trend_scout: bool = False
+    enable_shock_trend_scout: bool = True
     shock_trend_scout_risk_multiplier: float = 1.5
     enable_liquidity_sweep_reversal: bool = False
     liquidity_sweep_risk_multiplier: float = 0.8
     liquidity_sweep_require_confirmation: bool = True
+    enable_adaptive_strategy_switch: bool = True
+    adaptive_no_trade_hours: float = 48.0
+    adaptive_min_range_24h_pct: float = 0.012
     llm_regime_review_enabled: bool = False
     llm_regime_provider: str = "openai"
     llm_regime_model: str = "gpt-4.1-mini"
@@ -104,6 +107,7 @@ class SimTrade:
     attribution: str = ""
     attribution_detail: str = ""
     signal_reason: str = ""
+    entry_stage: str = ""
     entry_close_position_72h: float = 0.0
     entry_ret_24h: float = 0.0
     entry_ret_72h: float = 0.0
@@ -234,20 +238,177 @@ class OKXBacktester:
             ended_at=datetime.fromtimestamp(end_ms / 1000, timezone.utc),
         )
 
+        candles_by_symbol: dict[str, list[list[float]]] = {}
         for symbol in self.config.symbols:
             candles_5m = self.fetch_ohlcv(symbol, fetch_start_ms, end_ms)
+            candles_by_symbol[symbol] = candles_5m
             result.candles_by_symbol[symbol] = len(candles_5m)
-            if len(candles_5m) < 1000:
-                continue
-            trades, hits, curve, counts = self.backtest_symbol(symbol, candles_5m, start_ms)
-            result.trades.extend(trades)
-            result.regime_hits.extend(hits)
-            result.equity_curve.extend(curve)
-            for regime, count in counts.items():
-                result.regime_counts[regime] = result.regime_counts.get(regime, 0) + count
+
+        trades, hits, curve, counts = self.backtest_portfolio(candles_by_symbol, start_ms)
+        result.trades.extend(trades)
+        result.regime_hits.extend(hits)
+        result.equity_curve.extend(curve)
+        result.regime_counts.update(counts)
 
         report_path = self.write_report(result)
         return result, report_path
+
+    def backtest_portfolio(
+        self,
+        candles_by_symbol: dict[str, list[list[float]]],
+        start_ms: int,
+    ) -> tuple[list[SimTrade], list[RegimeHit], list[tuple[pd.Timestamp, float]], dict[str, int]]:
+        states: dict[str, dict[str, Any]] = {}
+        all_times: set[pd.Timestamp] = set()
+        for symbol, candles_5m in candles_by_symbol.items():
+            if len(candles_5m) < 1000:
+                continue
+            df5 = ohlcv_frame(candles_5m)
+            df5["dt"] = pd.to_datetime(df5.ts, unit="ms", utc=True)
+            df5 = df5.set_index("dt")
+            df1h = self.resample(df5, "1h")
+            df4h = self.resample(df5, "4h")
+            index_by_time = {timestamp: index for index, timestamp in enumerate(df5.index)}
+            all_times.update(df5[df5.ts >= start_ms].index)
+            states[symbol] = {
+                "df5": df5,
+                "df1h": df1h,
+                "df4h": df4h,
+                "index_by_time": index_by_time,
+                "open_position": None,
+                "last_regime_check": None,
+                "previous_regime": Regime.UNKNOWN,
+                "last_feature_key": None,
+                "cached_regime": Regime.UNKNOWN,
+                "cached_market_features": None,
+                "cached_features": {},
+            }
+
+        equity = self.config.initial_equity
+        trades: list[SimTrade] = []
+        hits: list[RegimeHit] = []
+        curve: list[tuple[pd.Timestamp, float]] = []
+        regime_counts: dict[str, int] = {}
+        risk = RiskManager(self.config)
+        risk.update_equity(equity)
+        last_global_entry_time: pd.Timestamp | None = None
+
+        for now in sorted(all_times):
+            for symbol in self.config.symbols:
+                state = states.get(symbol)
+                if not state:
+                    continue
+                df5 = state["df5"]
+                idx = state["index_by_time"].get(now)
+                if idx is None or idx < 240:
+                    continue
+                row = df5.iloc[idx]
+                history_5m = df5.iloc[: idx + 1]
+                history_1h = state["df1h"][state["df1h"].index <= now].iloc[:-1]
+                history_4h = state["df4h"][state["df4h"].index <= now].iloc[:-1]
+                if len(history_1h) < 80 or len(history_4h) < 50:
+                    continue
+
+                feature_key = (history_1h.index[-1], history_4h.index[-1])
+                if feature_key != state["last_feature_key"]:
+                    regime, market_features = classify_user_4h_market(history_1h, history_4h, symbol)
+                    state["cached_regime"] = regime
+                    state["cached_market_features"] = market_features
+                    state["cached_features"] = market_features_to_backtest_dict(market_features, history_1h, history_4h)
+                    state["last_feature_key"] = feature_key
+                regime = state["cached_regime"]
+                market_features = state["cached_market_features"]
+                features = state["cached_features"]
+                if market_features is None:
+                    continue
+
+                last_regime_check = state["last_regime_check"]
+                if last_regime_check is None or now - last_regime_check >= pd.Timedelta(hours=1):
+                    regime_counts[regime.value] = regime_counts.get(regime.value, 0) + 1
+                    hit = evaluate_regime_hit(symbol, now, regime, features, df5, idx)
+                    if hit:
+                        hits.append(hit)
+                    state["last_regime_check"] = now
+
+                open_position = state["open_position"]
+                if open_position:
+                    exit_price, reason = maybe_exit(open_position, row)
+                    if exit_price is not None:
+                        trade = close_position(symbol, open_position, now, exit_price, reason, equity, self.config)
+                        equity += trade.pnl
+                        risk.update_equity(equity)
+                        trades.append(trade)
+                        curve.append((now, equity))
+                        risk.release_risk(open_position["side"], float(open_position.get("risk_multiplier", 1.0)))
+                        state["open_position"] = None
+                        state["previous_regime"] = regime
+                        continue
+
+                review = self.review_regime_sync(symbol, regime, features)
+                if not review.allow_trade or review.proposed_regime != regime:
+                    state["previous_regime"] = regime
+                    continue
+
+                strategy_signals = self.strategy.build_signals(
+                    symbol=symbol,
+                    regime=regime,
+                    previous_regime=state["previous_regime"] or regime,
+                    features=market_features,
+                    candles_5m=history_5m.iloc[-300:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                    positions=backtest_positions(symbol, state["open_position"]),
+                    candles_1h=history_1h.iloc[-120:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                    candles_4h=history_4h.iloc[-100:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                    context=adaptive_strategy_context(
+                        self.config,
+                        now,
+                        start_ms,
+                        last_global_entry_time,
+                        regime,
+                        features,
+                    ),
+                )
+                if not strategy_signals:
+                    state["previous_regime"] = regime
+                    continue
+                trade_signal = strategy_signals[0]
+                if state["open_position"] and not can_add_to_position(state["open_position"], trade_signal):
+                    state["previous_regime"] = regime
+                    continue
+                decision = risk.assess(trade_signal, equity, self.config.backtest_funding_rate)
+                if not decision.allowed:
+                    state["previous_regime"] = regime
+                    continue
+                risk_multiplier = risk.signal_risk_multiplier(trade_signal)
+                qty = decision.size
+                risk.reserve_risk(trade_signal.position_side, risk_multiplier)
+                if state["open_position"]:
+                    add_to_position(state["open_position"], trade_signal, qty, risk_multiplier)
+                else:
+                    state["open_position"] = trade_signal_to_position(
+                        trade_signal,
+                        qty,
+                        now,
+                        features["atr_1h"],
+                        risk_multiplier,
+                        features,
+                    )
+                    last_global_entry_time = now
+                state["previous_regime"] = regime
+
+        for symbol, state in states.items():
+            open_position = state["open_position"]
+            if not open_position:
+                continue
+            df5 = state["df5"]
+            now = df5.index[-1]
+            exit_price = float(df5.close.iloc[-1])
+            trade = close_position(symbol, open_position, now, exit_price, "end_of_backtest", equity, self.config)
+            equity += trade.pnl
+            trades.append(trade)
+            curve.append((now, equity))
+            risk.release_risk(open_position["side"], float(open_position.get("risk_multiplier", 1.0)))
+
+        return trades, hits, curve, regime_counts
 
     def optimize_symbol(
         self,
@@ -399,6 +560,7 @@ class OKXBacktester:
         cached_features: dict[str, Any] = {}
         risk = RiskManager(self.config)
         risk.update_equity(equity)
+        last_entry_time: pd.Timestamp | None = None
 
         for idx in range(240, len(df5)):
             now = df5.index[idx]
@@ -455,6 +617,14 @@ class OKXBacktester:
                 positions=backtest_positions(symbol, open_position),
                 candles_1h=history_1h.iloc[-120:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
                 candles_4h=history_4h.iloc[-100:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                context=adaptive_strategy_context(
+                    self.config,
+                    now,
+                    start_ms,
+                    last_entry_time,
+                    regime,
+                    features,
+                ),
             )
             if not strategy_signals:
                 previous_regime = regime
@@ -481,6 +651,7 @@ class OKXBacktester:
                     risk_multiplier,
                     features,
                 )
+                last_entry_time = now
             previous_regime = regime
 
         if open_position:
@@ -523,12 +694,13 @@ class OKXBacktester:
             f"- 风控约束: same direction `{self.config.same_direction_risk_limit:.2%}`, daily drawdown `{self.config.daily_drawdown_limit:.2%}`, funding block `{self.config.funding_block_threshold:.4%}`, backtest funding `{self.config.backtest_funding_rate:.4%}`",
             f"- 插针/扫单反转策略: `{self.config.enable_liquidity_sweep_reversal}`, risk `{self.config.liquidity_sweep_risk_multiplier:.2f}x`, next confirmation `{self.config.liquidity_sweep_require_confirmation}`",
             f"- SHOCK_TREND scout: `{self.config.enable_shock_trend_scout}`, risk `{self.config.shock_trend_scout_risk_multiplier:.2f}x`",
+            f"- 自适应策略切换: `{self.config.enable_adaptive_strategy_switch}`, no-trade `{self.config.adaptive_no_trade_hours:.1f}h`, min 24h range `{self.config.adaptive_min_range_24h_pct:.2%}`",
             f"- 手续费假设: maker `{self.config.fee_rate:.4%}` 每边，滑点 `{self.config.slippage_rate:.4%}` 每边",
             f"- SHOCK 参数: stop `{self.config.shock_stop_atr} ATR`, take_profit `{self.config.shock_take_profit_atr} ATR`, "
             f"long zone `{self.config.shock_long_zone_min:.0%}-{self.config.shock_long_zone_max:.0%}`, "
             f"short zone `{self.config.shock_short_zone_min:.0%}-{self.config.shock_short_zone_max:.0%}`",
             f"- 行情判断模式: `{self.config.classifier_mode}`",
-            "- 数据说明: 本次按用户要求只使用 K 线，爆仓/OI 前瞻因子未纳入历史验证；趋势分类采用 K线-only 回测模式。",
+            "- 数据说明: 本次按组合时间线推进所有品种，共用账户权益、风控和最近成交时间；只使用 K 线，爆仓/OI 前瞻因子未纳入历史验证。",
             f"- LLM 复核: `{self.config.llm_regime_review_enabled}`, provider `{self.config.llm_regime_provider}`, model `{self.config.llm_regime_model}`",
             f"- LLM 复核调用次数: `{self.llm_review_count}`",
             "",
@@ -666,16 +838,16 @@ class OKXBacktester:
             lines.append("本次回测未触发交易。")
         else:
             lines.append(
-                "| entry_time | exit_time | symbol | side | regime | signal | score | risk | entry | exit | pnl | reason | attribution | 72h_pos | ret24 | ret72 |"
+                "| entry_time | exit_time | symbol | side | regime | signal | stage | score | risk | entry | exit | pnl | reason | attribution | 72h_pos | ret24 | ret72 |"
             )
             lines.append(
-                "|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|"
+                "|---|---|---|---:|---|---|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|"
             )
             for trade in result.trades:
                 lines.append(
                     f"| {trade.entry_time.isoformat()} | {trade.exit_time.isoformat()} | "
                     f"{trade.symbol} | {trade.side.value} | {trade.regime.value} | "
-                    f"{trade.signal_reason or '-'} | "
+                    f"{trade.signal_reason or '-'} | {trade.entry_stage or '-'} | "
                     f"{trade.opportunity_grade}{trade.opportunity_score} | {trade.risk_multiplier:.2f} | "
                     f"{trade.entry_price:.4f} | {trade.exit_price:.4f} | {trade.pnl:.2f} | "
                     f"{trade.reason} | {trade.attribution or '-'} | {trade.entry_close_position_72h:.4f} | "
@@ -839,6 +1011,37 @@ def backtest_positions(symbol: str, open_position: dict[str, Any] | None) -> lis
     ]
 
 
+def adaptive_strategy_context(
+    config: BacktestConfig,
+    now: pd.Timestamp,
+    start_ms: int,
+    last_entry_time: pd.Timestamp | None,
+    regime: Regime,
+    features: dict[str, Any],
+) -> dict[str, object]:
+    if not config.enable_adaptive_strategy_switch:
+        return {}
+    start_time = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+    reference = last_entry_time or start_time
+    no_trade_hours = max(0.0, (now - reference).total_seconds() / 3600)
+    range_24h = float(features.get("range_24h", 0.0) or 0.0)
+    ret_24h = float(features.get("ret_24h", 0.0) or 0.0)
+    enough_inactivity = no_trade_hours >= config.adaptive_no_trade_hours
+    enough_motion = range_24h >= config.adaptive_min_range_24h_pct
+    continuation_short = (
+        enough_inactivity
+        and enough_motion
+        and regime in {Regime.SHOCK_TREND_DOWN, Regime.TREND_SHORT}
+        and ret_24h < 0
+    )
+    return {
+        "adaptive_strategy_enabled": enough_inactivity and enough_motion,
+        "adaptive_continuation_short": continuation_short,
+        "adaptive_no_trade_hours": round(no_trade_hours, 2),
+        "adaptive_range_24h": round(range_24h, 6),
+    }
+
+
 def can_add_to_position(position: dict[str, Any], signal: TradeSignal) -> bool:
     if position["side"] != signal.position_side:
         return False
@@ -993,12 +1196,9 @@ def classify_user_4h_rules(
     if structural_regime is not None:
         return structural_regime, features
 
-    if symbol.startswith("SOL/"):
-        directional_regime = classify_directional_breakout(directional, ema20_1h, ema60_1h)
-        if directional_regime is not None:
-            return directional_regime, features
-        if directional_breakout_active(directional):
-            return Regime.UNKNOWN, features
+    directional_regime = classify_directional_breakout(directional, ema20_1h, ema60_1h)
+    if directional_regime is not None:
+        return directional_regime, features
 
     no_breakout = not high_in_last_2 and not low_in_last_2
     if no_breakout:
@@ -1516,7 +1716,8 @@ def build_user_rule_signal(
             "recent_5h_position": round(recent_5h_position, 4),
         }
     shock_trend_down_rsi_quality = 35 <= last_rsi_5m <= 58
-    shock_trend_down_range_floor = 0.18 if symbol.startswith("SOL/") else 0.08
+    wide_range_short_risk = features.get("range_72h", 0.0) >= 0.10 or volatility_policy.tier in {"HIGH", "EXTREME"}
+    shock_trend_down_range_floor = 0.18 if wide_range_short_risk else 0.08
     shock_trend_down_range_ok = features.get("close_position_72h", 0.5) >= shock_trend_down_range_floor
     shock_trend_down_recent_5h_position = recent_range_position(history_5m, price, bars=60)
     shock_trend_down_late_entry_ok = late_shock_trend_entry_ok(
@@ -1528,7 +1729,7 @@ def build_user_rule_signal(
     )
     shock_trend_down_momentum_ok = (
         features.get("ret_24h", 0.0) <= -0.003 or features.get("close_position_72h", 0.5) >= 0.30
-        if symbol.startswith("SOL/")
+        if wide_range_short_risk
         else True
     )
     low_range_short = features.get("close_position_72h", 0.5) < 0.35
@@ -1585,9 +1786,7 @@ def build_user_rule_signal(
             and not (features.get("ret_72h", 0.0) < 0 and features.get("ret_24h", 0.0) < 0.01),
             "rsi_extreme": last_rsi_5m < 20,
             "counter_ema": features["ema20_1h"] > features["ema60_1h"],
-            "overextended": features.get("close_position_72h", 0.5) < (
-                0.18 if symbol.startswith("SOL/") else 0.04
-            ),
+            "overextended": features.get("close_position_72h", 0.5) < (0.18 if wide_range_short_risk else 0.04),
         },
         reward_risk=config.trend_reward_risk,
         volatility_tier=volatility_policy.tier,
@@ -1842,6 +2041,7 @@ def close_position(
         attribution=attribution,
         attribution_detail=attribution_detail,
         signal_reason=str(position.get("signal_reason", "")),
+        entry_stage=str(position.get("entry_stage", "")),
         entry_close_position_72h=float(position.get("entry_close_position_72h", 0.0) or 0.0),
         entry_ret_24h=float(position.get("entry_ret_24h", 0.0) or 0.0),
         entry_ret_72h=float(position.get("entry_ret_72h", 0.0) or 0.0),

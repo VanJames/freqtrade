@@ -29,7 +29,7 @@ def test_position_size_uses_one_percent_risk() -> None:
 
 
 def test_directional_risk_limit_blocks_fourth_one_percent_trade() -> None:
-    risk = RiskManager(Settings(dry_run=True))
+    risk = RiskManager(Settings(dry_run=True, same_direction_risk_limit=0.03))
     risk.reserve_risk(PositionSide.LONG)
     risk.reserve_risk(PositionSide.LONG)
     risk.reserve_risk(PositionSide.LONG)
@@ -41,7 +41,7 @@ def test_directional_risk_limit_blocks_fourth_one_percent_trade() -> None:
 
 
 def test_directional_risk_release_reopens_capacity() -> None:
-    risk = RiskManager(Settings(dry_run=True))
+    risk = RiskManager(Settings(dry_run=True, same_direction_risk_limit=0.03))
     risk.reserve_risk(PositionSide.LONG, 1.5)
     risk.reserve_risk(PositionSide.LONG, 1.5)
 

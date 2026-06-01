@@ -156,6 +156,17 @@ class StateStore:
             )
         return [(str(order_id), str(symbol)) for order_id, symbol in rows]
 
+    async def latest_order_created_at(self) -> datetime | None:
+        await self.ensure_schema()
+        async with self.engine.begin() as conn:
+            result = await conn.execute(
+                select(order_tracks.c.created_at)
+                .order_by(desc(order_tracks.c.created_at))
+                .limit(1)
+            )
+            row = result.first()
+        return row[0] if row else None
+
     async def save_snapshot(self, equity: float, active_hedging: bool, memory: dict[str, Any]) -> None:
         async with self.engine.begin() as conn:
             await conn.execute(

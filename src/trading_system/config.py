@@ -31,12 +31,12 @@ class Settings(BaseSettings):
     live_exit_order_cooldown_seconds: float = 30.0
 
     risk_percent: float = 0.01
-    same_direction_risk_limit: float = 0.03
+    same_direction_risk_limit: float = 0.06
     daily_drawdown_limit: float = 0.05
     shock_leverage_limit: float = 3.0
     trend_symbol_leverage_limit: float = 5.0
-    max_signal_risk_multiplier: float = 1.5
-    confirmation_position_sizing: bool = False
+    max_signal_risk_multiplier: float = 3.0
+    confirmation_position_sizing: bool = True
     confirmation_max_risk_multiplier: float = 3.0
     funding_block_threshold: float = 0.001
     spike_amplitude_threshold: float = 0.035
@@ -55,11 +55,14 @@ class Settings(BaseSettings):
     defensive_risk_multiplier: float = 0.7
     shock_trend_risk_multiplier: float = 0.1
     shock_trend_down_risk_multiplier: float = 0.1
-    enable_shock_trend_scout: bool = False
+    enable_shock_trend_scout: bool = True
     shock_trend_scout_risk_multiplier: float = 1.5
     enable_liquidity_sweep_reversal: bool = False
     liquidity_sweep_risk_multiplier: float = 0.8
     liquidity_sweep_require_confirmation: bool = True
+    enable_adaptive_strategy_switch: bool = True
+    adaptive_no_trade_hours: float = 48.0
+    adaptive_min_range_24h_pct: float = 0.012
     min_take_profit_pct: float = 0.004
     llm_regime_review_enabled: bool = False
     llm_regime_provider: str = "openai"

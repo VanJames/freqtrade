@@ -345,3 +345,144 @@ def test_two_candle_momentum_is_disabled_by_default() -> None:
     signals = engine.build_signals("BTC/USDT:USDT", Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_UP, features, candles, [])
 
     assert signals == []
+
+
+def test_down_continuation_short_catches_weak_rebound_failure() -> None:
+    engine = StrategyEngine()
+    candles = []
+    price = 100.0
+    for index in range(75):
+        close = price - 0.015
+        candles.append([index * 300_000, price, price + 0.02, close - 0.02, close, 1.0])
+        price = close
+    for index, delta in enumerate(
+        [0.15, 0.12, 0.10, 0.08, -0.06, -0.07, -0.06, -0.07, -0.06, -0.07],
+        start=75,
+    ):
+        open_price = price
+        close = price + delta
+        candles.append(
+            [index * 300_000, open_price, max(open_price, close) + 0.03, min(open_price, close) - 0.03, close, 1.0]
+        )
+        price = close
+    features = MarketFeatures(
+        atr_1h=0.5,
+        close_1h=price,
+        ema20_1h=99.0,
+        ema60_1h=100.0,
+        current_4h_high=101.0,
+        current_4h_low=95.0,
+        last_4h_close=98.0,
+        prev_4h_close=99.0,
+        close_position_72h=0.45,
+        ret_24h=-0.012,
+        ret_72h=-0.02,
+        range_72h=0.08,
+    )
+
+    signals = engine.build_signals(
+        "BTC/USDT:USDT",
+        Regime.SHOCK_TREND_DOWN,
+        Regime.SHOCK_TREND_DOWN,
+        features,
+        candles,
+        [],
+        context={"adaptive_continuation_short": True},
+    )
+
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal.position_side == PositionSide.SHORT
+    assert signal.reason == "user_4h_down_continuation_short"
+    assert signal.metadata["entry_stage"] == "continuation"
+    assert signal.metadata["risk_multiplier"] == 0.62
+
+
+def test_down_continuation_short_skips_xau_noise() -> None:
+    engine = StrategyEngine()
+    candles = []
+    price = 100.0
+    for index in range(75):
+        close = price - 0.015
+        candles.append([index * 300_000, price, price + 0.02, close - 0.02, close, 1.0])
+        price = close
+    for index, delta in enumerate(
+        [0.15, 0.12, 0.10, 0.08, -0.06, -0.07, -0.06, -0.07, -0.06, -0.07],
+        start=75,
+    ):
+        open_price = price
+        close = price + delta
+        candles.append(
+            [index * 300_000, open_price, max(open_price, close) + 0.03, min(open_price, close) - 0.03, close, 1.0]
+        )
+        price = close
+    features = MarketFeatures(
+        atr_1h=0.5,
+        close_1h=price,
+        ema20_1h=99.0,
+        ema60_1h=100.0,
+        current_4h_high=101.0,
+        current_4h_low=95.0,
+        last_4h_close=98.0,
+        prev_4h_close=99.0,
+        close_position_72h=0.45,
+        ret_24h=-0.012,
+        ret_72h=-0.02,
+        range_72h=0.08,
+    )
+
+    signals = engine.build_signals(
+        "XAU/USDT:USDT",
+        Regime.SHOCK_TREND_DOWN,
+        Regime.SHOCK_TREND_DOWN,
+        features,
+        candles,
+        [],
+    )
+
+    assert signals == []
+
+
+def test_down_continuation_short_skips_eth_low_edge() -> None:
+    engine = StrategyEngine()
+    candles = []
+    price = 100.0
+    for index in range(75):
+        close = price - 0.015
+        candles.append([index * 300_000, price, price + 0.02, close - 0.02, close, 1.0])
+        price = close
+    for index, delta in enumerate(
+        [0.15, 0.12, 0.10, 0.08, -0.06, -0.07, -0.06, -0.07, -0.06, -0.07],
+        start=75,
+    ):
+        open_price = price
+        close = price + delta
+        candles.append(
+            [index * 300_000, open_price, max(open_price, close) + 0.03, min(open_price, close) - 0.03, close, 1.0]
+        )
+        price = close
+    features = MarketFeatures(
+        atr_1h=0.5,
+        close_1h=price,
+        ema20_1h=99.0,
+        ema60_1h=100.0,
+        current_4h_high=101.0,
+        current_4h_low=95.0,
+        last_4h_close=98.0,
+        prev_4h_close=99.0,
+        close_position_72h=0.45,
+        ret_24h=-0.012,
+        ret_72h=-0.02,
+        range_72h=0.08,
+    )
+
+    signals = engine.build_signals(
+        "ETH/USDT:USDT",
+        Regime.SHOCK_TREND_DOWN,
+        Regime.SHOCK_TREND_DOWN,
+        features,
+        candles,
+        [],
+    )
+
+    assert signals == []

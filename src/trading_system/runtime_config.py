@@ -34,7 +34,7 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
     RuntimeField(
         "same_direction_risk_limit",
         "同方向风险上限",
-        0.03,
+        0.06,
         0.001,
         0.20,
         0.001,
@@ -72,7 +72,7 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
     RuntimeField(
         "max_signal_risk_multiplier",
         "信号风险倍数上限",
-        1.5,
+        3.0,
         0.1,
         20.0,
         0.1,
@@ -81,7 +81,7 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
     RuntimeField(
         "enable_shock_trend_scout",
         "启用 SHOCK 趋势先遣单",
-        0.0,
+        1.0,
         0.0,
         1.0,
         1.0,
@@ -100,7 +100,7 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
     RuntimeField(
         "confirmation_position_sizing",
         "启用确认级别动态仓位",
-        0.0,
+        1.0,
         0.0,
         1.0,
         1.0,
@@ -144,6 +144,35 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
         1.0,
         boolean=True,
         description="开启后插针不立即入场，等待下一根 5m 不再破针尖并继续收回后入场，降低假反转。",
+    ),
+    RuntimeField(
+        "enable_adaptive_strategy_switch",
+        "启用无单自适应策略",
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        boolean=True,
+        description="连续一段时间没有成交但行情仍有波动时，允许系统启用小仓位补充策略，不替换核心策略。",
+    ),
+    RuntimeField(
+        "adaptive_no_trade_hours",
+        "无单复盘小时数",
+        48.0,
+        6.0,
+        168.0,
+        1.0,
+        description="距离最近一次成交超过该小时数后，系统开始复盘当前行情并允许补充策略候选信号。",
+    ),
+    RuntimeField(
+        "adaptive_min_range_24h_pct",
+        "自适应最小24h波动",
+        0.012,
+        0.002,
+        0.08,
+        0.001,
+        True,
+        description="只有 24h 振幅达到该阈值时才认为有足够交易机会，避免无波动行情硬下单。",
     ),
     RuntimeField(
         "position_monitor_interval_seconds",
@@ -273,6 +302,7 @@ def apply_runtime_config(settings: Settings, values: dict[str, Any]) -> None:
             "enable_liquidity_sweep_reversal",
             "liquidity_sweep_require_confirmation",
             "enable_shock_trend_scout",
+            "enable_adaptive_strategy_switch",
             "llm_regime_review_enabled",
         }:
             setattr(settings, key, bool(value))

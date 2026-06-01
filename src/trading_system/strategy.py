@@ -67,6 +67,7 @@ class StrategyEngine:
         positions: list[Position],
         candles_1h: list[list[float]] | None = None,
         candles_4h: list[list[float]] | None = None,
+        context: dict[str, Any] | None = None,
     ) -> list[TradeSignal]:
         signals: list[TradeSignal] = []
         if regime != Regime.UNKNOWN:
@@ -85,7 +86,7 @@ class StrategyEngine:
         if signal:
             return [self._with_strategy_route(signal, "liquidity_sweep_reversal")]
 
-        signal = self._user_4h_signal(symbol, regime, features, candles_5m, positions)
+        signal = self._user_4h_signal(symbol, regime, features, candles_5m, positions, context or {})
         if signal:
             return [self._with_strategy_route(signal, "user_4h_core")]
 
@@ -423,11 +424,12 @@ class StrategyEngine:
                 features.ret_72h,
                 recent_5h_position,
             )
-            range_floor = 0.18 if symbol.startswith("SOL/") else 0.08
+            wide_range_short_risk = features.range_72h >= 0.10 or volatility_policy.tier in {"HIGH", "EXTREME"}
+            range_floor = 0.18 if wide_range_short_risk else 0.08
             range_ok = features.close_position_72h >= range_floor
             momentum_ok = (
                 features.ret_24h <= -0.003 or features.close_position_72h >= 0.30
-                if symbol.startswith("SOL/")
+                if wide_range_short_risk
                 else True
             )
             low_range_short = features.close_position_72h < 0.35
@@ -464,7 +466,7 @@ class StrategyEngine:
                     and not (features.ret_72h < 0 and features.ret_24h < 0.01),
                     "rsi_extreme": last_rsi < 20,
                     "counter_ema": features.ema20_1h > features.ema60_1h,
-                    "overextended": features.close_position_72h < (0.18 if symbol.startswith("SOL/") else 0.04),
+                    "overextended": features.close_position_72h < (0.18 if wide_range_short_risk else 0.04),
                 },
                 reward_risk=self.trend_reward_risk,
                 volatility_tier=volatility_policy.tier,
@@ -816,6 +818,7 @@ class StrategyEngine:
         features: MarketFeatures,
         candles_5m: list[list[float]],
         positions: list[Position],
+        context: dict[str, Any] | None = None,
     ) -> TradeSignal | None:
         df = ohlcv_frame(candles_5m)
         if len(df) < 35 or features.atr_1h <= 0:
@@ -1025,6 +1028,11 @@ class StrategyEngine:
             and price <= ema_now * 1.002
             and trend_short_rsi_quality
             and crossed_down
+            and not (
+                0.12 <= features.close_position_72h <= 0.20
+                and features.ret_24h > -0.025
+                and features.ret_72h > -0.035
+            )
             and self._sol_allowed(symbol, PositionSide.SHORT, regime, trend_short_opportunity.score, features)
         ):
             raw_stop = self._trend_stop(price, features.previous_1h_high, features.atr_1h, PositionSide.SHORT, volatility_policy)
@@ -1072,6 +1080,7 @@ class StrategyEngine:
             last_rsi,
             volatility_policy,
             positions,
+            context or {},
         )
         return signal
 
@@ -1096,13 +1105,27 @@ class StrategyEngine:
         last_rsi: float,
         volatility_policy,
         positions: list[Position],
+        context: dict[str, Any],
     ) -> TradeSignal | None:
-        scout_symbol_allowed = not symbol.startswith("XAU/")
+        scout_symbol_allowed = self._scout_trade_allowed(features, volatility_policy)
+        adaptive_scout_enabled = bool(context.get("adaptive_strategy_enabled"))
         shock_trend_up_rsi_quality = 42 <= last_rsi <= 66
         recent_5h_position = self._recent_range_position(df, price, bars=60)
         quiet_weak_up_drift = features.range_72h < 0.06 and features.ret_24h < 0.008
         local_top_without_impulse = recent_5h_position >= 0.94 and quiet_weak_up_drift
         mixed_uptrend = features.ret_24h * features.ret_72h < 0
+        long_scout_weak_bullish_context = features.ret_24h <= 0 and features.ret_72h > 0.01
+        late_range_long_scout = features.close_position_72h >= 0.70 and features.ret_72h > 0.008
+        long_scout_weak_followthrough = (
+            features.close_position_72h >= 0.60
+            and features.ret_24h >= 0.008
+            and 0 < features.ret_72h < 0.010
+        )
+        weak_midrange_confirmed_long = (
+            0.40 <= features.close_position_72h <= 0.52
+            and features.ret_24h < 0.002
+            and 0 < features.ret_72h < 0.015
+        )
         late_burst_without_72h_followthrough = (
             features.close_position_72h >= 0.76
             and features.ret_24h >= 0.015
@@ -1166,7 +1189,13 @@ class StrategyEngine:
             and not local_top_without_impulse
             and features.close_position_72h <= 0.85
             and not (mixed_uptrend and features.close_position_72h >= 0.58)
+            and not weak_midrange_confirmed_long
             and not late_burst_without_72h_followthrough
+            and not (
+                features.close_position_72h >= 0.78
+                and features.ret_24h < 0.01
+                and features.ret_72h < 0.005
+            )
             and self._sol_allowed(symbol, PositionSide.LONG, regime, shock_trend_up_opportunity.score, features)
         ):
             stop = self._cap_stop(price, features.current_4h_low, PositionSide.LONG)
@@ -1205,7 +1234,7 @@ class StrategyEngine:
                 },
             )
         if (
-            self.enable_shock_trend_scout
+            (self.enable_shock_trend_scout or adaptive_scout_enabled)
             and scout_symbol_allowed
             and regime == Regime.SHOCK_TREND_UP
             and not self._has_same_side_position(positions, PositionSide.LONG)
@@ -1222,6 +1251,10 @@ class StrategyEngine:
             and features.close_position_72h <= 0.82
             and not local_top_without_impulse
             and not (mixed_uptrend and features.close_position_72h >= 0.74)
+            and not long_scout_weak_bullish_context
+            and not long_scout_weak_followthrough
+            and not late_range_long_scout
+            and not late_burst_without_72h_followthrough
             and self._sol_allowed(symbol, PositionSide.LONG, regime, 72, features)
         ):
             stop = self._cap_stop(price, features.current_4h_low, PositionSide.LONG)
@@ -1244,9 +1277,9 @@ class StrategyEngine:
                     "opportunity_grade": "C",
                     "opportunity_confidence": 0.72,
                     "opportunity_reasons": "scout_plan,pullback,one_hour_trend,four_hour_trend",
-                    "risk_multiplier": self.shock_trend_scout_risk_multiplier,
+                    "risk_multiplier": self.shock_trend_scout_risk_multiplier if self.enable_shock_trend_scout else 0.65,
                     "volatility_tier": volatility_policy.tier,
-                    "entry_stage": "scout",
+                    "entry_stage": "scout" if self.enable_shock_trend_scout else "adaptive_scout",
                     "close_position_72h": round(features.close_position_72h, 4),
                     "ret_24h": round(features.ret_24h, 6),
                     "ret_72h": round(features.ret_72h, 6),
@@ -1257,7 +1290,8 @@ class StrategyEngine:
             )
 
         shock_trend_down_rsi_quality = 35 <= last_rsi <= 58
-        shock_trend_down_range_floor = 0.18 if symbol.startswith("SOL/") else 0.08
+        wide_range_short_risk = features.range_72h >= 0.10 or volatility_policy.tier in {"HIGH", "EXTREME"}
+        shock_trend_down_range_floor = 0.18 if wide_range_short_risk else 0.08
         shock_trend_down_range_ok = features.close_position_72h >= shock_trend_down_range_floor
         shock_trend_down_recent_5h_position = self._recent_range_position(df, price, bars=60)
         shock_trend_down_late_entry_ok = self._late_shock_trend_entry_ok(
@@ -1269,10 +1303,44 @@ class StrategyEngine:
         )
         shock_trend_down_momentum_ok = (
             features.ret_24h <= -0.003 or features.close_position_72h >= 0.30
-            if symbol.startswith("SOL/")
+            if wide_range_short_risk
             else True
         )
         shock_trend_down_72h_not_bullish_pullback = not (features.ret_72h > 0.003 and features.ret_24h < 0)
+        shock_trend_down_mixed_fade = (
+            features.ret_72h > 0
+            and features.ret_24h > -0.006
+            and features.close_position_72h >= 0.55
+        )
+        shallow_rebound_short_reversal_risk = (
+            0 < features.ret_24h < 0.005
+            and features.ret_72h < -0.005
+            and 0.30 <= features.close_position_72h <= 0.50
+        )
+        weak_mid_range_short = (
+            features.close_position_72h >= 0.55
+            and features.ret_24h > -0.01
+            and abs(features.ret_72h) < 0.005
+        )
+        weak_bearish_pullback_short = (
+            0.30 <= features.close_position_72h <= 0.50
+            and -0.02 < features.ret_72h < 0
+            and -0.018 < features.ret_24h < 0
+        )
+        deep_scout_short_reversal_risk = (
+            features.close_position_72h < 0.20
+            and features.ret_72h < -0.03
+        )
+        midrange_scout_short_reversal_risk = (
+            0.20 <= features.close_position_72h <= 0.35
+            and features.ret_72h < -0.02
+            and features.ret_24h > -0.012
+        )
+        deep_late_confirmed_short = (
+            features.close_position_72h < 0.20
+            and features.ret_24h <= -0.03
+            and features.ret_72h <= -0.05
+        )
         low_range_short = features.close_position_72h < 0.35
         shock_trend_down_rebound_ready = (
             not low_range_short
@@ -1324,7 +1392,7 @@ class StrategyEngine:
                 and not (features.ret_72h < 0 and features.ret_24h < 0.01),
                 "rsi_extreme": last_rsi < 20,
                 "counter_ema": features.ema20_1h > features.ema60_1h,
-                "overextended": features.close_position_72h < (0.18 if symbol.startswith("SOL/") else 0.04),
+                "overextended": features.close_position_72h < (0.18 if wide_range_short_risk else 0.04),
             },
             reward_risk=self.trend_reward_risk,
             volatility_tier=volatility_policy.tier,
@@ -1348,7 +1416,15 @@ class StrategyEngine:
             and shock_trend_down_momentum_ok
             and shock_trend_down_72h_not_bullish_pullback
             and shock_trend_down_rebound_ready
-            and not symbol.startswith(("SOL/", "XAU/"))
+            and features.close_position_72h > 0.12
+            and not shallow_rebound_short_reversal_risk
+            and not weak_bearish_pullback_short
+            and not deep_late_confirmed_short
+            and not (
+                wide_range_short_risk
+                and features.close_position_72h <= 0.18
+                and features.ret_24h > -0.015
+            )
             and self._sol_allowed(symbol, PositionSide.SHORT, regime, shock_trend_down_opportunity.score, features)
         ):
             stop = self._cap_stop(price, features.current_4h_high, PositionSide.SHORT)
@@ -1390,7 +1466,7 @@ class StrategyEngine:
                 },
             )
         if (
-            self.enable_shock_trend_scout
+            (self.enable_shock_trend_scout or adaptive_scout_enabled)
             and scout_symbol_allowed
             and regime == Regime.SHOCK_TREND_DOWN
             and not self._has_same_side_position(positions, PositionSide.SHORT)
@@ -1407,6 +1483,11 @@ class StrategyEngine:
             and features.close_position_72h >= 0.15
             and shock_trend_down_range_ok
             and shock_trend_down_72h_not_bullish_pullback
+            and not shock_trend_down_mixed_fade
+            and not shallow_rebound_short_reversal_risk
+            and not deep_scout_short_reversal_risk
+            and not midrange_scout_short_reversal_risk
+            and not weak_mid_range_short
             and self._sol_allowed(symbol, PositionSide.SHORT, regime, 72, features)
         ):
             stop = self._cap_stop(price, features.current_4h_high, PositionSide.SHORT)
@@ -1429,9 +1510,9 @@ class StrategyEngine:
                     "opportunity_grade": "C",
                     "opportunity_confidence": 0.72,
                     "opportunity_reasons": "scout_plan,pullback,one_hour_trend,four_hour_trend",
-                    "risk_multiplier": self.shock_trend_scout_risk_multiplier,
+                    "risk_multiplier": self.shock_trend_scout_risk_multiplier if self.enable_shock_trend_scout else 0.65,
                     "volatility_tier": volatility_policy.tier,
-                    "entry_stage": "scout",
+                    "entry_stage": "scout" if self.enable_shock_trend_scout else "adaptive_scout",
                     "close_position_72h": round(features.close_position_72h, 4),
                     "ret_24h": round(features.ret_24h, 6),
                     "ret_72h": round(features.ret_72h, 6),
@@ -1439,7 +1520,119 @@ class StrategyEngine:
                     "recent_5h_position": round(shock_trend_down_recent_5h_position, 4),
                 },
             )
+        if context.get("adaptive_continuation_short") and self._down_continuation_short_ready(
+            symbol=symbol,
+            regime=regime,
+            features=features,
+            df=df,
+            price=price,
+            ema20_now=ema_now,
+            ema20_prev=ema_prev,
+            last_rsi=last_rsi,
+            trend_down_aligned=trend_down_aligned,
+            short_momentum_positive=short_momentum_positive,
+            recent_5h_position=shock_trend_down_recent_5h_position,
+            positions=positions,
+        ):
+            stop = self._cap_stop(price, features.current_4h_high, PositionSide.SHORT)
+            return self._entry_signal(
+                symbol,
+                Side.SELL,
+                PositionSide.SHORT,
+                regime,
+                price,
+                stop,
+                price - self._reward(price, stop, 1.25),
+                "user_4h_down_continuation_short",
+                {
+                    "trailing_gap_pct": min(self.trailing_gap_pct, 0.0022),
+                    "min_trailing_activate_r": 0.75,
+                    "breakeven_activate_r": 0.45,
+                    "breakeven_buffer_pct": 0.00025,
+                    "opportunity_score": 76,
+                    "opportunity_grade": "C",
+                    "opportunity_confidence": 0.76,
+                    "opportunity_reasons": "down_continuation,one_hour_trend,multi_timeframe,lower_low,not_chasing",
+                    "risk_multiplier": 0.62,
+                    "risk_throttle": 0.75 if features.ret_24h <= -0.02 or features.range_24h >= 0.04 else 0.85,
+                    "volatility_tier": volatility_policy.tier,
+                    "entry_stage": "continuation",
+                    "close_position_72h": round(features.close_position_72h, 4),
+                    "ret_24h": round(features.ret_24h, 6),
+                    "ret_72h": round(features.ret_72h, 6),
+                    "recent_5h_position": round(shock_trend_down_recent_5h_position, 4),
+                },
+            )
         return None
+
+    def _down_continuation_short_ready(
+        self,
+        symbol: str,
+        regime: Regime,
+        features: MarketFeatures,
+        df,
+        price: float,
+        ema20_now: float,
+        ema20_prev: float,
+        last_rsi: float,
+        trend_down_aligned: bool,
+        short_momentum_positive: bool,
+        recent_5h_position: float,
+        positions: list[Position],
+    ) -> bool:
+        if regime not in {Regime.SHOCK_TREND_DOWN, Regime.TREND_SHORT}:
+            return False
+        if self._has_same_side_position(positions, PositionSide.SHORT):
+            return False
+        if len(df) < 80:
+            return False
+        if not trend_down_aligned:
+            return False
+        if features.ema20_1h > features.ema60_1h:
+            return False
+        if features.last_4h_close > features.prev_4h_close and features.ret_24h > -0.008:
+            return False
+        if features.ret_72h > 0.003 and features.ret_24h < 0:
+            return False
+        if not 28 <= last_rsi <= 48:
+            return False
+        if recent_5h_position < 0.08 or features.close_position_72h < 0.15:
+            return False
+        if features.close_position_72h < 0.20 or features.ret_24h <= -0.025:
+            return False
+
+        ema60_5m = ema(df.close, 60)
+        ema60_now = float(ema60_5m.iloc[-1])
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+        two_step_down = (
+            float(current.close) < float(current.open)
+            and float(previous.close) < float(previous.open)
+            and float(current.low) < float(previous.low)
+        )
+        weak_rebound_failed = (
+            float(df.high.tail(8).max()) >= ema20_now * 0.995
+            and price <= ema20_now * 1.001
+            and price <= ema60_now * 1.001
+        )
+        recent_reference = float(df.close.iloc[-13])
+        recent_return = (price - recent_reference) / recent_reference if recent_reference else 0.0
+        return (
+            two_step_down
+            and weak_rebound_failed
+            and recent_return <= 0.0005
+            and ema20_now <= ema20_prev
+        )
+
+    @staticmethod
+    def _scout_trade_allowed(features: MarketFeatures, volatility_policy) -> bool:
+        if features.range_72h < 0.025 and features.range_24h < 0.012:
+            return False
+        if volatility_policy.atr_pct < 0.0035 and features.range_72h < 0.045:
+            return False
+        if volatility_policy.tier == "EXTREME" and abs(features.ret_24h) >= 0.045:
+            return False
+        return True
 
     @staticmethod
     def _has_same_side_position(positions: list[Position], side: PositionSide) -> bool:

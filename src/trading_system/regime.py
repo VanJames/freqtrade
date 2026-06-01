@@ -277,12 +277,9 @@ def classify_user_4h_market(
     if structural_regime is not None:
         return structural_regime, features
 
-    if symbol.startswith("SOL/"):
-        directional_regime = classify_directional_breakout(directional, features.ema20_1h, features.ema60_1h)
-        if directional_regime is not None:
-            return directional_regime, features
-        if directional_breakout_active(directional):
-            return Regime.UNKNOWN, features
+    directional_regime = classify_directional_breakout(directional, features.ema20_1h, features.ema60_1h)
+    if directional_regime is not None:
+        return directional_regime, features
 
     if not high_in_last_2 and not low_in_last_2:
         return Regime.SHOCK, features
