@@ -245,13 +245,21 @@ def classify_user_4h_market(
         and (float(recent_3.low.min()) <= low_42 or low_in_last_2)
     )
     if up_3 and daily_trend_confirmed(history_4h, PositionSide.LONG):
-        return Regime.TREND_LONG, features
+        return correct_regime_with_short_term_momentum(
+            Regime.TREND_LONG, history_1h, history_4h, history_5m
+        ), features
     if up_3:
-        return Regime.SHOCK_TREND_UP, features
+        return correct_regime_with_short_term_momentum(
+            Regime.SHOCK_TREND_UP, history_1h, history_4h, history_5m
+        ), features
     if down_3 and daily_trend_confirmed(history_4h, PositionSide.SHORT):
-        return Regime.TREND_SHORT, features
+        return correct_regime_with_short_term_momentum(
+            Regime.TREND_SHORT, history_1h, history_4h, history_5m
+        ), features
     if down_3:
-        return Regime.SHOCK_TREND_DOWN, features
+        return correct_regime_with_short_term_momentum(
+            Regime.SHOCK_TREND_DOWN, history_1h, history_4h, history_5m
+        ), features
 
     alternating = count_4h_direction_changes(recent_6) >= 3
     rising_high_steps = sum(
