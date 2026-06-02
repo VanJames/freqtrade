@@ -20,12 +20,12 @@ def signal(signal_type: SignalType = SignalType.ENTER_TREND) -> TradeSignal:
     )
 
 
-def test_position_size_uses_one_percent_risk() -> None:
+def test_position_size_uses_default_risk_percent() -> None:
     risk = RiskManager(Settings(dry_run=True))
     decision = risk.assess(signal(), equity=10_000.0, funding_rate=0.0)
 
     assert decision.allowed
-    assert decision.size == 20.0
+    assert decision.size == 24.0
 
 
 def test_directional_risk_limit_blocks_fourth_one_percent_trade() -> None:
@@ -41,7 +41,7 @@ def test_directional_risk_limit_blocks_fourth_one_percent_trade() -> None:
 
 
 def test_directional_risk_release_reopens_capacity() -> None:
-    risk = RiskManager(Settings(dry_run=True, same_direction_risk_limit=0.03))
+    risk = RiskManager(Settings(dry_run=True, same_direction_risk_limit=0.036))
     risk.reserve_risk(PositionSide.LONG, 1.5)
     risk.reserve_risk(PositionSide.LONG, 1.5)
 
@@ -52,7 +52,7 @@ def test_directional_risk_release_reopens_capacity() -> None:
     assert not blocked.allowed
     assert blocked.reason == "same_direction_risk_limit"
     assert allowed.allowed
-    assert risk.direction_risk[PositionSide.LONG] == 0.015
+    assert risk.direction_risk[PositionSide.LONG] == pytest.approx(0.018)
 
 
 def test_directional_risk_release_does_not_go_negative() -> None:

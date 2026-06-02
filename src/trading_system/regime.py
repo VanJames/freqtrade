@@ -317,10 +317,10 @@ def correct_regime_with_short_term_momentum(
     if momentum_regime is None:
         return regime
     if momentum_regime == Regime.SHOCK_TREND_UP and regime in {Regime.SHOCK_TREND_DOWN, Regime.TREND_SHORT}:
-        logger.info("regime corrected by short-term momentum previous=%s current=%s", regime, momentum_regime)
+        logger.debug("regime corrected by short-term momentum previous=%s current=%s", regime, momentum_regime)
         return momentum_regime
     if momentum_regime == Regime.SHOCK_TREND_DOWN and regime in {Regime.SHOCK_TREND_UP, Regime.TREND_LONG}:
-        logger.info("regime corrected by short-term momentum previous=%s current=%s", regime, momentum_regime)
+        logger.debug("regime corrected by short-term momentum previous=%s current=%s", regime, momentum_regime)
         return momentum_regime
     return regime
 

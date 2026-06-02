@@ -38,16 +38,13 @@ def test_runtime_tuning_candidates_include_current_and_balanced() -> None:
         "growth_4x",
         "aggressive_5x",
         "wide_3x",
-        "focused_4x",
     ]
     assert candidates[0].config.max_signal_risk_multiplier == 1.5
     by_name = {candidate.name: candidate for candidate in candidates}
     assert by_name["balanced_3x"].config.max_signal_risk_multiplier == 3.0
-    assert by_name["balanced_3x"].config.same_direction_risk_limit == 0.06
+    assert by_name["balanced_3x"].config.same_direction_risk_limit == 0.08
     assert by_name["aggressive_5x"].config.max_signal_risk_multiplier == 5.0
     assert by_name["aggressive_5x"].config.same_direction_risk_limit == 0.10
-    assert by_name["focused_4x"].config.max_signal_risk_multiplier == 4.0
-    assert by_name["focused_4x"].config.same_direction_risk_limit == 0.06
 
 
 def test_runtime_tuning_score_penalizes_symbol_loss() -> None:

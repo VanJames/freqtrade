@@ -30,8 +30,8 @@ class Settings(BaseSettings):
     live_entry_order_cooldown_seconds: float = 60.0
     live_exit_order_cooldown_seconds: float = 30.0
 
-    risk_percent: float = 0.01
-    same_direction_risk_limit: float = 0.06
+    risk_percent: float = 0.012
+    same_direction_risk_limit: float = 0.08
     daily_drawdown_limit: float = 0.05
     shock_leverage_limit: float = 3.0
     trend_symbol_leverage_limit: float = 5.0

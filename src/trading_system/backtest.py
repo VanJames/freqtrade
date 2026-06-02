@@ -32,8 +32,8 @@ class BacktestConfig:
     days: int = 30
     warmup_days: int = 10
     initial_equity: float = 10_000.0
-    risk_percent: float = 0.01
-    same_direction_risk_limit: float = 0.06
+    risk_percent: float = 0.012
+    same_direction_risk_limit: float = 0.08
     daily_drawdown_limit: float = 0.05
     shock_leverage_limit: float = 3.0
     trend_symbol_leverage_limit: float = 5.0
@@ -309,8 +309,7 @@ class OKXBacktester:
                 if len(history_1h) < 80 or len(history_4h) < 50:
                     continue
 
-                history_15m = resample_history(history_5m, "15min")
-                feature_key = (history_1h.index[-1], history_4h.index[-1], history_15m.index[-1])
+                feature_key = (history_1h.index[-1], history_4h.index[-1], now.floor("15min"))
                 if feature_key != state["last_feature_key"]:
                     regime, market_features = classify_user_4h_market(history_1h, history_4h, symbol, history_5m)
                     state["cached_regime"] = regime
@@ -575,8 +574,7 @@ class OKXBacktester:
             if len(history_1h) < 80 or len(history_4h) < 50:
                 continue
 
-            history_15m = resample_history(history_5m, "15min")
-            feature_key = (history_1h.index[-1], history_4h.index[-1], history_15m.index[-1])
+            feature_key = (history_1h.index[-1], history_4h.index[-1], now.floor("15min"))
             if feature_key != last_feature_key:
                 cached_regime, cached_market_features = classify_user_4h_market(history_1h, history_4h, symbol, history_5m)
                 cached_features = market_features_to_backtest_dict(cached_market_features, history_1h, history_4h)

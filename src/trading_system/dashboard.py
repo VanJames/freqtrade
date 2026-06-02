@@ -953,7 +953,8 @@ def render_page(data: dict[str, Any]) -> str:
       title:"推荐均衡 3x",
       desc:"当前建议实盘档：启用动态仓位和 SHOCK 趋势先遣单，追求收益同时限制单信号放大。",
       values:{
-        same_direction_risk_limit:"0.06",
+        risk_percent:"0.012",
+        same_direction_risk_limit:"0.08",
         max_signal_risk_multiplier:"3",
         confirmation_position_sizing:"1",
         confirmation_max_risk_multiplier:"3",
