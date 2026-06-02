@@ -326,22 +326,36 @@ def short_term_momentum_regime(
     if (
         frame_15m is not None
         and consecutive_directional_candles(frame_15m, 4, PositionSide.SHORT)
-        and daily_trend_confirmed(history_4h, PositionSide.SHORT)
+        and daily_direction_aligned(history_4h, PositionSide.SHORT)
     ) or (
         consecutive_directional_candles(history_1h, 2, PositionSide.SHORT)
-        and daily_trend_confirmed(history_4h, PositionSide.SHORT)
+        and daily_direction_aligned(history_4h, PositionSide.SHORT)
     ):
         return Regime.SHOCK_TREND_DOWN
     if (
         frame_15m is not None
         and consecutive_directional_candles(frame_15m, 4, PositionSide.LONG)
-        and daily_trend_confirmed(history_4h, PositionSide.LONG)
+        and daily_direction_aligned(history_4h, PositionSide.LONG)
     ) or (
         consecutive_directional_candles(history_1h, 2, PositionSide.LONG)
-        and daily_trend_confirmed(history_4h, PositionSide.LONG)
+        and daily_direction_aligned(history_4h, PositionSide.LONG)
     ):
         return Regime.SHOCK_TREND_UP
     return None
+
+
+def daily_direction_aligned(history_4h: pd.DataFrame, side: PositionSide) -> bool:
+    daily = resample_history(history_4h, "1D")
+    if len(daily) < 2:
+        return False
+    current = daily.iloc[-1]
+    previous = daily.iloc[-2]
+    current_open = float(current.open)
+    current_close = float(current.close)
+    previous_close = float(previous.close)
+    if side == PositionSide.LONG:
+        return current_close > current_open or current_close > previous_close
+    return current_close < current_open or current_close < previous_close
 
 
 def consecutive_directional_candles(frame: pd.DataFrame, count: int, side: PositionSide) -> bool:

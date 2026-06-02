@@ -104,6 +104,28 @@ def test_classifier_corrects_shock_trend_up_when_short_term_and_daily_turn_down(
     assert regime == Regime.SHOCK_TREND_DOWN
 
 
+def test_classifier_uses_current_daily_candle_for_short_term_correction() -> None:
+    classifier = MarketRegimeClassifier()
+    candles_1h = make_candles(80, 100.0, 0.0)
+    candles_4h = make_candles(60, 100.0, 0.0, interval_ms=4 * 60 * 60 * 1000)
+
+    for offset, row in enumerate(candles_4h[-6:]):
+        row[1] = 101.0
+        row[2] = 102.0 + offset
+        row[3] = 99.5
+        row[4] = 100.5
+    for offset, row in enumerate(candles_1h[-2:]):
+        base = 101.0 - offset
+        row[1] = base
+        row[2] = base + 0.2
+        row[3] = base - 1.2
+        row[4] = base - 1.0
+
+    regime, _ = classifier.classify("ETH/USDT:USDT", candles_1h, candles_4h)
+
+    assert regime == Regime.SHOCK_TREND_DOWN
+
+
 def test_classifier_corrects_shock_trend_down_when_two_1h_and_daily_turn_up() -> None:
     classifier = MarketRegimeClassifier()
     candles_1h = make_candles(80, 100.0, 0.0)
