@@ -27,15 +27,17 @@ class MarketRegimeClassifier:
         symbol: str,
         candles_1h: list[list[float]],
         candles_4h: list[list[float]],
+        candles_5m: list[list[float]] | None = None,
         foresight: ForesightData | None = None,
     ) -> tuple[Regime, MarketFeatures]:
         foresight = foresight or ForesightData()
         df_1h = ohlcv_frame(candles_1h)
         df_4h = ohlcv_frame(candles_4h)
+        df_5m = ohlcv_frame(candles_5m) if candles_5m else None
         if len(df_1h) < 60 or len(df_4h) < 45:
             return Regime.UNKNOWN, MarketFeatures()
 
-        regime, features = classify_user_4h_market(df_1h, df_4h, symbol)
+        regime, features = classify_user_4h_market(df_1h, df_4h, symbol, df_5m)
         features.oi_change_4h = foresight.oi_change_4h
         features.short_liq_p95_hit = foresight.short_liq_p95_hit
         features.long_liq_p95_hit = foresight.long_liq_p95_hit
@@ -182,6 +184,7 @@ def classify_user_4h_market(
     history_1h: pd.DataFrame,
     history_4h: pd.DataFrame,
     symbol: str = "",
+    history_5m: pd.DataFrame | None = None,
 ) -> tuple[Regime, MarketFeatures]:
     adx_series, plus_di, minus_di = directional_indicators(history_1h.high, history_1h.low, history_1h.close)
     atr_1h = atr(history_1h.high, history_1h.low, history_1h.close)
@@ -264,9 +267,13 @@ def classify_user_4h_market(
         1 for left, right in zip(recent_6.low.iloc[:-1], recent_6.low.iloc[1:]) if float(right) < float(left)
     )
     if alternating and rising_high_steps >= 3 and rising_low_steps >= 2 and features.ema20_1h > features.ema60_1h:
-        return Regime.SHOCK_TREND_UP, features
+        return correct_regime_with_short_term_momentum(
+            Regime.SHOCK_TREND_UP, history_1h, history_4h, history_5m
+        ), features
     if alternating and falling_low_steps >= 3 and falling_high_steps >= 2 and features.ema20_1h < features.ema60_1h:
-        return Regime.SHOCK_TREND_DOWN, features
+        return correct_regime_with_short_term_momentum(
+            Regime.SHOCK_TREND_DOWN, history_1h, history_4h, history_5m
+        ), features
 
     structural_regime = classify_structural_4h_drift(
         rising_high_steps,
@@ -275,15 +282,80 @@ def classify_user_4h_market(
         falling_low_steps,
     )
     if structural_regime is not None:
-        return structural_regime, features
+        return correct_regime_with_short_term_momentum(
+            structural_regime, history_1h, history_4h, history_5m
+        ), features
 
     directional_regime = classify_directional_breakout(directional, features.ema20_1h, features.ema60_1h)
     if directional_regime is not None:
-        return directional_regime, features
+        return correct_regime_with_short_term_momentum(
+            directional_regime, history_1h, history_4h, history_5m
+        ), features
 
     if not high_in_last_2 and not low_in_last_2:
         return Regime.SHOCK, features
     return Regime.UNKNOWN, features
+
+
+def correct_regime_with_short_term_momentum(
+    regime: Regime,
+    history_1h: pd.DataFrame,
+    history_4h: pd.DataFrame,
+    history_5m: pd.DataFrame | None = None,
+) -> Regime:
+    if regime not in {Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_DOWN, Regime.TREND_LONG, Regime.TREND_SHORT}:
+        return regime
+    momentum_regime = short_term_momentum_regime(history_1h, history_4h, history_5m)
+    if momentum_regime is None:
+        return regime
+    if momentum_regime == Regime.SHOCK_TREND_UP and regime in {Regime.SHOCK_TREND_DOWN, Regime.TREND_SHORT}:
+        logger.info("regime corrected by short-term momentum previous=%s current=%s", regime, momentum_regime)
+        return momentum_regime
+    if momentum_regime == Regime.SHOCK_TREND_DOWN and regime in {Regime.SHOCK_TREND_UP, Regime.TREND_LONG}:
+        logger.info("regime corrected by short-term momentum previous=%s current=%s", regime, momentum_regime)
+        return momentum_regime
+    return regime
+
+
+def short_term_momentum_regime(
+    history_1h: pd.DataFrame,
+    history_4h: pd.DataFrame,
+    history_5m: pd.DataFrame | None = None,
+) -> Regime | None:
+    frame_15m = resample_history(history_5m, "15min") if history_5m is not None and len(history_5m) >= 12 else None
+    if (
+        frame_15m is not None
+        and consecutive_directional_candles(frame_15m, 4, PositionSide.SHORT)
+        and daily_trend_confirmed(history_4h, PositionSide.SHORT)
+    ) or (
+        consecutive_directional_candles(history_1h, 2, PositionSide.SHORT)
+        and daily_trend_confirmed(history_4h, PositionSide.SHORT)
+    ):
+        return Regime.SHOCK_TREND_DOWN
+    if (
+        frame_15m is not None
+        and consecutive_directional_candles(frame_15m, 4, PositionSide.LONG)
+        and daily_trend_confirmed(history_4h, PositionSide.LONG)
+    ) or (
+        consecutive_directional_candles(history_1h, 2, PositionSide.LONG)
+        and daily_trend_confirmed(history_4h, PositionSide.LONG)
+    ):
+        return Regime.SHOCK_TREND_UP
+    return None
+
+
+def consecutive_directional_candles(frame: pd.DataFrame, count: int, side: PositionSide) -> bool:
+    if len(frame) < count:
+        return False
+    recent = frame.iloc[-count:]
+    closes = [float(value) for value in recent.close]
+    if side == PositionSide.LONG:
+        return bool((recent.close > recent.open).all()) and all(
+            right > left for left, right in zip(closes, closes[1:])
+        )
+    return bool((recent.close < recent.open).all()) and all(
+        right < left for left, right in zip(closes, closes[1:])
+    )
 
 
 def market_features_to_backtest_dict(features: MarketFeatures, history_1h: pd.DataFrame, history_4h: pd.DataFrame) -> dict[str, float]:

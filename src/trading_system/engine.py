@@ -279,6 +279,7 @@ class OKXQuantEngine:
             symbol,
             self.klines[symbol]["1h"],
             self.klines[symbol]["4h"],
+            self.klines[symbol]["5m"],
             self.foresight.get(symbol),
         )
         review_features = {

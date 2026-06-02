@@ -309,9 +309,10 @@ class OKXBacktester:
                 if len(history_1h) < 80 or len(history_4h) < 50:
                     continue
 
-                feature_key = (history_1h.index[-1], history_4h.index[-1])
+                history_15m = resample_history(history_5m, "15min")
+                feature_key = (history_1h.index[-1], history_4h.index[-1], history_15m.index[-1])
                 if feature_key != state["last_feature_key"]:
-                    regime, market_features = classify_user_4h_market(history_1h, history_4h, symbol)
+                    regime, market_features = classify_user_4h_market(history_1h, history_4h, symbol, history_5m)
                     state["cached_regime"] = regime
                     state["cached_market_features"] = market_features
                     state["cached_features"] = market_features_to_backtest_dict(market_features, history_1h, history_4h)
@@ -574,9 +575,10 @@ class OKXBacktester:
             if len(history_1h) < 80 or len(history_4h) < 50:
                 continue
 
-            feature_key = (history_1h.index[-1], history_4h.index[-1])
+            history_15m = resample_history(history_5m, "15min")
+            feature_key = (history_1h.index[-1], history_4h.index[-1], history_15m.index[-1])
             if feature_key != last_feature_key:
-                cached_regime, cached_market_features = classify_user_4h_market(history_1h, history_4h, symbol)
+                cached_regime, cached_market_features = classify_user_4h_market(history_1h, history_4h, symbol, history_5m)
                 cached_features = market_features_to_backtest_dict(cached_market_features, history_1h, history_4h)
                 last_feature_key = feature_key
             regime = cached_regime
