@@ -6,11 +6,14 @@ from logging import getLogger
 import time
 from typing import Any
 
+import pandas as pd
+
 from trading_system.cache import StateCache
 from trading_system.config import Settings
 from trading_system.execution import ExecutionEngine
 from trading_system.exchange import CcxtOkxExchange, DryRunExchange, ExchangeClient
 from trading_system.foresight import ForesightProvider
+from trading_system.indicators import ohlcv_frame
 from trading_system.hotcoin import HotcoinExchange
 from trading_system.models import HedgeLock, OrderResult, PositionSide, Regime, SignalType, TradeSignal
 from trading_system.llm_regime import LLMRegimeReviewer, RegimeReviewInput
@@ -259,19 +262,22 @@ class OKXQuantEngine:
             summary="waiting_market_data",
             blockers=[{"code": "snapshot_1h_ohlcv", "passed": False}],
         )
-        self.klines[symbol]["1h"] = await self._await_exchange_step(
+        snapshot_1h = await self._await_exchange_step(
             symbol,
             "snapshot_1h_ohlcv",
             self.exchange.fetch_ohlcv(symbol, "1h", 120),
             self.settings.exchange_request_timeout_seconds,
         )
+        self._replace_timeframe_cache(symbol, "1h", snapshot_1h)
         if len(self.klines[symbol]["4h"]) < 100 or self._timeframe_stale(symbol, "4h", 14_400_000):
-            self.klines[symbol]["4h"] = await self._await_exchange_step(
+            snapshot_4h = await self._await_exchange_step(
                 symbol,
                 "snapshot_4h_ohlcv",
                 self.exchange.fetch_ohlcv(symbol, "4h", 100),
                 self.settings.exchange_request_timeout_seconds,
             )
+            self._replace_timeframe_cache(symbol, "4h", snapshot_4h)
+        self._sync_higher_timeframes_from_5m(symbol)
 
         self.risk.inspect_spike(symbol, self.klines[symbol]["5m"])
         previous = self.regime_classifier.regimes.get(symbol)
@@ -886,9 +892,72 @@ class OKXQuantEngine:
             cache[-1] = row
         else:
             cache.append(row)
-        max_items = 300 if timeframe == "5m" else 200
+        max_items = 3_000 if timeframe == "5m" else 200
         if len(cache) > max_items:
             del cache[:-max_items]
+
+    def _replace_timeframe_cache(self, symbol: str, timeframe: str, rows: list[list[float]]) -> None:
+        if not rows:
+            return
+        duration_ms = self._timeframe_duration_ms(timeframe)
+        closed_rows = self._closed_ohlcv_rows(rows, duration_ms)
+        if closed_rows:
+            self.klines[symbol][timeframe] = closed_rows[-200:]
+
+    def _sync_higher_timeframes_from_5m(self, symbol: str) -> None:
+        derived_1h = self._resample_5m_cache(symbol, "1h", limit=120)
+        if len(derived_1h) >= 80:
+            self.klines[symbol]["1h"] = derived_1h
+        derived_4h = self._resample_5m_cache(symbol, "4h", limit=100)
+        if len(derived_4h) >= 50:
+            self.klines[symbol]["4h"] = derived_4h
+
+    def _resample_5m_cache(self, symbol: str, timeframe: str, *, limit: int) -> list[list[float]]:
+        rows = self.klines.get(symbol, {}).get("5m", [])
+        if len(rows) < 12:
+            return []
+        df = ohlcv_frame(rows)
+        if df.empty:
+            return []
+        df["dt"] = pd.to_datetime(df.ts, unit="ms", utc=True)
+        df = df.set_index("dt")
+        frame = (
+            df.resample(timeframe)
+            .agg(
+                {
+                    "ts": "last",
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                }
+            )
+            .dropna()
+        )
+        if frame.empty:
+            return []
+        rows_out = frame[["ts", "open", "high", "low", "close", "volume"]].values.tolist()
+        duration_ms = self._timeframe_duration_ms(timeframe)
+        return self._closed_ohlcv_rows(rows_out, duration_ms)[-limit:]
+
+    @staticmethod
+    def _timeframe_duration_ms(timeframe: str) -> int:
+        return {
+            "5m": 300_000,
+            "1h": 3_600_000,
+            "4h": 14_400_000,
+        }.get(timeframe, 60_000)
+
+    @staticmethod
+    def _closed_ohlcv_rows(
+        rows: list[list[float]],
+        duration_ms: int,
+        *,
+        now_ms: int | None = None,
+    ) -> list[list[float]]:
+        now_ms = now_ms if now_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+        return [row for row in rows if int(row[0]) + duration_ms <= now_ms]
 
     def _set_entry_status(
         self,

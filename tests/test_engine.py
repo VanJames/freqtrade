@@ -109,6 +109,33 @@ def test_display_entry_diagnostics_prefers_completed_result_over_transient_statu
     ) is completed
 
 
+def test_engine_filters_unclosed_higher_timeframe_candles() -> None:
+    duration_ms = 3_600_000
+    rows = [
+        [1_700_000_000_000, 100, 101, 99, 100.5, 10],
+        [1_700_003_600_000, 101, 102, 100, 101.5, 11],
+    ]
+
+    closed = OKXQuantEngine._closed_ohlcv_rows(rows, duration_ms, now_ms=1_700_006_000_000)
+
+    assert closed == rows[:1]
+
+
+def test_engine_resamples_5m_cache_to_closed_1h_candles() -> None:
+    engine = OKXQuantEngine(Settings(dry_run=True, symbols=["BTC/USDT:USDT"]))
+    start_ms = 1_700_000_000_000
+    rows = []
+    for idx in range(12 * 90):
+        price = 100 + idx * 0.01
+        rows.append([start_ms + idx * 300_000, price, price + 1, price - 1, price + 0.5, 10])
+    engine.klines["BTC/USDT:USDT"]["5m"] = rows
+
+    candles_1h = engine._resample_5m_cache("BTC/USDT:USDT", "1h", limit=120)
+
+    assert len(candles_1h) >= 80
+    assert candles_1h[-1][0] == rows[-1][0]
+
+
 def test_position_manager_recovers_existing_long_position_with_protective_stop() -> None:
     manager = PositionManager(
         min_stop_loss_pct=0.002,
