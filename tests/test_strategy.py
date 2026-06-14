@@ -209,6 +209,16 @@ def test_shock_trend_up_diagnostics_reports_late_high_long_risk() -> None:
     assert not any(item["code"] == "late_entry_risk" for item in diagnostics["blockers"])
 
 
+def test_late_shock_trend_up_blocks_burst_without_72h_followthrough() -> None:
+    assert not StrategyEngine._late_shock_trend_entry_ok(
+        PositionSide.LONG,
+        close_position_72h=0.7533,
+        ret_24h=0.0265,
+        ret_72h=0.0080,
+        recent_5h_position=0.50,
+    )
+
+
 def test_liquidity_sweep_reversal_detects_downside_reclaim() -> None:
     engine = StrategyEngine(enable_liquidity_sweep_reversal=True, max_stop_loss_pct=0.015)
     candles = []

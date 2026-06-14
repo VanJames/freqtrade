@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     llm_regime_api_key_env: str = ""
     llm_regime_review_cache_ttl_seconds: int = 900
     llm_regime_review_min_interval_seconds: int = 900
+    email_enabled: bool = False
+    email_user: str = ""
+    email_pass: str = ""
+    email_to: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_use_ssl: bool = True
 
     @field_validator("symbols", mode="before")
     @classmethod

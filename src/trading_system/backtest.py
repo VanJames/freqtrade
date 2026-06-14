@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -268,12 +269,18 @@ class OKXBacktester:
             df5 = df5.set_index("dt")
             df1h = self.resample(df5, "1h")
             df4h = self.resample(df5, "4h")
+            rows5 = ohlcv_rows(df5)
+            rows1h = ohlcv_rows(df1h)
+            rows4h = ohlcv_rows(df4h)
             index_by_time = {timestamp: index for index, timestamp in enumerate(df5.index)}
             all_times.update(df5[df5.ts >= start_ms].index)
             states[symbol] = {
                 "df5": df5,
                 "df1h": df1h,
                 "df4h": df4h,
+                "rows5": rows5,
+                "rows1h": rows1h,
+                "rows4h": rows4h,
                 "index_by_time": index_by_time,
                 "open_position": None,
                 "last_regime_check": None,
@@ -293,7 +300,19 @@ class OKXBacktester:
         risk.update_equity(equity)
         last_global_entry_time: pd.Timestamp | None = None
 
-        for now in sorted(all_times):
+        ordered_times = sorted(all_times)
+        progress_enabled = os.getenv("BACKTEST_PROGRESS", "").lower() in {"1", "true", "yes"}
+        entry_interval = os.getenv("BACKTEST_ENTRY_INTERVAL", "").lower()
+        regime_interval = os.getenv("BACKTEST_REGIME_INTERVAL", "").lower()
+        progress_started = time.time()
+        for time_index, now in enumerate(ordered_times, start=1):
+            if progress_enabled and (time_index == 1 or time_index % 500 == 0):
+                elapsed = time.time() - progress_started
+                print(
+                    f"backtest progress {time_index}/{len(ordered_times)} "
+                    f"elapsed={elapsed:.1f}s",
+                    flush=True,
+                )
             for symbol in self.config.symbols:
                 state = states.get(symbol)
                 if not state:
@@ -303,18 +322,21 @@ class OKXBacktester:
                 if idx is None or idx < 240:
                     continue
                 row = df5.iloc[idx]
-                history_5m = df5.iloc[: idx + 1]
-                history_1h = state["df1h"][state["df1h"].index <= now].iloc[:-1]
-                history_4h = state["df4h"][state["df4h"].index <= now].iloc[:-1]
+                history_1h = completed_history_until(state["df1h"], now)
+                history_4h = completed_history_until(state["df4h"], now)
                 if len(history_1h) < 80 or len(history_4h) < 50:
                     continue
 
-                feature_key = (history_1h.index[-1], history_4h.index[-1], now.floor("15min"))
+                regime_bucket = now.floor("1h") if regime_interval == "1h" else now.floor("15min")
+                feature_key = (history_1h.index[-1], history_4h.index[-1], regime_bucket)
                 if feature_key != state["last_feature_key"]:
-                    regime, market_features = classify_user_4h_market(history_1h, history_4h, symbol, history_5m)
+                    classify_5m = df5.iloc[max(0, idx - 999) : idx + 1]
+                    classify_1h = history_1h.iloc[-120:]
+                    classify_4h = history_4h.iloc[-80:]
+                    regime, market_features = classify_user_4h_market(classify_1h, classify_4h, symbol, classify_5m)
                     state["cached_regime"] = regime
                     state["cached_market_features"] = market_features
-                    state["cached_features"] = market_features_to_backtest_dict(market_features, history_1h, history_4h)
+                    state["cached_features"] = market_features_to_backtest_dict(market_features, classify_1h, classify_4h)
                     state["last_feature_key"] = feature_key
                 regime = state["cached_regime"]
                 market_features = state["cached_market_features"]
@@ -348,16 +370,19 @@ class OKXBacktester:
                 if not review.allow_trade or review.proposed_regime != regime:
                     state["previous_regime"] = regime
                     continue
+                if not is_allowed_entry_boundary(row.ts, entry_interval):
+                    state["previous_regime"] = regime
+                    continue
 
                 strategy_signals = self.strategy.build_signals(
                     symbol=symbol,
                     regime=regime,
                     previous_regime=state["previous_regime"] or regime,
                     features=market_features,
-                    candles_5m=history_5m.iloc[-300:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                    candles_5m=state["rows5"][max(0, idx - 299) : idx + 1],
                     positions=backtest_positions(symbol, state["open_position"]),
-                    candles_1h=history_1h.iloc[-120:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
-                    candles_4h=history_4h.iloc[-100:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                    candles_1h=state["rows1h"][max(0, len(history_1h) - 120) : len(history_1h)],
+                    candles_4h=state["rows4h"][max(0, len(history_4h) - 100) : len(history_4h)],
                     context=adaptive_strategy_context(
                         self.config,
                         now,
@@ -545,6 +570,9 @@ class OKXBacktester:
         df5 = df5.set_index("dt")
         df1h = self.resample(df5, "1h")
         df4h = self.resample(df5, "4h")
+        rows5 = ohlcv_rows(df5)
+        rows1h = ohlcv_rows(df1h)
+        rows4h = ohlcv_rows(df4h)
 
         equity = self.config.initial_equity
         trades: list[SimTrade] = []
@@ -561,6 +589,8 @@ class OKXBacktester:
         risk = RiskManager(self.config)
         risk.update_equity(equity)
         last_entry_time: pd.Timestamp | None = None
+        entry_interval = os.getenv("BACKTEST_ENTRY_INTERVAL", "").lower()
+        regime_interval = os.getenv("BACKTEST_REGIME_INTERVAL", "").lower()
 
         for idx in range(240, len(df5)):
             now = df5.index[idx]
@@ -568,16 +598,24 @@ class OKXBacktester:
             if int(row.ts) < start_ms:
                 continue
 
-            history_5m = df5.iloc[: idx + 1]
-            history_1h = df1h[df1h.index <= now].iloc[:-1]
-            history_4h = df4h[df4h.index <= now].iloc[:-1]
+            history_1h = completed_history_until(df1h, now)
+            history_4h = completed_history_until(df4h, now)
             if len(history_1h) < 80 or len(history_4h) < 50:
                 continue
 
-            feature_key = (history_1h.index[-1], history_4h.index[-1], now.floor("15min"))
+            regime_bucket = now.floor("1h") if regime_interval == "1h" else now.floor("15min")
+            feature_key = (history_1h.index[-1], history_4h.index[-1], regime_bucket)
             if feature_key != last_feature_key:
-                cached_regime, cached_market_features = classify_user_4h_market(history_1h, history_4h, symbol, history_5m)
-                cached_features = market_features_to_backtest_dict(cached_market_features, history_1h, history_4h)
+                classify_5m = df5.iloc[max(0, idx - 999) : idx + 1]
+                classify_1h = history_1h.iloc[-120:]
+                classify_4h = history_4h.iloc[-80:]
+                cached_regime, cached_market_features = classify_user_4h_market(
+                    classify_1h,
+                    classify_4h,
+                    symbol,
+                    classify_5m,
+                )
+                cached_features = market_features_to_backtest_dict(cached_market_features, classify_1h, classify_4h)
                 last_feature_key = feature_key
             regime = cached_regime
             market_features = cached_market_features
@@ -607,16 +645,19 @@ class OKXBacktester:
             if not review.allow_trade or review.proposed_regime != regime:
                 previous_regime = regime
                 continue
+            if not is_allowed_entry_boundary(row.ts, entry_interval):
+                previous_regime = regime
+                continue
 
             strategy_signals = self.strategy.build_signals(
                 symbol=symbol,
                 regime=regime,
                 previous_regime=previous_regime,
                 features=market_features,
-                candles_5m=history_5m.iloc[-300:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                candles_5m=rows5[max(0, idx - 299) : idx + 1],
                 positions=backtest_positions(symbol, open_position),
-                candles_1h=history_1h.iloc[-120:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
-                candles_4h=history_4h.iloc[-100:][["ts", "open", "high", "low", "close", "volume"]].values.tolist(),
+                candles_1h=rows1h[max(0, len(history_1h) - 120) : len(history_1h)],
+                candles_4h=rows4h[max(0, len(history_4h) - 100) : len(history_4h)],
                 context=adaptive_strategy_context(
                     self.config,
                     now,
@@ -926,6 +967,27 @@ def avg_entry_gap_hours(trades: list[SimTrade]) -> float:
         for index in range(1, len(ordered))
     ]
     return sum(gaps) / len(gaps)
+
+
+def completed_history_until(frame: pd.DataFrame, now: pd.Timestamp) -> pd.DataFrame:
+    rows_including_current = frame.index.searchsorted(now, side="right")
+    return frame.iloc[: max(rows_including_current - 1, 0)]
+
+
+def ohlcv_rows(frame: pd.DataFrame) -> list[list[float]]:
+    return frame[["ts", "open", "high", "low", "close", "volume"]].values.tolist()
+
+
+def is_completed_15m_boundary(timestamp_ms: float) -> bool:
+    return (int(timestamp_ms) + TIMEFRAME_MS["5m"]) % (15 * 60 * 1000) == 0
+
+
+def is_allowed_entry_boundary(timestamp_ms: float, interval: str) -> bool:
+    if interval == "15m":
+        return is_completed_15m_boundary(timestamp_ms)
+    if interval == "1h":
+        return (int(timestamp_ms) + TIMEFRAME_MS["5m"]) % (60 * 60 * 1000) == 0
+    return True
 
 
 def sim_signal_to_trade_signal(symbol: str, signal: dict[str, Any]) -> TradeSignal:

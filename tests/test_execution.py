@@ -75,7 +75,17 @@ def signal(signal_type: SignalType = SignalType.ENTER_TREND) -> TradeSignal:
         regime=Regime.SHOCK_TREND_UP,
         price=100.0,
         stop_loss=98.0,
+        take_profit=104.0,
+        reason="unit_test_signal",
     )
+
+
+class RecordingNotifier:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def notify_order_signal(self, trade_signal: TradeSignal, *, order_price: float, amount: float) -> None:
+        self.calls.append({"signal": trade_signal, "order_price": order_price, "amount": amount})
 
 
 @pytest.mark.asyncio
@@ -92,9 +102,26 @@ async def test_entry_uses_okx_post_only_ord_type() -> None:
 
 
 @pytest.mark.asyncio
+async def test_entry_sends_email_notification_before_order() -> None:
+    exchange = RecordingExchange()
+    notifier = RecordingNotifier()
+    engine = ExecutionEngine(exchange, email_notifier=notifier)  # type: ignore[arg-type]
+    order = await engine.execute(signal(), RiskDecision(True, size=1.25))
+
+    assert order.status == "open"
+    assert len(notifier.calls) == 1
+    assert notifier.calls[0]["order_price"] == pytest.approx(99.0)
+    assert notifier.calls[0]["amount"] == pytest.approx(1.25)
+    for task in engine.background_tasks:
+        task.cancel()
+    await asyncio.gather(*engine.background_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_exit_uses_ioc_ord_type() -> None:
     exchange = RecordingExchange()
-    engine = ExecutionEngine(exchange)
+    notifier = RecordingNotifier()
+    engine = ExecutionEngine(exchange, email_notifier=notifier)  # type: ignore[arg-type]
     exit_signal = signal(SignalType.EXIT)
     exit_signal.metadata = {"contracts": 1.0, "reduce_only": True}
     order = await engine.execute(exit_signal, RiskDecision(True, size=1.0))
@@ -102,3 +129,4 @@ async def test_exit_uses_ioc_ord_type() -> None:
     assert order.status == "open"
     assert exchange.params[0]["ordType"] == "ioc"
     assert exchange.params[0]["reduceOnly"] is True
+    assert notifier.calls == []

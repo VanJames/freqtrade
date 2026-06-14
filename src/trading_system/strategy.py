@@ -55,7 +55,7 @@ class StrategyEngine:
         self.liquidity_sweep_require_confirmation = liquidity_sweep_require_confirmation
         self.enable_two_candle_momentum = enable_two_candle_momentum
         self._pre_cross_cache: dict[tuple[str, str, int, int, float], bool] = {}
-        self._frame_cache: dict[tuple[str, int, int], Any] = {}
+        self._frame_cache: dict[tuple[str, int, int, int, float], Any] = {}
 
     def build_signals(
         self,
@@ -113,7 +113,7 @@ class StrategyEngine:
                 {"regime": regime.value, "positions": len(positions)},
             )
 
-        df = ohlcv_frame(candles_5m)
+        df = self._cached_ohlcv_frame("5m", candles_5m)
         if len(df) < 35 or features.atr_1h <= 0:
             return self._diagnostics(
                 "data_wait",
@@ -531,7 +531,7 @@ class StrategyEngine:
     ) -> list[TradeSignal]:
         if not lock or not lock.active:
             return []
-        df = ohlcv_frame(candles_5m)
+        df = self._cached_ohlcv_frame("5m", candles_5m)
         if len(df) < 20:
             return []
         rsi_5m = rsi(df.close, 14)
@@ -820,7 +820,7 @@ class StrategyEngine:
         positions: list[Position],
         context: dict[str, Any] | None = None,
     ) -> TradeSignal | None:
-        df = ohlcv_frame(candles_5m)
+        df = self._cached_ohlcv_frame("5m", candles_5m)
         if len(df) < 35 or features.atr_1h <= 0:
             return None
         price = float(df.close.iloc[-1])
@@ -1057,6 +1057,9 @@ class StrategyEngine:
                         trend_short_opportunity.risk_multiplier,
                     ),
                     "volatility_tier": volatility_policy.tier,
+                    "close_position_72h": round(features.close_position_72h, 4),
+                    "ret_24h": round(features.ret_24h, 6),
+                    "ret_72h": round(features.ret_72h, 6),
                 },
             )
 
@@ -1127,8 +1130,8 @@ class StrategyEngine:
             and 0 < features.ret_72h < 0.015
         )
         late_burst_without_72h_followthrough = (
-            features.close_position_72h >= 0.76
-            and features.ret_24h >= 0.015
+            features.close_position_72h >= 0.74
+            and features.ret_24h >= 0.020
             and features.ret_72h <= 0.015
         )
         shock_trend_up_late_entry_ok = self._late_shock_trend_entry_ok(
@@ -1250,7 +1253,12 @@ class StrategyEngine:
             and 0.25 <= recent_5h_position <= 0.72
             and features.close_position_72h <= 0.82
             and not local_top_without_impulse
-            and not (mixed_uptrend and features.close_position_72h >= 0.74)
+            and not (
+                mixed_uptrend
+                and features.close_position_72h >= 0.55
+                and features.ret_72h <= -0.008
+                and symbol.startswith(("ETH/", "SOL/"))
+            )
             and not long_scout_weak_bullish_context
             and not long_scout_weak_followthrough
             and not late_range_long_scout
@@ -1649,6 +1657,8 @@ class StrategyEngine:
         if side == PositionSide.LONG:
             if close_position_72h >= 0.88 and recent_5h_position >= 0.45:
                 return False
+            if close_position_72h >= 0.74 and ret_24h >= 0.020 and ret_72h <= 0.015:
+                return False
             if close_position_72h >= 0.78 and ret_24h >= 0.018 and recent_5h_position >= 0.55:
                 return False
             if close_position_72h >= 0.75 and ret_72h >= 0.045 and recent_5h_position >= 0.60:
@@ -1716,7 +1726,7 @@ class StrategyEngine:
             return None
         if not self._on_15m_boundary(candles_5m):
             return None
-        df5 = ohlcv_frame(candles_5m)
+        df5 = self._cached_ohlcv_frame("5m", candles_5m)
         df1h = self._cached_ohlcv_frame("1h", candles_1h or [])
         df4h = self._cached_ohlcv_frame("4h", candles_4h or [])
         if len(df5) < 80 or len(df1h) < 40 or len(df4h) < 35 or features.atr_1h <= 0:
@@ -1909,7 +1919,7 @@ class StrategyEngine:
     def _cached_ohlcv_frame(self, label: str, rows: list[list[float]]):
         if not rows:
             return ohlcv_frame(rows)
-        key = (label, len(rows), int(rows[-1][0]))
+        key = (label, len(rows), int(rows[0][0]), int(rows[-1][0]), float(rows[-1][4]))
         cached = self._frame_cache.get(key)
         if cached is not None:
             return cached

@@ -66,3 +66,28 @@ def test_runtime_config_applies_positions_cache_ttl() -> None:
     apply_runtime_config(settings, {"positions_cache_ttl_seconds": "1.0"})
 
     assert settings.positions_cache_ttl_seconds == 1.0
+
+
+def test_runtime_config_applies_email_smtp_fields() -> None:
+    settings = Settings(dry_run=True)
+
+    apply_runtime_config(
+        settings,
+        {
+            "email_enabled": "1",
+            "email_user": "sender@example.com",
+            "email_pass": "secret",
+            "email_to": "receiver@example.com",
+            "smtp_host": "smtp.example.com",
+            "smtp_port": "465",
+            "smtp_use_ssl": "1",
+        },
+    )
+
+    assert settings.email_enabled is True
+    assert settings.email_user == "sender@example.com"
+    assert settings.email_pass == "secret"
+    assert settings.email_to == "receiver@example.com"
+    assert settings.smtp_host == "smtp.example.com"
+    assert settings.smtp_port == 465
+    assert settings.smtp_use_ssl is True

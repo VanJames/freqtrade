@@ -4,6 +4,7 @@ import asyncio
 from logging import getLogger
 from collections.abc import Awaitable, Callable
 
+from trading_system.email_notification import OrderEmailNotifier
 from trading_system.exchange import ExchangeClient
 from trading_system.models import OrderResult, Side, SignalType, TradeSignal
 from trading_system.risk import RiskDecision
@@ -17,10 +18,12 @@ class ExecutionEngine:
         exchange: ExchangeClient,
         twap_timeout: int = 15,
         twap_callback: Callable[[str, float, float], Awaitable[None]] | None = None,
+        email_notifier: OrderEmailNotifier | None = None,
     ) -> None:
         self.exchange = exchange
         self.twap_timeout = twap_timeout
         self.twap_callback = twap_callback
+        self.email_notifier = email_notifier
         self.background_tasks: set[asyncio.Task[None]] = set()
 
     async def execute(self, signal: TradeSignal, decision: RiskDecision) -> OrderResult:
@@ -34,6 +37,8 @@ class ExecutionEngine:
         else:
             price = float(book["bids"][0][0] if reduce_only else book["asks"][0][0])
 
+        if self.email_notifier and not reduce_only:
+            await self.email_notifier.notify_order_signal(signal, order_price=price, amount=decision.size)
         order = await self.exchange.create_order(
             signal.symbol,
             "limit",
@@ -60,6 +65,8 @@ class ExecutionEngine:
         price: float,
         post_only: bool = True,
     ) -> OrderResult:
+        if self.email_notifier and post_only:
+            await self.email_notifier.notify_order_signal(signal, order_price=price, amount=amount)
         order = await self.exchange.create_order(
             signal.symbol,
             "limit",

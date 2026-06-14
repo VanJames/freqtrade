@@ -250,6 +250,75 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
         60.0,
         description="全局和单品种 LLM 调用最小间隔。设大一些可以避免频繁调用。",
     ),
+    RuntimeField(
+        "email_enabled",
+        "启用邮件下单通知",
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        boolean=True,
+        description="开启后，实盘入场订单提交前会发送邮件；邮件失败不阻塞下单。",
+    ),
+    RuntimeField(
+        "email_user",
+        "SMTP 发件邮箱",
+        "",
+        0.0,
+        0.0,
+        1.0,
+        text=True,
+        description="SMTP 登录用户名，通常是发件邮箱。",
+    ),
+    RuntimeField(
+        "email_pass",
+        "SMTP 授权码",
+        "",
+        0.0,
+        0.0,
+        1.0,
+        text=True,
+        description="邮箱 SMTP 授权码。会保存到本地运行时配置数据库。",
+    ),
+    RuntimeField(
+        "email_to",
+        "邮件收件人",
+        "",
+        0.0,
+        0.0,
+        1.0,
+        text=True,
+        description="接收下单通知的邮箱地址。",
+    ),
+    RuntimeField(
+        "smtp_host",
+        "SMTP Host",
+        "",
+        0.0,
+        0.0,
+        1.0,
+        text=True,
+        description="例如 smtp.qq.com。",
+    ),
+    RuntimeField(
+        "smtp_port",
+        "SMTP 端口",
+        465.0,
+        1.0,
+        65535.0,
+        1.0,
+        description="QQ 邮箱 SSL SMTP 通常使用 465。",
+    ),
+    RuntimeField(
+        "smtp_use_ssl",
+        "SMTP 使用 SSL",
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        boolean=True,
+        description="开启使用 SMTP_SSL；关闭时使用 STARTTLS。",
+    ),
 )
 
 
@@ -304,9 +373,11 @@ def apply_runtime_config(settings: Settings, values: dict[str, Any]) -> None:
             "enable_shock_trend_scout",
             "enable_adaptive_strategy_switch",
             "llm_regime_review_enabled",
+            "email_enabled",
+            "smtp_use_ssl",
         }:
             setattr(settings, key, bool(value))
-        elif key in {"llm_regime_review_cache_ttl_seconds", "llm_regime_review_min_interval_seconds"}:
+        elif key in {"llm_regime_review_cache_ttl_seconds", "llm_regime_review_min_interval_seconds", "smtp_port"}:
             setattr(settings, key, int(float(value)))
         else:
             setattr(settings, key, value)

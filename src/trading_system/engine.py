@@ -10,6 +10,7 @@ import pandas as pd
 
 from trading_system.cache import StateCache
 from trading_system.config import Settings
+from trading_system.email_notification import OrderEmailNotifier, SmtpConfig
 from trading_system.execution import ExecutionEngine
 from trading_system.exchange import CcxtOkxExchange, DryRunExchange, ExchangeClient
 from trading_system.foresight import ForesightProvider
@@ -85,9 +86,11 @@ class OKXQuantEngine:
             liquidity_sweep_require_confirmation=settings.liquidity_sweep_require_confirmation,
         )
         self.risk = RiskManager(settings)
+        self.email_notifier = OrderEmailNotifier(SmtpConfig.from_settings(settings))
         self.execution = ExecutionEngine(
             self.exchange,
             twap_callback=store.record_twap_fill if store else None,
+            email_notifier=self.email_notifier,
         )
         self.alpha_filter = AlphaFilter()
         self.grid_planner = GridPlanner()
@@ -1424,6 +1427,8 @@ class OKXQuantEngine:
             self.llm_reviewer.min_interval_seconds,
         )
         apply_runtime_config(self.settings, values)
+        self.email_notifier = OrderEmailNotifier(SmtpConfig.from_settings(self.settings))
+        self.execution.email_notifier = self.email_notifier
         self._apply_llm_runtime_settings(previous_llm)
         if update_exchange_leverage and self.settings.trend_symbol_leverage_limit != previous_leverage:
             for symbol in self.settings.symbols:
