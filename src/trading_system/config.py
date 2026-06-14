@@ -92,7 +92,7 @@ class Settings(BaseSettings):
             "secret": self.okx_secret,
             "password": self.okx_password,
             "enableRateLimit": True,
-            "options": {"defaultType": "swap"},
+            "options": {"defaultType": "swap", "fetchCurrencies": False},
         }
         if self.okx_demo:
             config["headers"] = {"x-simulated-trading": "1"}
