@@ -205,6 +205,7 @@ class CcxtOkxExchange(ExchangeClient):
         import ccxt.pro as ccxtpro
 
         self.exchange = ccxtpro.okx(self.config)
+        self.exchange.has["fetchCurrencies"] = False
         await self.api.load_markets()
         try:
             await self.exchange.set_position_mode(True)
