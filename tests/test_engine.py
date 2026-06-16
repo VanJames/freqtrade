@@ -516,6 +516,82 @@ async def test_low_equity_entry_sends_email_without_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_low_equity_rejection_email_uses_dedicated_cooldown() -> None:
+    exchange = LowEquityExchange()
+    exchange.position = Position(
+        symbol="BTC/USDT:USDT",
+        side=PositionSide.LONG,
+        contracts=0.0,
+        entry_price=0.0,
+    )
+    settings = Settings(
+        dry_run=True,
+        symbols=["BTC/USDT:USDT"],
+        live_entry_order_cooldown_seconds=0,
+        risk_rejection_email_cooldown_seconds=3600,
+        min_live_equity_to_order=5.0,
+    )
+    engine = OKXQuantEngine(settings, exchange=exchange)
+    notifier = RecordingRiskNotifier()
+    engine.email_notifier = notifier  # type: ignore[assignment]
+    signal = TradeSignal(
+        symbol="BTC/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.SHOCK_TREND_UP,
+        price=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        reason="low_equity_signal",
+    )
+
+    await engine._execute_signals([signal])
+    await engine._execute_signals([signal])
+
+    assert exchange.orders == []
+    assert len(notifier.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_low_equity_rejection_email_cooldown_can_be_disabled() -> None:
+    exchange = LowEquityExchange()
+    exchange.position = Position(
+        symbol="BTC/USDT:USDT",
+        side=PositionSide.LONG,
+        contracts=0.0,
+        entry_price=0.0,
+    )
+    settings = Settings(
+        dry_run=True,
+        symbols=["BTC/USDT:USDT"],
+        live_entry_order_cooldown_seconds=0,
+        risk_rejection_email_cooldown_seconds=0,
+        min_live_equity_to_order=5.0,
+    )
+    engine = OKXQuantEngine(settings, exchange=exchange)
+    notifier = RecordingRiskNotifier()
+    engine.email_notifier = notifier  # type: ignore[assignment]
+    signal = TradeSignal(
+        symbol="BTC/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.SHOCK_TREND_UP,
+        price=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        reason="low_equity_signal",
+    )
+
+    await engine._execute_signals([signal])
+    await engine._execute_signals([signal])
+
+    assert exchange.orders == []
+    assert len(notifier.calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_reconcile_direction_risk_clears_stale_side_without_live_position() -> None:
     exchange = PositionMonitorExchange()
     exchange.position = Position(

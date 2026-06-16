@@ -68,6 +68,14 @@ def test_runtime_config_applies_positions_cache_ttl() -> None:
     assert settings.positions_cache_ttl_seconds == 1.0
 
 
+def test_runtime_config_applies_risk_rejection_email_cooldown() -> None:
+    settings = Settings(dry_run=True)
+
+    apply_runtime_config(settings, {"risk_rejection_email_cooldown_seconds": "7200"})
+
+    assert settings.risk_rejection_email_cooldown_seconds == 7200.0
+
+
 def test_runtime_config_applies_email_smtp_fields() -> None:
     settings = Settings(dry_run=True)
 

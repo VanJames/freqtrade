@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     positions_cache_ttl_seconds: float = 2.0
     live_entry_order_cooldown_seconds: float = 60.0
     live_exit_order_cooldown_seconds: float = 30.0
+    risk_rejection_email_cooldown_seconds: float = 3600.0
     min_live_equity_to_order: float = 5.0
 
     risk_percent: float = 0.012

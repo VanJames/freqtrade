@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Hashable
 from datetime import datetime, timezone
 from logging import getLogger
 import time
@@ -124,6 +125,7 @@ class OKXQuantEngine:
         self._pending_entry_keys: set[tuple[str, PositionSide]] = set()
         self._entry_order_cooldowns: dict[tuple[str, PositionSide], float] = {}
         self._exit_order_cooldowns: dict[tuple[str, PositionSide], float] = {}
+        self._risk_rejection_email_cooldowns: dict[tuple[str, PositionSide, str], float] = {}
         self._last_entry_submitted_at: datetime | None = None
         self._last_order_store_checked_at = 0.0
         self._adaptive_log_state: dict[str, str] = {}
@@ -556,13 +558,27 @@ class OKXQuantEngine:
                 if not decision.allowed:
                     if signal_is_entry:
                         cooldown_needed = True
-                        await self.email_notifier.notify_order_signal(
-                            signal,
-                            order_price=signal.price,
-                            amount=decision.size,
-                            status="风控拒单",
-                            note=f"未真实下单: {decision.reason}; account_equity={equity:.4f}",
-                        )
+                        email_key = (signal.symbol, signal.position_side, decision.reason)
+                        if not self._cooldown_active(self._risk_rejection_email_cooldowns, email_key):
+                            await self.email_notifier.notify_order_signal(
+                                signal,
+                                order_price=signal.price,
+                                amount=decision.size,
+                                status="风控拒单",
+                                note=f"未真实下单: {decision.reason}; account_equity={equity:.4f}",
+                            )
+                            self._start_cooldown(
+                                self._risk_rejection_email_cooldowns,
+                                email_key,
+                                self.settings.risk_rejection_email_cooldown_seconds,
+                            )
+                        else:
+                            logger.info(
+                                "risk rejection email suppressed symbol=%s side=%s reason=%s",
+                                signal.symbol,
+                                signal.position_side.value,
+                                decision.reason,
+                            )
                     logger.warning(
                         "signal rejected symbol=%s regime=%s side=%s reason=%s signal_reason=%s "
                         "price=%.8f stop=%.8f take_profit=%s funding=%.6f",
@@ -793,8 +809,8 @@ class OKXQuantEngine:
 
     @staticmethod
     def _cooldown_active(
-        cooldowns: dict[tuple[str, PositionSide], float],
-        key: tuple[str, PositionSide],
+        cooldowns: dict[Hashable, float],
+        key: Hashable,
     ) -> bool:
         until = cooldowns.get(key)
         if until is None:
@@ -806,8 +822,8 @@ class OKXQuantEngine:
 
     @staticmethod
     def _start_cooldown(
-        cooldowns: dict[tuple[str, PositionSide], float],
-        key: tuple[str, PositionSide],
+        cooldowns: dict[Hashable, float],
+        key: Hashable,
         seconds: float,
     ) -> None:
         cooldowns[key] = time.monotonic() + max(0.0, float(seconds))

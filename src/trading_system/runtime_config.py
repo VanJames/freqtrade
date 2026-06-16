@@ -88,6 +88,15 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
         description="账户权益低于该值时只发送信号/拒单邮件，不向交易所真实下单。设为 0 可关闭。",
     ),
     RuntimeField(
+        "risk_rejection_email_cooldown_seconds",
+        "拒单邮件冷却秒数",
+        3600.0,
+        0.0,
+        86400.0,
+        60.0,
+        description="同一品种、方向、拒单原因在冷却期内只发一封未下单邮件，避免低余额或持续风控拒单时刷屏。",
+    ),
+    RuntimeField(
         "enable_shock_trend_scout",
         "启用 SHOCK 趋势先遣单",
         1.0,
