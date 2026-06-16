@@ -59,13 +59,15 @@ class OrderEmailNotifier:
         *,
         order_price: float,
         amount: float,
+        status: str = "ready",
+        note: str = "",
     ) -> None:
         if not self.config.ready():
             return
         if signal.signal_type not in {SignalType.ENTER_TREND, SignalType.ENTER_GRID, SignalType.HEDGE_TRANSITION}:
             return
         try:
-            await asyncio.to_thread(self._send_order_signal, signal, order_price, amount)
+            await asyncio.to_thread(self._send_order_signal, signal, order_price, amount, status, note)
         except Exception:
             logger.exception(
                 "order email notification failed symbol=%s side=%s reason=%s",
@@ -74,8 +76,22 @@ class OrderEmailNotifier:
                 signal.reason,
             )
 
-    def _send_order_signal(self, signal: TradeSignal, order_price: float, amount: float) -> None:
-        message = build_order_signal_email(self.config, signal, order_price=order_price, amount=amount)
+    def _send_order_signal(
+        self,
+        signal: TradeSignal,
+        order_price: float,
+        amount: float,
+        status: str,
+        note: str,
+    ) -> None:
+        message = build_order_signal_email(
+            self.config,
+            signal,
+            order_price=order_price,
+            amount=amount,
+            status=status,
+            note=note,
+        )
         if self.config.use_ssl:
             with smtplib.SMTP_SSL(self.config.host, self.config.port, timeout=20) as smtp:
                 smtp.login(self.config.user, self.config.password)
@@ -93,23 +109,34 @@ def build_order_signal_email(
     *,
     order_price: float,
     amount: float,
+    status: str = "ready",
+    note: str = "",
 ) -> EmailMessage:
-    subject = f"[Quant] 下单信号 {signal.symbol} {signal.position_side.value.upper()}"
+    status_label = "未下单" if status != "ready" else "下单信号"
+    subject = f"[Quant] {status_label} {signal.symbol} {signal.position_side.value.upper()}"
     message = EmailMessage()
     message["From"] = config.user
     message["To"] = config.to
     message["Subject"] = subject
-    message.set_content(format_order_signal(signal, order_price=order_price, amount=amount))
+    message.set_content(format_order_signal(signal, order_price=order_price, amount=amount, status=status, note=note))
     return message
 
 
-def format_order_signal(signal: TradeSignal, *, order_price: float, amount: float) -> str:
+def format_order_signal(
+    signal: TradeSignal,
+    *,
+    order_price: float,
+    amount: float,
+    status: str = "ready",
+    note: str = "",
+) -> str:
     metadata = signal.metadata or {}
     take_profit = "-" if signal.take_profit is None else f"{signal.take_profit:.8f}"
     lines = [
         "量化交易下单信号",
         "",
         f"时间: {datetime.now(timezone.utc).isoformat()}",
+        f"状态: {'准备下单' if status == 'ready' else status}",
         f"品种: {signal.symbol}",
         f"方向: {signal.position_side.value}",
         f"交易动作: {signal.side.value}",
@@ -124,6 +151,8 @@ def format_order_signal(signal: TradeSignal, *, order_price: float, amount: floa
         f"机会评分: {metadata.get('opportunity_grade', '-')}{metadata.get('opportunity_score', '-')}",
         f"风险倍数: {metadata.get('risk_multiplier', '-')}",
     ]
+    if note:
+        lines.append(f"备注: {note}")
     strategy_route = metadata.get("strategy_route")
     if strategy_route:
         lines.append(f"策略路径: {strategy_route}")

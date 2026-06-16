@@ -79,6 +79,15 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
         description="限制单个信号最终风险倍数。中等动态仓位建议 3；旧激进回测为 20。",
     ),
     RuntimeField(
+        "min_live_equity_to_order",
+        "实盘最低下单权益",
+        5.0,
+        0.0,
+        1000.0,
+        1.0,
+        description="账户权益低于该值时只发送信号/拒单邮件，不向交易所真实下单。设为 0 可关闭。",
+    ),
+    RuntimeField(
         "enable_shock_trend_scout",
         "启用 SHOCK 趋势先遣单",
         1.0,

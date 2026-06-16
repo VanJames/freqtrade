@@ -70,6 +70,10 @@ class RiskManager:
         if signal.signal_type in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
             return RiskDecision(True, "exit_bypass_position_sizing", size=float(signal.metadata["contracts"]))
 
+        min_live_equity = float(getattr(self.settings, "min_live_equity_to_order", 0.0) or 0.0)
+        if min_live_equity > 0 and equity < min_live_equity:
+            return RiskDecision(False, "low_equity")
+
         stop_distance = abs(signal.price - signal.stop_loss)
         if stop_distance <= 0:
             return RiskDecision(False, "invalid_stop_distance")

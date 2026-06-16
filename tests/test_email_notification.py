@@ -52,3 +52,27 @@ def test_build_order_signal_email_sets_headers() -> None:
     assert message["From"] == "sender@example.com"
     assert message["To"] == "receiver@example.com"
     assert "ETH/USDT:USDT" in str(message["Subject"])
+
+
+def test_blocked_order_signal_email_marks_not_submitted() -> None:
+    signal = TradeSignal(
+        symbol="XAU/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.SHOCK_TREND_UP,
+        price=4300.0,
+        stop_loss=4250.0,
+        take_profit=4400.0,
+        reason="unit_test_blocked",
+    )
+    text = format_order_signal(
+        signal,
+        order_price=4300.0,
+        amount=0.0,
+        status="风控拒单",
+        note="未真实下单: low_equity; account_equity=1.0000",
+    )
+
+    assert "状态: 风控拒单" in text
+    assert "备注: 未真实下单: low_equity" in text

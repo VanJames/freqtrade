@@ -324,6 +324,35 @@ class CanceledExitExchange(PositionMonitorExchange):
         return order
 
 
+class LowEquityExchange(PositionMonitorExchange):
+    async def fetch_balance_equity(self) -> float:
+        return 1.0
+
+
+class RecordingRiskNotifier:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def notify_order_signal(
+        self,
+        trade_signal: TradeSignal,
+        *,
+        order_price: float,
+        amount: float,
+        status: str = "ready",
+        note: str = "",
+    ) -> None:
+        self.calls.append(
+            {
+                "signal": trade_signal,
+                "order_price": order_price,
+                "amount": amount,
+                "status": status,
+                "note": note,
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_position_monitor_uses_order_book_price_for_trailing_exit() -> None:
     exchange = PositionMonitorExchange()
@@ -447,6 +476,62 @@ async def test_engine_keeps_trailing_state_when_exit_order_is_canceled() -> None
     assert exchange.orders[0].status == "canceled"
     assert key in engine.position_manager.trailing
     assert engine.position_manager.trailing[key].active is True
+
+
+@pytest.mark.asyncio
+async def test_low_equity_entry_sends_email_without_order() -> None:
+    exchange = LowEquityExchange()
+    exchange.position = Position(
+        symbol="BTC/USDT:USDT",
+        side=PositionSide.LONG,
+        contracts=0.0,
+        entry_price=0.0,
+    )
+    settings = Settings(
+        dry_run=True,
+        symbols=["BTC/USDT:USDT"],
+        min_live_equity_to_order=5.0,
+    )
+    engine = OKXQuantEngine(settings, exchange=exchange)
+    notifier = RecordingRiskNotifier()
+    engine.email_notifier = notifier  # type: ignore[assignment]
+    signal = TradeSignal(
+        symbol="BTC/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.SHOCK_TREND_UP,
+        price=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        reason="low_equity_signal",
+    )
+
+    await engine._execute_signals([signal])
+
+    assert exchange.orders == []
+    assert len(notifier.calls) == 1
+    assert notifier.calls[0]["status"] == "风控拒单"
+    assert "low_equity" in str(notifier.calls[0]["note"])
+
+
+@pytest.mark.asyncio
+async def test_reconcile_direction_risk_clears_stale_side_without_live_position() -> None:
+    exchange = PositionMonitorExchange()
+    exchange.position = Position(
+        symbol="BTC/USDT:USDT",
+        side=PositionSide.LONG,
+        contracts=0.0,
+        entry_price=0.0,
+    )
+    engine = OKXQuantEngine(Settings(dry_run=True, symbols=["BTC/USDT:USDT"]), exchange=exchange)
+    engine.risk.direction_risk[PositionSide.LONG] = 0.06
+    engine.risk.direction_risk[PositionSide.SHORT] = 0.02
+
+    await engine._reconcile_direction_risk_with_live_positions()
+
+    assert engine.risk.direction_risk[PositionSide.LONG] == 0.0
+    assert engine.risk.direction_risk[PositionSide.SHORT] == 0.0
 
 
 class FailingInitializeExchange(ExchangeClient):

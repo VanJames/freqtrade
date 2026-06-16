@@ -144,6 +144,7 @@ class OKXQuantEngine:
                 await self.store.initialize()
                 await self._apply_runtime_settings(update_exchange_leverage=False)
                 await self._restore_latest_snapshot()
+                await self._reconcile_direction_risk_with_live_positions()
             if self.cache:
                 await self.cache.ping()
             for symbol in self.settings.symbols:
@@ -517,6 +518,7 @@ class OKXQuantEngine:
             exit_key: tuple[str, PositionSide] | None = None
             entry_key: tuple[str, PositionSide] | None = None
             order_attempted = False
+            cooldown_needed = False
             signal_is_entry = signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}
             if signal.signal_type in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
                 exit_key = (signal.symbol, signal.position_side)
@@ -552,6 +554,15 @@ class OKXQuantEngine:
                 funding = await self.exchange.fetch_funding_rate(signal.symbol)
                 decision = self.risk.assess(signal, equity, funding)
                 if not decision.allowed:
+                    if signal_is_entry:
+                        cooldown_needed = True
+                        await self.email_notifier.notify_order_signal(
+                            signal,
+                            order_price=signal.price,
+                            amount=decision.size,
+                            status="风控拒单",
+                            note=f"未真实下单: {decision.reason}; account_equity={equity:.4f}",
+                        )
                     logger.warning(
                         "signal rejected symbol=%s regime=%s side=%s reason=%s signal_reason=%s "
                         "price=%.8f stop=%.8f take_profit=%s funding=%.6f",
@@ -681,7 +692,7 @@ class OKXQuantEngine:
                         self._pending_exit_keys.discard(exit_key)
                 if entry_key is not None:
                     async with self._order_guard_lock:
-                        if order_attempted:
+                        if order_attempted or cooldown_needed:
                             self._start_cooldown(
                                 self._entry_order_cooldowns,
                                 entry_key,
@@ -1173,6 +1184,7 @@ class OKXQuantEngine:
         while self.running and not self.risk.fused():
             try:
                 await self._apply_runtime_settings()
+                await self._reconcile_direction_risk_with_live_positions()
                 equity = await self.exchange.fetch_balance_equity()
                 if self.risk.update_equity(equity):
                     await self.exchange.close_all_positions()
@@ -1227,6 +1239,7 @@ class OKXQuantEngine:
                 "positions_cache_ttl_seconds": self.settings.positions_cache_ttl_seconds,
                 "live_entry_order_cooldown_seconds": self.settings.live_entry_order_cooldown_seconds,
                 "live_exit_order_cooldown_seconds": self.settings.live_exit_order_cooldown_seconds,
+                "min_live_equity_to_order": self.settings.min_live_equity_to_order,
                 "llm_regime_review_enabled": self.settings.llm_regime_review_enabled,
                 "llm_regime_provider": self.settings.llm_regime_provider,
                 "llm_regime_model": self.settings.llm_regime_model,
@@ -1404,6 +1417,37 @@ class OKXQuantEngine:
                 self.settings.exchange_id,
             )
         logger.info("restored latest account snapshot")
+
+    async def _reconcile_direction_risk_with_live_positions(self) -> None:
+        try:
+            positions = await self.exchange.fetch_positions(refresh=True)
+        except Exception:
+            logger.debug("direction risk reconcile skipped; fetch positions failed", exc_info=True)
+            return
+
+        live_sides = {
+            position.side
+            for position in positions
+            if abs(position.contracts) > 0
+        }
+        for side in (PositionSide.LONG, PositionSide.SHORT):
+            current = self.risk.direction_risk.get(side, 0.0)
+            if current > 0 and side not in live_sides:
+                self.risk.direction_risk[side] = 0.0
+                logger.warning(
+                    "cleared stale direction risk side=%s previous=%.6f live_positions=%s",
+                    side.value,
+                    current,
+                    [
+                        {
+                            "symbol": position.symbol,
+                            "side": position.side.value,
+                            "contracts": position.contracts,
+                        }
+                        for position in positions
+                        if abs(position.contracts) > 0
+                    ],
+                )
 
     async def _save_cache(self) -> None:
         if not self.cache:
