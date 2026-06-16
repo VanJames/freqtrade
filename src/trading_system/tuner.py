@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from trading_system.backtest import BacktestConfig, BacktestResult, OKXBacktester, SimTrade
 from trading_system.config import Settings
+from trading_system.email_notification import ReportEmailNotifier, SmtpConfig
 from trading_system.models import Regime
 
 PARAMETER_KNOWLEDGE_PATH = Path("knowledge/parameter_tuning_rules.md")
@@ -253,7 +254,40 @@ def run_runtime_tuning(
     results.sort(key=lambda item: item.score, reverse=True)
     report_path = write_runtime_tuning_report(results, end_ms)
     write_research_ledger(results, report_path, end_ms)
+    notify_runtime_tuning_report(results, report_path, progress)
     return results, report_path
+
+
+def notify_runtime_tuning_report(
+    results: list[RuntimeTuningResult],
+    report_path: Path,
+    progress: Callable[[str], None] | None = None,
+) -> bool:
+    settings = Settings()
+    notifier = ReportEmailNotifier(SmtpConfig.from_settings(settings))
+    sent = notifier.notify_runtime_tuning_report(report_path, summary=format_runtime_tuning_email_summary(results))
+    if progress:
+        progress(f"runtime tuning report email: {'sent' if sent else 'skipped'}")
+    return sent
+
+
+def format_runtime_tuning_email_summary(results: list[RuntimeTuningResult]) -> str:
+    if not results:
+        return ""
+    current = next((item for item in results if item.candidate.name == "current"), results[0])
+    recommended = results[0]
+    lines = [
+        f"推荐参数: {recommended.candidate.name}",
+        f"推荐收益: {recommended.result.total_pnl:.2f} USDT",
+        f"推荐胜率: {recommended.result.win_rate:.2%}",
+        f"推荐交易数: {len(recommended.result.trades)}",
+        f"当前参数收益: {current.result.total_pnl:.2f} USDT",
+        f"当前参数胜率: {current.result.win_rate:.2%}",
+        f"当前参数交易数: {len(current.result.trades)}",
+    ]
+    if recommended.candidate.name != current.candidate.name:
+        lines.append(f"相对当前收益变化: {recommended.result.total_pnl - current.result.total_pnl:.2f} USDT")
+    return "\n".join(lines)
 
 
 RuntimeBaseFactory = Callable[[], BacktestConfig | Awaitable[BacktestConfig]]

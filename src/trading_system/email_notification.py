@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from logging import getLogger
+from pathlib import Path
 import smtplib
 from typing import Protocol
 
@@ -92,15 +93,35 @@ class OrderEmailNotifier:
             status=status,
             note=note,
         )
-        if self.config.use_ssl:
-            with smtplib.SMTP_SSL(self.config.host, self.config.port, timeout=20) as smtp:
-                smtp.login(self.config.user, self.config.password)
-                smtp.send_message(message)
-        else:
-            with smtplib.SMTP(self.config.host, self.config.port, timeout=20) as smtp:
-                smtp.starttls()
-                smtp.login(self.config.user, self.config.password)
-                smtp.send_message(message)
+        send_email_message(self.config, message)
+
+
+class ReportEmailNotifier:
+    def __init__(self, config: SmtpConfig) -> None:
+        self.config = config
+
+    def notify_runtime_tuning_report(self, report_path: Path, summary: str = "") -> bool:
+        if not self.config.ready():
+            return False
+        try:
+            message = build_runtime_tuning_report_email(self.config, report_path, summary=summary)
+            send_email_message(self.config, message)
+            return True
+        except Exception:
+            logger.exception("runtime tuning report email notification failed report=%s", report_path)
+            return False
+
+
+def send_email_message(config: SmtpConfig, message: EmailMessage) -> None:
+    if config.use_ssl:
+        with smtplib.SMTP_SSL(config.host, config.port, timeout=20) as smtp:
+            smtp.login(config.user, config.password)
+            smtp.send_message(message)
+    else:
+        with smtplib.SMTP(config.host, config.port, timeout=20) as smtp:
+            smtp.starttls()
+            smtp.login(config.user, config.password)
+            smtp.send_message(message)
 
 
 def build_order_signal_email(
@@ -119,6 +140,36 @@ def build_order_signal_email(
     message["To"] = config.to
     message["Subject"] = subject
     message.set_content(format_order_signal(signal, order_price=order_price, amount=amount, status=status, note=note))
+    return message
+
+
+def build_runtime_tuning_report_email(config: SmtpConfig, report_path: Path, summary: str = "") -> EmailMessage:
+    report_text = report_path.read_text(encoding="utf-8")
+    subject = f"[Quant] 调参报告 {report_path.name}"
+    body = "\n".join(
+        item
+        for item in [
+            "自动调参报告已生成。",
+            "",
+            summary.strip(),
+            "",
+            f"报告文件: {report_path}",
+            "",
+            report_text,
+        ]
+        if item
+    )
+    message = EmailMessage()
+    message["From"] = config.user
+    message["To"] = config.to
+    message["Subject"] = subject
+    message.set_content(body)
+    message.add_attachment(
+        report_text.encode("utf-8"),
+        maintype="text",
+        subtype="markdown",
+        filename=report_path.name,
+    )
     return message
 
 

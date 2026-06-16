@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from trading_system.email_notification import SmtpConfig, build_order_signal_email, format_order_signal
+from trading_system.email_notification import (
+    SmtpConfig,
+    build_order_signal_email,
+    build_runtime_tuning_report_email,
+    format_order_signal,
+)
 from trading_system.models import PositionSide, Regime, Side, SignalType, TradeSignal
 
 
@@ -76,3 +81,23 @@ def test_blocked_order_signal_email_marks_not_submitted() -> None:
 
     assert "状态: 风控拒单" in text
     assert "备注: 未真实下单: low_equity" in text
+
+
+def test_build_runtime_tuning_report_email_attaches_report(tmp_path) -> None:
+    report_path = tmp_path / "runtime_tuning_test.md"
+    report_path.write_text("# 调参报告\n\n## 推荐参数\n", encoding="utf-8")
+    config = SmtpConfig(
+        enabled=True,
+        user="sender@example.com",
+        password="secret",
+        to="receiver@example.com",
+        host="smtp.example.com",
+    )
+
+    message = build_runtime_tuning_report_email(config, report_path, summary="推荐参数: current")
+
+    assert message["From"] == "sender@example.com"
+    assert message["To"] == "receiver@example.com"
+    assert "调参报告" in str(message["Subject"])
+    assert "推荐参数: current" in message.get_body(preferencelist=("plain",)).get_content()
+    assert "runtime_tuning_test.md" in str(message)

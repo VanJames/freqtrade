@@ -10,6 +10,7 @@ from trading_system.tuner import (
     RuntimeTuningResult,
     backtest_quality,
     build_backtest_config_from_settings,
+    format_runtime_tuning_email_summary,
     has_clear_improvement,
     run_tuning_agent_once,
     runtime_tuning_candidates,
@@ -296,6 +297,67 @@ def test_runtime_tuning_report_includes_live_vs_recommended_diff(tmp_path) -> No
     assert "## 实盘参数与推荐参数差异" in text
     assert "## Walk-forward 验证说明" in text
     assert "| max_signal_risk_multiplier | `1.5` | `3` | `+1.5` |" in text
+
+
+def test_runtime_tuning_email_summary_compares_current_and_recommended() -> None:
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    ended_at = datetime(2026, 1, 31, tzinfo=timezone.utc)
+    current_result = BacktestResult(
+        started_at=started_at,
+        ended_at=ended_at,
+        trades=[
+            SimTrade(
+                symbol="BTC/USDT:USDT",
+                side=PositionSide.LONG,
+                regime=Regime.SHOCK_TREND_UP,
+                entry_time=started_at,
+                exit_time=ended_at,
+                entry_price=100.0,
+                exit_price=110.0,
+                qty=1.0,
+                pnl=10.0,
+                pnl_pct_equity=0.001,
+                reason="take_profit",
+            )
+        ],
+    )
+    recommended_result = BacktestResult(
+        started_at=started_at,
+        ended_at=ended_at,
+        trades=[
+            SimTrade(
+                symbol="BTC/USDT:USDT",
+                side=PositionSide.LONG,
+                regime=Regime.SHOCK_TREND_UP,
+                entry_time=started_at,
+                exit_time=ended_at,
+                entry_price=100.0,
+                exit_price=125.0,
+                qty=1.0,
+                pnl=25.0,
+                pnl_pct_equity=0.0025,
+                reason="take_profit",
+            )
+        ],
+    )
+    current = RuntimeTuningResult(
+        RuntimeTuningCandidate("current", "current", BacktestConfig(symbols=["BTC/USDT:USDT"])),
+        current_result,
+        Path("current.md"),
+        10.0,
+    )
+    recommended = RuntimeTuningResult(
+        RuntimeTuningCandidate("growth_4x", "growth", BacktestConfig(symbols=["BTC/USDT:USDT"])),
+        recommended_result,
+        Path("growth.md"),
+        25.0,
+    )
+
+    summary = format_runtime_tuning_email_summary([recommended, current])
+
+    assert "推荐参数: growth_4x" in summary
+    assert "当前参数收益: 10.00 USDT" in summary
+    assert "相对当前收益变化: 15.00 USDT" in summary
 
 
 def test_write_research_ledger_appends_jsonl(tmp_path) -> None:
