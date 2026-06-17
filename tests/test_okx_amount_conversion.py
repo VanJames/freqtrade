@@ -6,6 +6,7 @@ from trading_system.config import Settings
 from trading_system.exchange import CcxtOkxExchange
 from trading_system.hotcoin import (
     HotcoinExchange,
+    ensure_hotcoin_order_success,
     extract_hotcoin_equity,
     extract_hotcoin_order_metrics,
     extract_hotcoin_position_rows,
@@ -70,6 +71,14 @@ class FakeOkxApi:
                 "info": {"posSide": "long"},
             }
         ]
+
+
+class FakeHotcoinClient:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def place_order(self, **kwargs) -> dict[str, object]:
+        return self.payload
 
 
 @pytest.mark.asyncio
@@ -220,6 +229,32 @@ def test_hotcoin_order_metrics_read_realized_pnl_aliases() -> None:
     assert metrics["average"] == pytest.approx(2140.0)
     assert metrics["fee"] == pytest.approx(0.12)
     assert metrics["realized_pnl"] == pytest.approx(9.88)
+
+
+@pytest.mark.asyncio
+async def test_hotcoin_ioc_without_fill_metrics_does_not_assume_filled() -> None:
+    exchange = HotcoinExchange(Settings(dry_run=True))
+    exchange.public_data.exchange = FakeOkxApi()
+    exchange.client = FakeHotcoinClient({"code": 200, "data": [{"orderId": "abc"}]})  # type: ignore[assignment]
+
+    order = await exchange.create_order(
+        "ETH/USDT:USDT",
+        "limit",
+        Side.BUY,
+        0.04,
+        2130.0,
+        {"ordType": "ioc", "posSide": "long"},
+    )
+
+    assert order.id == "abc"
+    assert order.status == "canceled"
+    assert order.filled == 0.0
+    assert order.remaining == pytest.approx(0.04)
+
+
+def test_hotcoin_order_rejected_response_raises() -> None:
+    with pytest.raises(RuntimeError, match="Hotcoin order rejected"):
+        ensure_hotcoin_order_success({"code": 500, "msg": "余额不足"})
 
 
 @pytest.mark.asyncio

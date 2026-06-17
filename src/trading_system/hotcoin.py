@@ -420,11 +420,17 @@ class HotcoinExchange(ExchangeClient):
             order_type=order_type,
             reduce_only=reduce_only,
         )
+        ensure_hotcoin_order_success(payload)
         order_id = self._extract_order_id(payload)
         ord_type = str(params.get("ordType") or "").lower()
-        status = "open" if ord_type == "post_only" and not reduce_only else "closed"
         metrics = extract_hotcoin_order_metrics(payload)
-        filled = self._hotcoin_units_to_base(symbol, metrics["filled"]) if metrics["filled"] > 0 else (amount if status == "closed" else 0.0)
+        status = extract_hotcoin_order_status(payload)
+        if not status:
+            if ord_type == "post_only" and not reduce_only:
+                status = "open"
+            else:
+                status = "closed" if metrics["filled"] > 0 else "canceled"
+        filled = self._hotcoin_units_to_base(symbol, metrics["filled"]) if metrics["filled"] > 0 else 0.0
         average = metrics["average"] if metrics["average"] > 0 else price
         order = OrderResult(
             id=order_id,
@@ -690,6 +696,13 @@ HOTCOIN_ORDER_REALIZED_PNL_KEYS = (
     "pnl",
 )
 
+HOTCOIN_ORDER_STATUS_KEYS = (
+    "status",
+    "state",
+    "orderStatus",
+    "orderState",
+)
+
 
 def extract_hotcoin_equity(payload: dict[str, Any]) -> float:
     candidates = hotcoin_payload_dicts(payload)
@@ -735,6 +748,32 @@ def extract_hotcoin_order_metrics(payload: dict[str, Any]) -> dict[str, float | 
         "fee": abs(fee),
         "realized_pnl": realized_pnl,
     }
+
+
+def ensure_hotcoin_order_success(payload: dict[str, Any]) -> None:
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Hotcoin order response is not an object: {payload!r}")
+    code = payload.get("code")
+    if code in {None, 200, "200", 0, "0"}:
+        return
+    message = payload.get("msg") or payload.get("message") or payload.get("error") or payload
+    raise RuntimeError(f"Hotcoin order rejected: {message}")
+
+
+def extract_hotcoin_order_status(payload: dict[str, Any]) -> str:
+    candidates = hotcoin_payload_dicts(payload)
+    for row in candidates:
+        raw = str(first_present(row, *HOTCOIN_ORDER_STATUS_KEYS) or "").strip().lower()
+        if not raw:
+            continue
+        if raw in {"open", "created", "submitted", "unfilled", "partially_filled", "partial", "0", "1"}:
+            return "open"
+        if raw in {"closed", "filled", "done", "completed", "all_filled", "2", "3"}:
+            return "closed"
+        if raw in {"canceled", "cancelled", "cancel", "rejected", "failed", "4", "5", "-1"}:
+            return "canceled"
+        return raw
+    return ""
 
 
 def parse_hotcoin_position_side(row: dict[str, Any]) -> PositionSide:
