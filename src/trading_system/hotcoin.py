@@ -248,12 +248,27 @@ class HotcoinWebSession:
         payload = response.json()
         if payload.get("code") != 200:
             raise RuntimeError(f"Hotcoin positions request failed: {payload.get('msg') or payload.get('code')}")
-        rows = payload.get("data") or []
-        if not isinstance(rows, list):
-            return []
+        rows = extract_hotcoin_position_rows(payload)
         if symbol:
             target = hotcoin_symbol(symbol)
-            return [row for row in rows if target in str(row.get("contractCode") or "").upper()]
+            return [
+                row
+                for row in rows
+                if target
+                in str(
+                    first_present(
+                        row,
+                        "contractCode",
+                        "contract_code",
+                        "symbol",
+                        "contractName",
+                        "contract",
+                        "productCode",
+                        "instrumentId",
+                    )
+                    or ""
+                ).upper()
+            ]
         return rows
 
     def place_order(
@@ -408,6 +423,9 @@ class HotcoinExchange(ExchangeClient):
         order_id = self._extract_order_id(payload)
         ord_type = str(params.get("ordType") or "").lower()
         status = "open" if ord_type == "post_only" and not reduce_only else "closed"
+        metrics = extract_hotcoin_order_metrics(payload)
+        filled = metrics["filled"] if metrics["filled"] > 0 else (amount if status == "closed" else 0.0)
+        average = metrics["average"] if metrics["average"] > 0 else price
         order = OrderResult(
             id=order_id,
             symbol=symbol,
@@ -416,9 +434,11 @@ class HotcoinExchange(ExchangeClient):
             amount=amount,
             price=price,
             status=status,
-            filled=amount if status == "closed" else 0.0,
-            remaining=0.0 if status == "closed" else amount,
-            average=price,
+            filled=filled,
+            remaining=max(0.0, amount - filled),
+            fee=metrics["fee"],
+            average=average,
+            realized_pnl=metrics["realized_pnl"],
             raw=payload,
         )
         self._orders[order.id] = order
@@ -461,10 +481,7 @@ class HotcoinExchange(ExchangeClient):
 
     async def fetch_balance_equity(self) -> float:
         payload = await asyncio.to_thread(self.client.get_balance)
-        data = payload.get("data") if isinstance(payload, dict) else {}
-        if not isinstance(data, dict):
-            return 0.0
-        return self._float_value(data.get("totalAccountRights"), data.get("totalMarginBalance"), data.get("equity"), 0.0)
+        return extract_hotcoin_equity(payload)
 
     async def fetch_positions(self, symbol: str | None = None, *, refresh: bool = False) -> list[Position]:
         rows = await asyncio.to_thread(self.client.get_positions, symbol)
@@ -480,15 +497,59 @@ class HotcoinExchange(ExchangeClient):
         await self.public_data.close()
 
     def _parse_position(self, row: dict[str, Any]) -> Position:
-        raw_side = str(row.get("side") or row.get("positionSide") or row.get("direction") or "").lower()
-        side = PositionSide.SHORT if "short" in raw_side or raw_side in {"sell", "open_short"} else PositionSide.LONG
-        symbol = ccxt_symbol(str(row.get("contractCode") or row.get("symbol") or ""))
+        side = parse_hotcoin_position_side(row)
+        symbol = ccxt_symbol(
+            str(
+                first_present(
+                    row,
+                    "contractCode",
+                    "contract_code",
+                    "symbol",
+                    "contractName",
+                    "contract",
+                    "productCode",
+                    "instrumentId",
+                )
+                or ""
+            )
+        )
         return Position(
             symbol=symbol,
             side=side,
             contracts=self._hotcoin_units_to_base(symbol, self._position_amount(row)),
-            entry_price=self._float_value(row.get("entryPrice"), row.get("avgPrice"), row.get("openPrice"), row.get("price"), 0.0),
-            unrealized_pnl=self._float_value(row.get("unrealizedPnl"), row.get("unRealizedSurplus"), row.get("profit"), 0.0),
+            entry_price=self._float_value(
+                first_present(
+                    row,
+                    "entryPrice",
+                    "avgPrice",
+                    "openPrice",
+                    "price",
+                    "avgOpenPrice",
+                    "openAvgPrice",
+                    "averageOpenPrice",
+                    "holdAvgPrice",
+                    "costPrice",
+                ),
+                0.0,
+            ),
+            unrealized_pnl=self._float_value(
+                first_present(
+                    row,
+                    "unrealizedPnl",
+                    "unRealizedPnl",
+                    "unRealizedSurplus",
+                    "unrealizedProfit",
+                    "unRealizedProfit",
+                    "profit",
+                    "profitUnreal",
+                    "floatingProfit",
+                    "floatProfit",
+                    "holdProfit",
+                    "profitLoss",
+                    "pnl",
+                ),
+                0.0,
+            ),
             metadata=row,
         )
 
@@ -515,11 +576,20 @@ class HotcoinExchange(ExchangeClient):
     @staticmethod
     def _position_amount(row: dict[str, Any]) -> float:
         return HotcoinExchange._float_value(
-            row.get("availablePosition"),
-            row.get("amount"),
-            row.get("volume"),
-            row.get("position"),
-            row.get("contAmount"),
+            first_present(
+                row,
+                "availablePosition",
+                "holdAmount",
+                "positionAmount",
+                "positionAmt",
+                "openAmount",
+                "amount",
+                "volume",
+                "position",
+                "contAmount",
+                "contractNum",
+                "num",
+            ),
             0.0,
         )
 
@@ -554,3 +624,193 @@ def ccxt_symbol(contract_code: str) -> str:
         base = raw[: -len("USDT")]
         return f"{base}/USDT:USDT"
     return contract_code
+
+
+HOTCOIN_EQUITY_KEYS = (
+    "totalAccountRights",
+    "accountRights",
+    "accountEquity",
+    "totalEquity",
+    "equity",
+    "totalMarginBalance",
+    "marginBalance",
+    "totalAsset",
+    "totalAssets",
+    "assets",
+    "balance",
+    "usdtBalance",
+    "totalUsdt",
+    "walletBalance",
+    "availableBalance",
+)
+
+HOTCOIN_POSITION_LIST_KEYS = (
+    "positions",
+    "positionList",
+    "list",
+    "rows",
+    "items",
+    "records",
+    "result",
+)
+
+HOTCOIN_ORDER_FILLED_KEYS = (
+    "filled",
+    "filledQty",
+    "dealAmount",
+    "dealVolume",
+    "tradeAmount",
+    "executedQty",
+    "completedAmount",
+)
+
+HOTCOIN_ORDER_AVERAGE_KEYS = (
+    "average",
+    "avgPrice",
+    "dealAvgPrice",
+    "tradeAvgPrice",
+    "filledAvgPrice",
+    "priceAvg",
+)
+
+HOTCOIN_ORDER_FEE_KEYS = (
+    "fee",
+    "feePaid",
+    "tradeFee",
+    "dealFee",
+    "commission",
+)
+
+HOTCOIN_ORDER_REALIZED_PNL_KEYS = (
+    "realizedPnl",
+    "realizedPNL",
+    "realizedProfit",
+    "profit",
+    "closeProfit",
+    "pnl",
+)
+
+
+def extract_hotcoin_equity(payload: dict[str, Any]) -> float:
+    candidates = hotcoin_payload_dicts(payload)
+    usdt_candidates = [
+        item
+        for item in candidates
+        if str(first_present(item, "coin", "currency", "asset", "marginCoin", "quoteCoin", "tradeUnit") or "").upper() == "USDT"
+    ]
+    for item in [*usdt_candidates, *candidates]:
+        value = first_present(item, *HOTCOIN_EQUITY_KEYS)
+        parsed = HotcoinExchange._float_value(value, 0.0)
+        if parsed != 0.0:
+            return parsed
+    return 0.0
+
+
+def extract_hotcoin_position_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in HOTCOIN_POSITION_LIST_KEYS:
+        value = data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = extract_hotcoin_position_rows({"data": value})
+            if nested:
+                return nested
+    return [data] if looks_like_hotcoin_position(data) else []
+
+
+def extract_hotcoin_order_metrics(payload: dict[str, Any]) -> dict[str, float | None]:
+    candidates = hotcoin_payload_dicts(payload)
+    filled = first_numeric_from_dicts(candidates, HOTCOIN_ORDER_FILLED_KEYS)
+    average = first_numeric_from_dicts(candidates, HOTCOIN_ORDER_AVERAGE_KEYS)
+    fee = first_numeric_from_dicts(candidates, HOTCOIN_ORDER_FEE_KEYS)
+    realized_pnl = first_optional_numeric_from_dicts(candidates, HOTCOIN_ORDER_REALIZED_PNL_KEYS)
+    return {
+        "filled": filled,
+        "average": average,
+        "fee": abs(fee),
+        "realized_pnl": realized_pnl,
+    }
+
+
+def parse_hotcoin_position_side(row: dict[str, Any]) -> PositionSide:
+    raw = str(
+        first_present(
+            row,
+            "positionSide",
+            "side",
+            "direction",
+            "holdSide",
+            "openSide",
+            "positionType",
+            "type",
+            "sideName",
+            "directionName",
+        )
+        or ""
+    ).strip().lower()
+    if "short" in raw or "空" in raw or raw in {"sell", "open_short", "close_long", "2", "-1"}:
+        return PositionSide.SHORT
+    return PositionSide.LONG
+
+
+def looks_like_hotcoin_position(row: dict[str, Any]) -> bool:
+    return bool(
+        first_present(
+            row,
+            "contractCode",
+            "contract_code",
+            "symbol",
+            "contractName",
+            "productCode",
+            "instrumentId",
+        )
+        and HotcoinExchange._position_amount(row) != 0.0
+    )
+
+
+def hotcoin_payload_dicts(value: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            result.append(item)
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value.get("data") if isinstance(value, dict) and "data" in value else value)
+    return result
+
+
+def first_numeric_from_dicts(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> float:
+    value = first_optional_numeric_from_dicts(rows, keys)
+    return 0.0 if value is None else value
+
+
+def first_optional_numeric_from_dicts(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> float | None:
+    for row in rows:
+        value = first_present(row, *keys)
+        if value is None or value == "":
+            continue
+        parsed = HotcoinExchange._float_value(value, 0.0)
+        if parsed != 0.0 or str(value).strip() in {"0", "0.0", "0.00"}:
+            return parsed
+    return None
+
+
+def first_present(row: dict[str, Any], *keys: str) -> Any:
+    lower_map = {str(key).lower(): value for key, value in row.items()}
+    for key in keys:
+        if key in row and row[key] is not None and row[key] != "":
+            return row[key]
+        value = lower_map.get(key.lower())
+        if value is not None and value != "":
+            return value
+    return None

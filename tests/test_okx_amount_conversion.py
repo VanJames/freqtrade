@@ -4,7 +4,12 @@ import pytest
 
 from trading_system.config import Settings
 from trading_system.exchange import CcxtOkxExchange
-from trading_system.hotcoin import HotcoinExchange
+from trading_system.hotcoin import (
+    HotcoinExchange,
+    extract_hotcoin_equity,
+    extract_hotcoin_order_metrics,
+    extract_hotcoin_position_rows,
+)
 from trading_system.models import PositionSide, Side
 
 
@@ -130,6 +135,91 @@ def test_hotcoin_positions_convert_exchange_units_to_base_amount() -> None:
 
     assert position.symbol == "ETH/USDT:USDT"
     assert position.contracts == pytest.approx(0.04)
+
+
+def test_hotcoin_equity_reads_nested_usdt_asset_shape() -> None:
+    payload = {
+        "code": 200,
+        "data": {
+            "assets": [
+                {"coin": "BTC", "equity": "0.01"},
+                {"coin": "USDT", "accountRights": "123.45", "availableBalance": "100.00"},
+            ]
+        },
+    }
+
+    assert extract_hotcoin_equity(payload) == pytest.approx(123.45)
+
+
+def test_hotcoin_equity_reads_direct_account_shape() -> None:
+    payload = {"code": 200, "data": {"totalMarginBalance": "88.8"}}
+
+    assert extract_hotcoin_equity(payload) == pytest.approx(88.8)
+
+
+def test_hotcoin_position_rows_read_nested_list_shape() -> None:
+    payload = {
+        "code": 200,
+        "data": {
+            "records": [
+                {
+                    "symbol": "ETHUSDT",
+                    "positionSide": "2",
+                    "holdAmount": "400",
+                    "avgOpenPrice": "2130",
+                    "floatingProfit": "-12.34",
+                }
+            ]
+        },
+    }
+
+    rows = extract_hotcoin_position_rows(payload)
+
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "ETHUSDT"
+
+
+def test_hotcoin_position_parser_reads_side_entry_and_unrealized_pnl_aliases() -> None:
+    exchange = HotcoinExchange(Settings(dry_run=True))
+    exchange.public_data.exchange = FakeOkxApi()
+
+    position = exchange._parse_position(
+        {
+            "symbol": "ETHUSDT",
+            "positionSide": "做空",
+            "holdAmount": "400",
+            "avgOpenPrice": "2130",
+            "floatingProfit": "-12.34",
+        }
+    )
+
+    assert position.symbol == "ETH/USDT:USDT"
+    assert position.side == PositionSide.SHORT
+    assert position.contracts == pytest.approx(0.04)
+    assert position.entry_price == pytest.approx(2130.0)
+    assert position.unrealized_pnl == pytest.approx(-12.34)
+
+
+def test_hotcoin_order_metrics_read_realized_pnl_aliases() -> None:
+    payload = {
+        "code": 200,
+        "data": [
+            {
+                "orderId": "abc",
+                "dealAmount": "400",
+                "dealAvgPrice": "2140",
+                "tradeFee": "0.12",
+                "closeProfit": "9.88",
+            }
+        ],
+    }
+
+    metrics = extract_hotcoin_order_metrics(payload)
+
+    assert metrics["filled"] == pytest.approx(400.0)
+    assert metrics["average"] == pytest.approx(2140.0)
+    assert metrics["fee"] == pytest.approx(0.12)
+    assert metrics["realized_pnl"] == pytest.approx(9.88)
 
 
 @pytest.mark.asyncio
