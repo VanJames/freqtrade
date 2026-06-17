@@ -18,7 +18,9 @@ class ExchangeClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
+    async def fetch_ohlcv(
+        self, symbol: str, timeframe: str, limit: int
+    ) -> list[list[float]]:
         raise NotImplementedError
 
     @abstractmethod
@@ -62,7 +64,9 @@ class ExchangeClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def fetch_positions(self, symbol: str | None = None, *, refresh: bool = False) -> list[Position]:
+    async def fetch_positions(
+        self, symbol: str | None = None, *, refresh: bool = False
+    ) -> list[Position]:
         raise NotImplementedError
 
     @abstractmethod
@@ -85,14 +89,23 @@ class DryRunExchange(ExchangeClient):
         self.orders: dict[str, OrderResult] = {}
         self.positions: list[Position] = []
         self._ids = itertools.count(1)
-        self._last_price: dict[str, float] = {symbol: 100.0 + idx * 20 for idx, symbol in enumerate(symbols)}
+        self._last_price: dict[str, float] = {
+            symbol: 100.0 + idx * 20 for idx, symbol in enumerate(symbols)
+        }
 
     async def initialize(self) -> None:
         logger.info("dry-run exchange initialized")
 
-    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
+    async def fetch_ohlcv(
+        self, symbol: str, timeframe: str, limit: int
+    ) -> list[list[float]]:
         base = self._last_price.get(symbol, 100.0)
-        step_ms = {"5m": 300_000, "1h": 3_600_000, "4h": 14_400_000}.get(timeframe, 60_000)
+        step_ms = {
+            "5m": 300_000,
+            "1h": 3_600_000,
+            "4h": 14_400_000,
+            "1d": 86_400_000,
+        }.get(timeframe, 60_000)
         now = 1_700_000_000_000
         rows: list[list[float]] = []
         for idx in range(limit):
@@ -100,14 +113,25 @@ class DryRunExchange(ExchangeClient):
             close = base + drift
             high = close * 1.002
             low = close * 0.998
-            rows.append([now - (limit - idx) * step_ms, close * 0.999, high, low, close, 1000 + idx])
+            rows.append(
+                [
+                    now - (limit - idx) * step_ms,
+                    close * 0.999,
+                    high,
+                    low,
+                    close,
+                    1000 + idx,
+                ]
+            )
         return rows
 
     async def watch_ohlcv(self, symbol: str, timeframe: str) -> list[list[float]]:
         await asyncio.sleep(0.05)
         last = self._last_price.get(symbol, 100.0) * 1.0002
         self._last_price[symbol] = last
-        return [[1_700_000_000_000, last * 0.999, last * 1.002, last * 0.998, last, 1000.0]]
+        return [
+            [1_700_000_000_000, last * 0.999, last * 1.002, last * 0.998, last, 1000.0]
+        ]
 
     async def fetch_order_book(self, symbol: str) -> dict[str, list[list[float]]]:
         price = self._last_price.get(symbol, 100.0)
@@ -178,7 +202,9 @@ class DryRunExchange(ExchangeClient):
     async def fetch_balance_equity(self) -> float:
         return self.equity
 
-    async def fetch_positions(self, symbol: str | None = None, *, refresh: bool = False) -> list[Position]:
+    async def fetch_positions(
+        self, symbol: str | None = None, *, refresh: bool = False
+    ) -> list[Position]:
         if symbol is None:
             return list(self.positions)
         return [pos for pos in self.positions if pos.symbol == symbol]
@@ -194,7 +220,9 @@ class DryRunExchange(ExchangeClient):
 
 
 class CcxtOkxExchange(ExchangeClient):
-    def __init__(self, config: dict[str, Any], *, positions_cache_ttl_seconds: float = 2.0) -> None:
+    def __init__(
+        self, config: dict[str, Any], *, positions_cache_ttl_seconds: float = 2.0
+    ) -> None:
         self.config = config
         self.exchange: Any | None = None
         self._positions_cache: tuple[float, list[Position]] | None = None
@@ -225,7 +253,9 @@ class CcxtOkxExchange(ExchangeClient):
             raise RuntimeError("exchange not initialized")
         return self.exchange
 
-    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list[float]]:
+    async def fetch_ohlcv(
+        self, symbol: str, timeframe: str, limit: int
+    ) -> list[list[float]]:
         return await self.api.fetch_ohlcv(symbol, timeframe, limit=limit)
 
     async def watch_ohlcv(self, symbol: str, timeframe: str) -> list[list[float]]:
@@ -244,7 +274,9 @@ class CcxtOkxExchange(ExchangeClient):
         params: dict[str, Any],
     ) -> OrderResult:
         exchange_amount = self._to_exchange_amount(symbol, amount)
-        raw = await self.api.create_order(symbol, order_type, side.value, exchange_amount, price, params)
+        raw = await self.api.create_order(
+            symbol, order_type, side.value, exchange_amount, price, params
+        )
         self._invalidate_positions_cache()
         return self._parse_order_result(
             raw,
@@ -302,7 +334,9 @@ class CcxtOkxExchange(ExchangeClient):
             return float(details[0].get("eq") or details[0].get("cashBal") or 0.0)
         return float(balance.get("USDT", {}).get("total") or 0.0)
 
-    async def fetch_positions(self, symbol: str | None = None, *, refresh: bool = False) -> list[Position]:
+    async def fetch_positions(
+        self, symbol: str | None = None, *, refresh: bool = False
+    ) -> list[Position]:
         now = time.monotonic()
         async with self._positions_lock:
             if (
@@ -342,14 +376,20 @@ class CcxtOkxExchange(ExchangeClient):
         raw_amount = self._float_value(raw.get("amount"), info.get("sz"), 0.0)
         raw_filled = self._float_value(raw.get("filled"), info.get("accFillSz"), 0.0)
         raw_remaining = self._float_value(raw.get("remaining"), 0.0)
-        amount = self._from_exchange_amount(symbol, raw_amount) if raw_amount else fallback_amount
+        amount = (
+            self._from_exchange_amount(symbol, raw_amount)
+            if raw_amount
+            else fallback_amount
+        )
         filled = self._from_exchange_amount(symbol, raw_filled)
         remaining = self._from_exchange_amount(symbol, raw_remaining)
         return OrderResult(
             id=str(raw["id"]),
             symbol=symbol,
             side=Side(raw.get("side") or fallback_side.value),
-            position_side=PositionSide(info.get("posSide") or fallback_position_side.value),
+            position_side=PositionSide(
+                info.get("posSide") or fallback_position_side.value
+            ),
             amount=amount,
             price=self._float_value(raw.get("price"), info.get("px"), fallback_price),
             status=str(raw.get("status") or "open"),
@@ -357,7 +397,9 @@ class CcxtOkxExchange(ExchangeClient):
             remaining=remaining,
             fee=self._float_value(fee.get("cost"), info.get("fee"), 0.0),
             average=average,
-            realized_pnl=self._optional_float(raw.get("pnl"), info.get("pnl"), info.get("realizedPnl")),
+            realized_pnl=self._optional_float(
+                raw.get("pnl"), info.get("pnl"), info.get("realizedPnl")
+            ),
             raw=raw,
         )
 
@@ -417,14 +459,20 @@ class CcxtOkxExchange(ExchangeClient):
         return positions
 
     @staticmethod
-    def _filter_positions(positions: list[Position], symbol: str | None = None) -> list[Position]:
+    def _filter_positions(
+        positions: list[Position], symbol: str | None = None
+    ) -> list[Position]:
         if symbol is None:
             return list(positions)
         return [position for position in positions if position.symbol == symbol]
 
     async def fetch_funding_rate(self, symbol: str) -> float:
         funding = await self.api.fetch_funding_rate(symbol)
-        return float(funding.get("fundingRate") or funding.get("info", {}).get("fundingRate") or 0.0)
+        return float(
+            funding.get("fundingRate")
+            or funding.get("info", {}).get("fundingRate")
+            or 0.0
+        )
 
     async def set_leverage(self, symbol: str, leverage: float) -> None:
         try:
@@ -448,4 +496,8 @@ class CcxtOkxExchange(ExchangeClient):
 
 def okx_setting_blocked(exc: Exception) -> bool:
     text = str(exc)
-    return "59000" in text or "Cancel any open orders, close positions, and stop trading bots first" in text
+    return (
+        "59000" in text
+        or "Cancel any open orders, close positions, and stop trading bots first"
+        in text
+    )

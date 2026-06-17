@@ -46,7 +46,14 @@ class Candle:
 
     @classmethod
     def from_ohlcv(cls, row: list[float] | tuple[float, ...]) -> "Candle":
-        return cls(int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5]))
+        return cls(
+            int(row[0]),
+            float(row[1]),
+            float(row[2]),
+            float(row[3]),
+            float(row[4]),
+            float(row[5]),
+        )
 
     def to_ohlcv(self) -> list[float]:
         return [self.ts, self.open, self.high, self.low, self.close, self.volume]
@@ -146,6 +153,11 @@ class TrailingState:
     min_trailing_activate_r: float = 1.0
     breakeven_activate_r: float = 0.0
     breakeven_buffer_pct: float = 0.0
+    delay_trailing_until_momentum_exit: bool = False
+    delayed_trailing_activated: bool = False
+    pending_trailing_gap_pct: float = 0.0
+    pending_min_trailing_activate_r: float = 1.0
+    pending_breakeven_activate_r: float = 0.0
     risk_multiplier: float = 1.0
     highest_price: float = 0.0
     lowest_price: float = 0.0

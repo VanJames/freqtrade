@@ -15,9 +15,17 @@ from trading_system.email_notification import OrderEmailNotifier, SmtpConfig
 from trading_system.execution import ExecutionEngine
 from trading_system.exchange import CcxtOkxExchange, DryRunExchange, ExchangeClient
 from trading_system.foresight import ForesightProvider
-from trading_system.indicators import ohlcv_frame
+from trading_system.indicators import macd, ohlcv_frame
 from trading_system.hotcoin import HotcoinExchange
-from trading_system.models import HedgeLock, OrderResult, PositionSide, Regime, SignalType, TradeSignal
+from trading_system.models import (
+    HedgeLock,
+    OrderResult,
+    PositionSide,
+    Regime,
+    Side,
+    SignalType,
+    TradeSignal,
+)
 from trading_system.llm_regime import LLMRegimeReviewer, RegimeReviewInput
 from trading_system.portfolio import AlphaFilter, GridPlanner
 from trading_system.position_manager import PositionManager
@@ -45,8 +53,13 @@ def build_exchange(settings: Settings) -> ExchangeClient:
     if exchange_id == "hotcoin":
         return HotcoinExchange(settings)
     if exchange_id != "okx":
-        raise ValueError(f"unsupported exchange_id={settings.exchange_id!r}; expected okx or hotcoin")
-    return CcxtOkxExchange(settings.okx_config(), positions_cache_ttl_seconds=settings.positions_cache_ttl_seconds)
+        raise ValueError(
+            f"unsupported exchange_id={settings.exchange_id!r}; expected okx or hotcoin"
+        )
+    return CcxtOkxExchange(
+        settings.okx_config(),
+        positions_cache_ttl_seconds=settings.positions_cache_ttl_seconds,
+    )
 
 
 class OKXQuantEngine:
@@ -86,6 +99,7 @@ class OKXQuantEngine:
             liquidity_sweep_risk_multiplier=settings.liquidity_sweep_risk_multiplier,
             liquidity_sweep_require_confirmation=settings.liquidity_sweep_require_confirmation,
             enable_two_candle_momentum=settings.enable_two_candle_momentum,
+            enable_daily_macd_breakout=settings.enable_daily_macd_breakout,
         )
         self.risk = RiskManager(settings)
         self.email_notifier = OrderEmailNotifier(SmtpConfig.from_settings(settings))
@@ -115,7 +129,7 @@ class OKXQuantEngine:
         )
         self.hedge_locks: dict[str, HedgeLock] = {}
         self.klines = {
-            symbol: {"5m": [], "1h": [], "4h": []}
+            symbol: {"5m": [], "1h": [], "4h": [], "1d": []}
             for symbol in settings.symbols
         }
         self._applied_leverage_limit = settings.trend_symbol_leverage_limit
@@ -127,7 +141,9 @@ class OKXQuantEngine:
         self._pending_entry_keys: set[tuple[str, PositionSide]] = set()
         self._entry_order_cooldowns: dict[tuple[str, PositionSide], float] = {}
         self._exit_order_cooldowns: dict[tuple[str, PositionSide], float] = {}
-        self._risk_rejection_email_cooldowns: dict[tuple[str, PositionSide, str], float] = {}
+        self._risk_rejection_email_cooldowns: dict[
+            tuple[str, PositionSide, str], float
+        ] = {}
         self._last_entry_submitted_at: datetime | None = None
         self._last_order_store_checked_at = 0.0
         self._adaptive_log_state: dict[str, str] = {}
@@ -152,9 +168,18 @@ class OKXQuantEngine:
             if self.cache:
                 await self.cache.ping()
             for symbol in self.settings.symbols:
-                await self.exchange.set_leverage(symbol, self.settings.trend_symbol_leverage_limit)
-                for timeframe, limit in {"5m": 300, "1h": 120, "4h": 100}.items():
-                    self.klines[symbol][timeframe] = await self.exchange.fetch_ohlcv(symbol, timeframe, limit)
+                await self.exchange.set_leverage(
+                    symbol, self.settings.trend_symbol_leverage_limit
+                )
+                for timeframe, limit in {
+                    "5m": 300,
+                    "1h": 120,
+                    "4h": 100,
+                    "1d": 80,
+                }.items():
+                    self.klines[symbol][timeframe] = await self.exchange.fetch_ohlcv(
+                        symbol, timeframe, limit
+                    )
                 latest_price = (
                     float(self.klines[symbol]["5m"][-1][4])
                     if self.klines[symbol]["5m"]
@@ -189,7 +214,10 @@ class OKXQuantEngine:
 
     async def run(self) -> None:
         self.running = True
-        tasks = [asyncio.create_task(self._symbol_loop(symbol)) for symbol in self.settings.symbols]
+        tasks = [
+            asyncio.create_task(self._symbol_loop(symbol))
+            for symbol in self.settings.symbols
+        ]
         tasks.append(asyncio.create_task(self._position_monitor_loop()))
         tasks.append(asyncio.create_task(self._monitor_loop()))
         try:
@@ -277,7 +305,9 @@ class OKXQuantEngine:
             self.settings.exchange_request_timeout_seconds,
         )
         self._replace_timeframe_cache(symbol, "1h", snapshot_1h)
-        if len(self.klines[symbol]["4h"]) < 100 or self._timeframe_stale(symbol, "4h", 14_400_000):
+        if len(self.klines[symbol]["4h"]) < 100 or self._timeframe_stale(
+            symbol, "4h", 14_400_000
+        ):
             snapshot_4h = await self._await_exchange_step(
                 symbol,
                 "snapshot_4h_ohlcv",
@@ -285,6 +315,16 @@ class OKXQuantEngine:
                 self.settings.exchange_request_timeout_seconds,
             )
             self._replace_timeframe_cache(symbol, "4h", snapshot_4h)
+        if len(self.klines[symbol]["1d"]) < 35 or self._timeframe_stale(
+            symbol, "1d", 86_400_000
+        ):
+            snapshot_1d = await self._await_exchange_step(
+                symbol,
+                "snapshot_1d_ohlcv",
+                self.exchange.fetch_ohlcv(symbol, "1d", 80),
+                self.settings.exchange_request_timeout_seconds,
+            )
+            self._replace_timeframe_cache(symbol, "1d", snapshot_1d)
         self._sync_higher_timeframes_from_5m(symbol)
 
         self.risk.inspect_spike(symbol, self.klines[symbol]["5m"])
@@ -301,7 +341,9 @@ class OKXQuantEngine:
             "plus_di": features.plus_di,
             "minus_di": features.minus_di,
             "atr_1h": features.atr_1h,
-            "atr_pct": features.atr_1h / features.close_1h if features.close_1h else 0.0,
+            "atr_pct": features.atr_1h / features.close_1h
+            if features.close_1h
+            else 0.0,
             "ema20_1h": features.ema20_1h,
             "ema60_1h": features.ema60_1h,
             "range_high_4h": features.range_high_4h,
@@ -335,7 +377,9 @@ class OKXQuantEngine:
         review_features["range_24h"] = features.range_24h
         review_features["ret_24h"] = features.ret_24h
         review_features["ret_72h"] = features.ret_72h
-        llm_review_required = needs_llm_review(volatility_policy, regime) or adaptive_review_required
+        llm_review_required = (
+            needs_llm_review(volatility_policy, regime) or adaptive_review_required
+        )
         if llm_review_required:
             self._set_entry_status(
                 symbol,
@@ -354,7 +398,9 @@ class OKXQuantEngine:
             )
         review = (
             await self.llm_reviewer.review(
-                RegimeReviewInput(symbol=symbol, rule_regime=regime, features=review_features)
+                RegimeReviewInput(
+                    symbol=symbol, rule_regime=regime, features=review_features
+                )
             )
             if llm_review_required
             else self.llm_reviewer.default_review(regime)
@@ -362,7 +408,11 @@ class OKXQuantEngine:
         if llm_review_required:
             self._log_llm_review(symbol, review)
         regime = review.proposed_regime
-        latest_price = float(self.klines[symbol]["5m"][-1][4]) if self.klines[symbol]["5m"] else features.close_1h
+        latest_price = (
+            float(self.klines[symbol]["5m"][-1][4])
+            if self.klines[symbol]["5m"]
+            else features.close_1h
+        )
         status = self.symbol_status.setdefault(symbol, {})
         status.update(
             {
@@ -396,9 +446,15 @@ class OKXQuantEngine:
                         "value": ",".join(review.reasons) or review.action,
                     }
                 ],
-                "metrics": {"regime": regime.value, "price": latest_price, "llm_confidence": review.confidence},
+                "metrics": {
+                    "regime": regime.value,
+                    "price": latest_price,
+                    "llm_confidence": review.confidence,
+                },
             }
-            self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
+            self._set_completed_entry_diagnostics(
+                symbol, diagnostics, price=latest_price, regime=regime
+            )
             self._log_entry_diagnostics(symbol, diagnostics)
             return []
         self._set_entry_status(
@@ -444,8 +500,11 @@ class OKXQuantEngine:
             positions,
             self.klines[symbol]["1h"],
             self.klines[symbol]["4h"],
+            self._daily_candles_with_live(symbol),
         )
-        self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
+        self._set_completed_entry_diagnostics(
+            symbol, diagnostics, price=latest_price, regime=regime
+        )
         self._log_entry_diagnostics(symbol, diagnostics)
         release_signals = self.strategy.hedge_release_signals(
             symbol,
@@ -454,14 +513,34 @@ class OKXQuantEngine:
             positions,
         )
         if release_signals:
-            self.symbol_status[symbol]["last_signal"] = self._signal_status(release_signals[0])
+            self.symbol_status[symbol]["last_signal"] = self._signal_status(
+                release_signals[0]
+            )
             diagnostics = {
                 **diagnostics,
                 "summary": "release_hedge_signal_ready",
                 "signal_reason": release_signals[0].reason,
             }
-            self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
+            self._set_completed_entry_diagnostics(
+                symbol, diagnostics, price=latest_price, regime=regime
+            )
             return release_signals
+        daily_macd_exit_signals = self._daily_macd_momentum_exit_signals(
+            symbol, latest_price, positions
+        )
+        if daily_macd_exit_signals:
+            self.symbol_status[symbol]["last_signal"] = self._signal_status(
+                daily_macd_exit_signals[0]
+            )
+            diagnostics = {
+                **diagnostics,
+                "summary": "daily_macd_momentum_exit_ready",
+                "signal_reason": daily_macd_exit_signals[0].reason,
+            }
+            self._set_completed_entry_diagnostics(
+                symbol, diagnostics, price=latest_price, regime=regime
+            )
+            return daily_macd_exit_signals
         exit_signals = self.position_manager.exit_signals(
             symbol,
             latest_price,
@@ -469,13 +548,17 @@ class OKXQuantEngine:
             positions,
         )
         if exit_signals:
-            self.symbol_status[symbol]["last_signal"] = self._signal_status(exit_signals[0])
+            self.symbol_status[symbol]["last_signal"] = self._signal_status(
+                exit_signals[0]
+            )
             diagnostics = {
                 **diagnostics,
                 "summary": "exit_signal_ready",
                 "signal_reason": exit_signals[0].reason,
             }
-            self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
+            self._set_completed_entry_diagnostics(
+                symbol, diagnostics, price=latest_price, regime=regime
+            )
             return exit_signals
         signals = self.strategy.build_signals(
             symbol,
@@ -486,6 +569,7 @@ class OKXQuantEngine:
             positions,
             self.klines[symbol]["1h"],
             self.klines[symbol]["4h"],
+            self._daily_candles_with_live(symbol),
             context=await self._adaptive_strategy_context(symbol, regime, features),
         )
         if not signals:
@@ -496,10 +580,16 @@ class OKXQuantEngine:
             "summary": "signal_ready",
             "signal_reason": signals[0].reason,
         }
-        self._set_completed_entry_diagnostics(symbol, diagnostics, price=latest_price, regime=regime)
+        self._set_completed_entry_diagnostics(
+            symbol, diagnostics, price=latest_price, regime=regime
+        )
         for signal in signals:
             if signal.signal_type == SignalType.HEDGE_TRANSITION:
-                grid_side = PositionSide.SHORT if signal.position_side == PositionSide.LONG else PositionSide.LONG
+                grid_side = (
+                    PositionSide.SHORT
+                    if signal.position_side == PositionSide.LONG
+                    else PositionSide.LONG
+                )
                 self.hedge_locks[symbol] = HedgeLock(
                     symbol=symbol,
                     grid_side=grid_side,
@@ -523,7 +613,10 @@ class OKXQuantEngine:
             entry_key: tuple[str, PositionSide] | None = None
             order_attempted = False
             cooldown_needed = False
-            signal_is_entry = signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}
+            signal_is_entry = signal.signal_type in {
+                SignalType.ENTER_TREND,
+                SignalType.ENTER_GRID,
+            }
             if signal.signal_type in {SignalType.EXIT, SignalType.RELEASE_HEDGE}:
                 exit_key = (signal.symbol, signal.position_side)
                 async with self._exit_lock:
@@ -560,8 +653,14 @@ class OKXQuantEngine:
                 if not decision.allowed:
                     if signal_is_entry:
                         cooldown_needed = True
-                        email_key = (signal.symbol, signal.position_side, decision.reason)
-                        if not self._cooldown_active(self._risk_rejection_email_cooldowns, email_key):
+                        email_key = (
+                            signal.symbol,
+                            signal.position_side,
+                            decision.reason,
+                        )
+                        if not self._cooldown_active(
+                            self._risk_rejection_email_cooldowns, email_key
+                        ):
                             await self.email_notifier.notify_order_signal(
                                 signal,
                                 order_price=signal.price,
@@ -603,7 +702,10 @@ class OKXQuantEngine:
                     previous_diagnostics = status.get("entry_diagnostics")
                     if isinstance(previous_diagnostics, dict):
                         blocker = {"code": f"risk_{decision.reason}", "passed": False}
-                        requirements = [*previous_diagnostics.get("requirements", []), blocker]
+                        requirements = [
+                            *previous_diagnostics.get("requirements", []),
+                            blocker,
+                        ]
                         blockers = [*previous_diagnostics.get("blockers", []), blocker]
                         diagnostics = {
                             **previous_diagnostics,
@@ -626,17 +728,29 @@ class OKXQuantEngine:
                 if signal.signal_type == SignalType.ENTER_GRID:
                     orders = []
                     atr_value = abs(signal.price - signal.stop_loss) / 1.5
-                    for price, amount in self.grid_planner.orders_for_signal(signal, decision.size, atr_value):
+                    for price, amount in self.grid_planner.orders_for_signal(
+                        signal, decision.size, atr_value
+                    ):
                         order_attempted = True
-                        orders.append(await self.execution.execute_limit(signal, amount, price))
+                        orders.append(
+                            await self.execution.execute_limit(signal, amount, price)
+                        )
                     order = orders[0]
                 else:
                     order_attempted = True
                     order = await self.execution.execute(signal, decision)
-                if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
+                if signal.signal_type in {
+                    SignalType.ENTER_TREND,
+                    SignalType.ENTER_GRID,
+                }:
                     self._last_entry_submitted_at = datetime.now(timezone.utc)
-                    self.position_manager.register_entry(signal, abs(signal.price - signal.stop_loss))
-                if signal.signal_type in {SignalType.ENTER_TREND, SignalType.ENTER_GRID}:
+                    self.position_manager.register_entry(
+                        signal, abs(signal.price - signal.stop_loss)
+                    )
+                if signal.signal_type in {
+                    SignalType.ENTER_TREND,
+                    SignalType.ENTER_GRID,
+                }:
                     self.risk.reserve_risk(
                         signal.position_side,
                         self.risk.signal_risk_multiplier(signal),
@@ -644,7 +758,10 @@ class OKXQuantEngine:
                 synced_order = await self._sync_submitted_order(order, signal)
                 if synced_order:
                     order = synced_order
-                if signal.signal_type == SignalType.RELEASE_HEDGE and self._order_has_fill(order):
+                if (
+                    signal.signal_type == SignalType.RELEASE_HEDGE
+                    and self._order_has_fill(order)
+                ):
                     lock = self.hedge_locks.get(signal.symbol)
                     if lock:
                         lock.active = False
@@ -654,7 +771,9 @@ class OKXQuantEngine:
                             signal.position_side,
                             float(signal.metadata.get("risk_multiplier", 1.0)),
                         )
-                        self.position_manager.trailing.pop((signal.symbol, signal.position_side), None)
+                        self.position_manager.trailing.pop(
+                            (signal.symbol, signal.position_side), None
+                        )
                     else:
                         logger.warning(
                             "exit order not filled; keeping trailing state symbol=%s order_id=%s status=%s reason=%s",
@@ -750,7 +869,9 @@ class OKXQuantEngine:
         no_trade_hours = await self._hours_since_latest_entry()
         range_24h = float(getattr(features, "range_24h", 0.0) or 0.0)
         ret_24h = float(getattr(features, "ret_24h", 0.0) or 0.0)
-        enough_inactivity = no_trade_hours >= float(self.settings.adaptive_no_trade_hours)
+        enough_inactivity = no_trade_hours >= float(
+            self.settings.adaptive_no_trade_hours
+        )
         enough_motion = range_24h >= float(self.settings.adaptive_min_range_24h_pct)
         continuation_short = (
             enough_inactivity
@@ -799,7 +920,8 @@ class OKXQuantEngine:
                 logger.debug("latest order lookup failed", exc_info=True)
             else:
                 if latest is not None and (
-                    self._last_entry_submitted_at is None or latest > self._last_entry_submitted_at
+                    self._last_entry_submitted_at is None
+                    or latest > self._last_entry_submitted_at
                 ):
                     self._last_entry_submitted_at = latest
         if self._last_entry_submitted_at is None:
@@ -843,8 +965,12 @@ class OKXQuantEngine:
 
     async def _monitor_positions_once(self) -> None:
         for symbol in self.settings.symbols:
-            self.position_monitor_status["checks"] = int(self.position_monitor_status.get("checks") or 0) + 1
-            self.position_monitor_status["last_checked_at"] = datetime.now(timezone.utc).isoformat()
+            self.position_monitor_status["checks"] = (
+                int(self.position_monitor_status.get("checks") or 0) + 1
+            )
+            self.position_monitor_status["last_checked_at"] = datetime.now(
+                timezone.utc
+            ).isoformat()
             self.position_monitor_status["last_symbol"] = symbol
             positions = await self._await_exchange_step(
                 symbol,
@@ -873,12 +999,16 @@ class OKXQuantEngine:
                 signal_hints=self._position_signal_hints(),
             )
             if recovered:
-                self.symbol_status.setdefault(symbol, {})["recovered_positions"] = recovered
-            signals = self.position_manager.exit_signals(symbol, price, atr_value, positions)
+                self.symbol_status.setdefault(symbol, {})[
+                    "recovered_positions"
+                ] = recovered
+            signals = self.position_manager.exit_signals(
+                symbol, price, atr_value, positions
+            )
             if signals:
-                self.position_monitor_status["exit_signals"] = (
-                    int(self.position_monitor_status.get("exit_signals") or 0) + len(signals)
-                )
+                self.position_monitor_status["exit_signals"] = int(
+                    self.position_monitor_status.get("exit_signals") or 0
+                ) + len(signals)
                 status = self.symbol_status.setdefault(symbol, {})
                 status["last_signal"] = self._signal_status(signals[0])
                 logger.info(
@@ -928,7 +1058,9 @@ class OKXQuantEngine:
         if len(cache) > max_items:
             del cache[:-max_items]
 
-    def _replace_timeframe_cache(self, symbol: str, timeframe: str, rows: list[list[float]]) -> None:
+    def _replace_timeframe_cache(
+        self, symbol: str, timeframe: str, rows: list[list[float]]
+    ) -> None:
         if not rows:
             return
         duration_ms = self._timeframe_duration_ms(timeframe)
@@ -944,7 +1076,80 @@ class OKXQuantEngine:
         if len(derived_4h) >= 50:
             self.klines[symbol]["4h"] = derived_4h
 
-    def _resample_5m_cache(self, symbol: str, timeframe: str, *, limit: int) -> list[list[float]]:
+    def _daily_candles_with_live(self, symbol: str) -> list[list[float]]:
+        rows_1d = list(self.klines.get(symbol, {}).get("1d", []))[-79:]
+        rows_5m = self.klines.get(symbol, {}).get("5m", [])
+        if not rows_5m:
+            return rows_1d
+        latest_ts = int(rows_5m[-1][0])
+        day_start_ms = (latest_ts // 86_400_000) * 86_400_000
+        current_rows = [row for row in rows_5m if int(row[0]) >= day_start_ms]
+        if not current_rows:
+            return rows_1d
+        current_day = [
+            float(current_rows[-1][0]),
+            float(current_rows[0][1]),
+            max(float(row[2]) for row in current_rows),
+            min(float(row[3]) for row in current_rows),
+            float(current_rows[-1][4]),
+            sum(float(row[5]) for row in current_rows),
+        ]
+        if rows_1d and (int(rows_1d[-1][0]) // 86_400_000) == (latest_ts // 86_400_000):
+            rows_1d = rows_1d[:-1]
+        return rows_1d + [current_day]
+
+    def _daily_macd_momentum_exit_signals(
+        self, symbol: str, price: float, positions
+    ) -> list[TradeSignal]:
+        signals: list[TradeSignal] = []
+        for position in positions:
+            key = (symbol, position.side)
+            state = self.position_manager.trailing.get(key)
+            if (
+                not state
+                or not state.delay_trailing_until_momentum_exit
+                or not self._daily_macd_momentum_exit(symbol, position.side)
+            ):
+                continue
+            side = Side.SELL if position.side == PositionSide.LONG else Side.BUY
+            signals.append(
+                self.position_manager._exit_signal(
+                    symbol,
+                    side,
+                    position.side,
+                    price,
+                    position.contracts,
+                    "daily_macd_momentum_exit",
+                    state.risk_multiplier,
+                    state.entry_price,
+                )
+            )
+        return signals
+
+    def _daily_macd_momentum_exit(self, symbol: str, side: PositionSide) -> bool:
+        rows = self._daily_candles_with_live(symbol)
+        if len(rows) < 35:
+            return False
+        frame = ohlcv_frame(rows)
+        _, _, histogram = macd(frame.close.astype(float))
+        current_hist = float(histogram.iloc[-1])
+        previous_hist = float(histogram.iloc[-2])
+        if side == PositionSide.LONG:
+            return current_hist > 0 and current_hist < previous_hist
+        return current_hist < 0 and current_hist < previous_hist
+
+    def _three_4h_reverse_candles(self, symbol: str, side: PositionSide) -> bool:
+        rows = self.klines.get(symbol, {}).get("4h", [])
+        if len(rows) < 3:
+            return False
+        frame = ohlcv_frame(rows[-3:])
+        if side == PositionSide.LONG:
+            return bool((frame.close < frame.open).all())
+        return bool((frame.close > frame.open).all())
+
+    def _resample_5m_cache(
+        self, symbol: str, timeframe: str, *, limit: int
+    ) -> list[list[float]]:
         rows = self.klines.get(symbol, {}).get("5m", [])
         if len(rows) < 12:
             return []
@@ -969,7 +1174,9 @@ class OKXQuantEngine:
         )
         if frame.empty:
             return []
-        rows_out = frame[["ts", "open", "high", "low", "close", "volume"]].values.tolist()
+        rows_out = frame[
+            ["ts", "open", "high", "low", "close", "volume"]
+        ].values.tolist()
         duration_ms = self._timeframe_duration_ms(timeframe)
         return self._closed_ohlcv_rows(rows_out, duration_ms)[-limit:]
 
@@ -979,6 +1186,7 @@ class OKXQuantEngine:
             "5m": 300_000,
             "1h": 3_600_000,
             "4h": 14_400_000,
+            "1d": 86_400_000,
         }.get(timeframe, 60_000)
 
     @staticmethod
@@ -988,7 +1196,11 @@ class OKXQuantEngine:
         *,
         now_ms: int | None = None,
     ) -> list[list[float]]:
-        now_ms = now_ms if now_ms is not None else int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_ms = (
+            now_ms
+            if now_ms is not None
+            else int(datetime.now(timezone.utc).timestamp() * 1000)
+        )
         return [row for row in rows if int(row[0]) + duration_ms <= now_ms]
 
     def _set_entry_status(
@@ -1020,7 +1232,9 @@ class OKXQuantEngine:
                 "entry_diagnostics": diagnostics,
             }
         )
-        self._log_diagnostic_status(symbol, action, summary, regime.value, price, blockers)
+        self._log_diagnostic_status(
+            symbol, action, summary, regime.value, price, blockers
+        )
 
     def _set_completed_entry_diagnostics(
         self,
@@ -1031,13 +1245,20 @@ class OKXQuantEngine:
         regime: Regime | None = None,
     ) -> None:
         checked_at = datetime.now(timezone.utc).isoformat()
-        metrics = diagnostics.get("metrics") if isinstance(diagnostics.get("metrics"), dict) else {}
+        metrics = (
+            diagnostics.get("metrics")
+            if isinstance(diagnostics.get("metrics"), dict)
+            else {}
+        )
         if price is None:
             price = self._float_metric(metrics.get("price"), self._latest_price(symbol))
         if regime is not None:
             regime_value = regime.value
         else:
-            regime_value = str(metrics.get("regime") or self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN).value)
+            regime_value = str(
+                metrics.get("regime")
+                or self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN).value
+            )
         completed = {**diagnostics, "checked_at": checked_at}
         status = self.symbol_status.setdefault(symbol, {})
         status.update(
@@ -1083,10 +1304,21 @@ class OKXQuantEngine:
             raise
 
     def _log_entry_diagnostics(self, symbol: str, diagnostics: dict[str, Any]) -> None:
-        metrics = diagnostics.get("metrics") if isinstance(diagnostics.get("metrics"), dict) else {}
-        blockers = diagnostics.get("blockers") if isinstance(diagnostics.get("blockers"), list) else []
+        metrics = (
+            diagnostics.get("metrics")
+            if isinstance(diagnostics.get("metrics"), dict)
+            else {}
+        )
+        blockers = (
+            diagnostics.get("blockers")
+            if isinstance(diagnostics.get("blockers"), list)
+            else []
+        )
         price = self._float_metric(metrics.get("price"), self._latest_price(symbol))
-        regime = str(metrics.get("regime") or self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN).value)
+        regime = str(
+            metrics.get("regime")
+            or self.regime_classifier.regimes.get(symbol, Regime.UNKNOWN).value
+        )
         extra = {
             "score": metrics.get("opportunity_score"),
             "min_score": metrics.get("min_score"),
@@ -1173,11 +1405,7 @@ class OKXQuantEngine:
 
     @staticmethod
     def _format_extra(values: dict[str, object]) -> str:
-        parts = [
-            f"{key}={value}"
-            for key, value in values.items()
-            if value is not None
-        ]
+        parts = [f"{key}={value}" for key, value in values.items() if value is not None]
         return " ".join(parts)
 
     @staticmethod
@@ -1191,7 +1419,9 @@ class OKXQuantEngine:
         candles = self.klines.get(symbol, {}).get("5m", [])
         return float(candles[-1][4]) if candles else 0.0
 
-    def _timeframe_stale(self, symbol: str, timeframe: str, stale_after_ms: int) -> bool:
+    def _timeframe_stale(
+        self, symbol: str, timeframe: str, stale_after_ms: int
+    ) -> bool:
         candles = self.klines.get(symbol, {}).get(timeframe, [])
         live_5m = self.klines.get(symbol, {}).get("5m", [])
         if not candles or not live_5m:
@@ -1219,7 +1449,10 @@ class OKXQuantEngine:
             return
         equity = await self.exchange.fetch_balance_equity()
         snapshot_time = datetime.now(timezone.utc)
-        regimes = {symbol: regime.value for symbol, regime in self.regime_classifier.regimes.items()}
+        regimes = {
+            symbol: regime.value
+            for symbol, regime in self.regime_classifier.regimes.items()
+        }
         regimes.update(
             {
                 symbol: str(status.get("regime"))
@@ -1240,10 +1473,14 @@ class OKXQuantEngine:
         memory = {
             "engine_version": ENGINE_DIAGNOSTICS_VERSION,
             "exchange_id": self.settings.exchange_id,
-            "market_data_source": "okx" if self.settings.exchange_id == "hotcoin" else self.settings.exchange_id,
+            "market_data_source": "okx"
+            if self.settings.exchange_id == "hotcoin"
+            else self.settings.exchange_id,
             "snapshot_saved_at": snapshot_time.isoformat(),
             "regimes": regimes,
-            "direction_risk": {side.value: value for side, value in self.risk.direction_risk.items()},
+            "direction_risk": {
+                side.value: value for side, value in self.risk.direction_risk.items()
+            },
             "risk": {
                 "risk_percent": self.settings.risk_percent,
                 "same_direction_risk_limit": self.settings.same_direction_risk_limit,
@@ -1264,8 +1501,14 @@ class OKXQuantEngine:
                 "llm_regime_review_cache_ttl_seconds": self.settings.llm_regime_review_cache_ttl_seconds,
                 "llm_regime_review_min_interval_seconds": self.settings.llm_regime_review_min_interval_seconds,
             },
-            "prices": {symbol: status.get("price") for symbol, status in self.symbol_status.items()},
-            "regime_checked_at": {symbol: status.get("checked_at") for symbol, status in self.symbol_status.items()},
+            "prices": {
+                symbol: status.get("price")
+                for symbol, status in self.symbol_status.items()
+            },
+            "regime_checked_at": {
+                symbol: status.get("checked_at")
+                for symbol, status in self.symbol_status.items()
+            },
             "entry_diagnostics": display_entry_diagnostics,
             "current_entry_diagnostics": current_entry_diagnostics,
             "last_signal": {
@@ -1288,9 +1531,15 @@ class OKXQuantEngine:
             "trailing_states": self.position_manager.trailing_snapshot(),
             "recovered_positions": {
                 f"{symbol}:{side.value}": value
-                for (symbol, side), value in self.position_manager.recovered_positions.items()
+                for (
+                    symbol,
+                    side,
+                ), value in self.position_manager.recovered_positions.items()
             },
-            "symbol_locks": {symbol: until.isoformat() for symbol, until in self.risk.symbol_locks.items()},
+            "symbol_locks": {
+                symbol: until.isoformat()
+                for symbol, until in self.risk.symbol_locks.items()
+            },
             "hedge_locks": {
                 symbol: {
                     "grid_side": lock.grid_side.value,
@@ -1335,7 +1584,9 @@ class OKXQuantEngine:
         try:
             return await self.exchange.fetch_order(order.id, order.symbol)
         except Exception:
-            logger.exception("order sync failed order_id=%s symbol=%s", order.id, order.symbol)
+            logger.exception(
+                "order sync failed order_id=%s symbol=%s", order.id, order.symbol
+            )
             return None
 
     @staticmethod
@@ -1355,9 +1606,16 @@ class OKXQuantEngine:
                 order = await self.exchange.fetch_order(order_id, symbol)
                 await self.store.update_order_result(order)
             except Exception:
-                logger.debug("recent order sync skipped order_id=%s symbol=%s", order_id, symbol, exc_info=True)
+                logger.debug(
+                    "recent order sync skipped order_id=%s symbol=%s",
+                    order_id,
+                    symbol,
+                    exc_info=True,
+                )
 
-    def _display_entry_diagnostics(self, status: dict[str, object]) -> dict[str, Any] | None:
+    def _display_entry_diagnostics(
+        self, status: dict[str, object]
+    ) -> dict[str, Any] | None:
         current = status.get("entry_diagnostics")
         completed = status.get("last_completed_entry_diagnostics")
         if isinstance(current, dict) and not self._entry_diagnostics_transient(current):
@@ -1389,11 +1647,16 @@ class OKXQuantEngine:
             "risk_multiplier": signal.metadata.get("risk_multiplier"),
         }
 
-    def _position_signal_hints(self) -> dict[tuple[str, PositionSide], dict[str, object]]:
+    def _position_signal_hints(
+        self,
+    ) -> dict[tuple[str, PositionSide], dict[str, object]]:
         hints: dict[tuple[str, PositionSide], dict[str, object]] = {}
         for symbol, status in self.symbol_status.items():
             signal = status.get("last_signal")
-            if not isinstance(signal, dict) or signal.get("type") not in {SignalType.ENTER_TREND.value, SignalType.ENTER_GRID.value}:
+            if not isinstance(signal, dict) or signal.get("type") not in {
+                SignalType.ENTER_TREND.value,
+                SignalType.ENTER_GRID.value,
+            }:
                 continue
             try:
                 side = PositionSide(str(signal.get("position_side")))
@@ -1415,7 +1678,9 @@ class OKXQuantEngine:
         if same_exchange:
             for side, value in snapshot.get("direction_risk", {}).items():
                 self.risk.direction_risk[PositionSide(side)] = float(value)
-            self.position_manager.restore_trailing_snapshot(snapshot.get("trailing_states", {}))
+            self.position_manager.restore_trailing_snapshot(
+                snapshot.get("trailing_states", {})
+            )
             for symbol, signal in snapshot.get("last_signal", {}).items():
                 self.symbol_status.setdefault(symbol, {})["last_signal"] = signal
             for symbol, order in snapshot.get("last_order", {}).items():
@@ -1440,13 +1705,14 @@ class OKXQuantEngine:
         try:
             positions = await self.exchange.fetch_positions(refresh=True)
         except Exception:
-            logger.debug("direction risk reconcile skipped; fetch positions failed", exc_info=True)
+            logger.debug(
+                "direction risk reconcile skipped; fetch positions failed",
+                exc_info=True,
+            )
             return
 
         live_sides = {
-            position.side
-            for position in positions
-            if abs(position.contracts) > 0
+            position.side for position in positions if abs(position.contracts) > 0
         }
         for side in (PositionSide.LONG, PositionSide.SHORT):
             current = self.risk.direction_risk.get(side, 0.0)
@@ -1473,7 +1739,9 @@ class OKXQuantEngine:
         await self.cache.set_positions(await self.exchange.fetch_positions())
         await self.cache.set_hedge_locks(self.hedge_locks)
 
-    async def _apply_runtime_settings(self, update_exchange_leverage: bool = True) -> None:
+    async def _apply_runtime_settings(
+        self, update_exchange_leverage: bool = True
+    ) -> None:
         if not self.store:
             return
         values = await self.store.load_runtime_settings()
@@ -1490,12 +1758,19 @@ class OKXQuantEngine:
             self.llm_reviewer.min_interval_seconds,
         )
         apply_runtime_config(self.settings, values)
-        self.email_notifier = OrderEmailNotifier(SmtpConfig.from_settings(self.settings))
+        self.email_notifier = OrderEmailNotifier(
+            SmtpConfig.from_settings(self.settings)
+        )
         self.execution.email_notifier = self.email_notifier
         self._apply_llm_runtime_settings(previous_llm)
-        if update_exchange_leverage and self.settings.trend_symbol_leverage_limit != previous_leverage:
+        if (
+            update_exchange_leverage
+            and self.settings.trend_symbol_leverage_limit != previous_leverage
+        ):
             for symbol in self.settings.symbols:
-                await self.exchange.set_leverage(symbol, self.settings.trend_symbol_leverage_limit)
+                await self.exchange.set_leverage(
+                    symbol, self.settings.trend_symbol_leverage_limit
+                )
             self._applied_leverage_limit = self.settings.trend_symbol_leverage_limit
             logger.info(
                 "runtime leverage update requested leverage=%s",
@@ -1516,8 +1791,12 @@ class OKXQuantEngine:
         self.llm_reviewer.api_key_value = self.settings.llm_regime_api_key
         self.llm_reviewer.api_key_env = api_key_env
         self.llm_reviewer.enabled = self.settings.llm_regime_review_enabled
-        self.llm_reviewer.cache_ttl_seconds = self.settings.llm_regime_review_cache_ttl_seconds
-        self.llm_reviewer.min_interval_seconds = self.settings.llm_regime_review_min_interval_seconds
+        self.llm_reviewer.cache_ttl_seconds = (
+            self.settings.llm_regime_review_cache_ttl_seconds
+        )
+        self.llm_reviewer.min_interval_seconds = (
+            self.settings.llm_regime_review_min_interval_seconds
+        )
         current = (
             self.llm_reviewer.provider,
             self.llm_reviewer.model,

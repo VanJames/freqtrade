@@ -7,7 +7,9 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     okx_api_key: str = ""
     okx_secret: str = ""
@@ -18,7 +20,12 @@ class Settings(BaseSettings):
     hotcoin_device_id: str = "P_qWAfKXrQ5xBBUlEAUReGmPALdmrgafYJ"
     dry_run: bool = True
     symbols: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XAU/USDT:USDT"]
+        default_factory=lambda: [
+            "BTC/USDT:USDT",
+            "ETH/USDT:USDT",
+            "SOL/USDT:USDT",
+            "XAU/USDT:USDT",
+        ]
     )
     postgres_dsn: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/trading"
     redis_url: str = "redis://localhost:6379/0"
@@ -63,6 +70,7 @@ class Settings(BaseSettings):
     liquidity_sweep_risk_multiplier: float = 0.8
     liquidity_sweep_require_confirmation: bool = True
     enable_two_candle_momentum: bool = False
+    enable_daily_macd_breakout: bool = True
     enable_adaptive_strategy_switch: bool = True
     adaptive_no_trade_hours: float = 48.0
     adaptive_min_range_24h_pct: float = 0.012

@@ -40,14 +40,22 @@ async def settings_with_runtime_overrides(settings: Settings) -> Settings:
 
 @app.command()
 def run(
-    dry_run: bool = typer.Option(True, help="Use dry-run exchange and never send real orders."),
+    dry_run: bool = typer.Option(
+        True, help="Use dry-run exchange and never send real orders."
+    ),
     once: bool = typer.Option(False, help="Run one full decision cycle and exit."),
-    with_store: bool = typer.Option(False, help="Initialize PostgreSQL tables and persist orders/snapshots."),
-    with_redis: bool = typer.Option(False, help="Use Redis for high-frequency positions/orders/hedge-lock cache."),
+    with_store: bool = typer.Option(
+        False, help="Initialize PostgreSQL tables and persist orders/snapshots."
+    ),
+    with_redis: bool = typer.Option(
+        False, help="Use Redis for high-frequency positions/orders/hedge-lock cache."
+    ),
 ) -> None:
     configure_logging(logging.INFO)
     settings = Settings(dry_run=dry_run)
-    store = StateStore(settings.postgres_dsn, settings.exchange_id) if with_store else None
+    store = (
+        StateStore(settings.postgres_dsn, settings.exchange_id) if with_store else None
+    )
     cache = StateCache(settings.redis_url) if with_redis else None
 
     async def main() -> None:
@@ -85,19 +93,41 @@ def init_db() -> None:
 @app.command()
 def backtest(
     days: int = typer.Option(30, help="Backtest lookback window in calendar days."),
-    symbols: Optional[str] = typer.Option(None, help="Comma-separated OKX swap symbols. Defaults to .env SYMBOLS."),
+    symbols: Optional[str] = typer.Option(
+        None, help="Comma-separated OKX swap symbols. Defaults to .env SYMBOLS."
+    ),
     initial_equity: float = typer.Option(10_000.0, help="Initial equity in USDT."),
-    risk_percent: Optional[float] = typer.Option(None, help="Base risk per trade, e.g. 0.01 means 1%."),
-    same_direction_risk_limit: Optional[float] = typer.Option(None, help="Same-direction risk cap."),
-    daily_drawdown_limit: Optional[float] = typer.Option(None, help="Daily drawdown fuse threshold."),
+    risk_percent: Optional[float] = typer.Option(
+        None, help="Base risk per trade, e.g. 0.01 means 1%."
+    ),
+    same_direction_risk_limit: Optional[float] = typer.Option(
+        None, help="Same-direction risk cap."
+    ),
+    daily_drawdown_limit: Optional[float] = typer.Option(
+        None, help="Daily drawdown fuse threshold."
+    ),
     shock_stop_atr: float = typer.Option(1.0, help="SHOCK stop distance in ATR."),
-    shock_take_profit_atr: float = typer.Option(1.8, help="SHOCK take-profit distance in ATR."),
-    classifier_mode: str = typer.Option("user_4h", help="Regime classifier mode. Only user_4h is supported."),
-    shock_leverage_limit: Optional[float] = typer.Option(None, help="Maximum leverage for SHOCK grid trades."),
-    trend_leverage_limit: Optional[float] = typer.Option(None, help="Maximum leverage for trend/shock-trend trades."),
-    max_signal_risk_multiplier: Optional[float] = typer.Option(None, help="Maximum per-signal risk multiplier."),
-    confirmation_position_sizing: Optional[bool] = typer.Option(None, help="Boost position size only for highly confirmed signals."),
-    confirmation_max_risk_multiplier: Optional[float] = typer.Option(None, help="Maximum boosted risk multiplier for confirmed signals."),
+    shock_take_profit_atr: float = typer.Option(
+        1.8, help="SHOCK take-profit distance in ATR."
+    ),
+    classifier_mode: str = typer.Option(
+        "user_4h", help="Regime classifier mode. Only user_4h is supported."
+    ),
+    shock_leverage_limit: Optional[float] = typer.Option(
+        None, help="Maximum leverage for SHOCK grid trades."
+    ),
+    trend_leverage_limit: Optional[float] = typer.Option(
+        None, help="Maximum leverage for trend/shock-trend trades."
+    ),
+    max_signal_risk_multiplier: Optional[float] = typer.Option(
+        None, help="Maximum per-signal risk multiplier."
+    ),
+    confirmation_position_sizing: Optional[bool] = typer.Option(
+        None, help="Boost position size only for highly confirmed signals."
+    ),
+    confirmation_max_risk_multiplier: Optional[float] = typer.Option(
+        None, help="Maximum boosted risk multiplier for confirmed signals."
+    ),
     liquidity_sweep_reversal: Optional[bool] = typer.Option(
         None,
         "--liquidity-sweep-reversal/--no-liquidity-sweep-reversal",
@@ -126,30 +156,57 @@ def backtest(
         "--two-candle-momentum/--no-two-candle-momentum",
         help="Enable 5m/15m two-candle momentum supplemental entries.",
     ),
+    daily_macd_breakout: Optional[bool] = typer.Option(
+        None,
+        "--daily-macd-breakout/--no-daily-macd-breakout",
+        help="Enable daily MACD cross breakout entries.",
+    ),
     funding_rate: float = typer.Option(0.0, help="Backtest funding rate assumption."),
-    funding_block_threshold: Optional[float] = typer.Option(None, help="Funding rate threshold used by risk checks."),
-    llm_review: Optional[bool] = typer.Option(None, help="Enable LLM regime review during backtest. Defaults to .env."),
-    llm_provider: Optional[str] = typer.Option(None, help="LLM provider: openai or deepseek."),
+    funding_block_threshold: Optional[float] = typer.Option(
+        None, help="Funding rate threshold used by risk checks."
+    ),
+    llm_review: Optional[bool] = typer.Option(
+        None, help="Enable LLM regime review during backtest. Defaults to .env."
+    ),
+    llm_provider: Optional[str] = typer.Option(
+        None, help="LLM provider: openai or deepseek."
+    ),
     llm_model: Optional[str] = typer.Option(None, help="LLM model name."),
-    llm_max_calls: int = typer.Option(50, help="Maximum LLM review calls during one backtest."),
+    llm_max_calls: int = typer.Option(
+        50, help="Maximum LLM review calls during one backtest."
+    ),
 ) -> None:
     configure_logging(logging.INFO)
     if classifier_mode != "user_4h":
         raise typer.BadParameter("dev classifier was removed; use user_4h.")
     settings = Settings()
-    selected_symbols = [item.strip() for item in symbols.split(",") if item.strip()] if symbols else settings.symbols
+    selected_symbols = (
+        [item.strip() for item in symbols.split(",") if item.strip()]
+        if symbols
+        else settings.symbols
+    )
     result, report_path = OKXBacktester(
         BacktestConfig(
             symbols=selected_symbols,
             days=days,
             initial_equity=initial_equity,
-            risk_percent=risk_percent if risk_percent is not None else settings.risk_percent,
+            risk_percent=risk_percent
+            if risk_percent is not None
+            else settings.risk_percent,
             same_direction_risk_limit=(
-                same_direction_risk_limit if same_direction_risk_limit is not None else settings.same_direction_risk_limit
+                same_direction_risk_limit
+                if same_direction_risk_limit is not None
+                else settings.same_direction_risk_limit
             ),
-            daily_drawdown_limit=daily_drawdown_limit if daily_drawdown_limit is not None else settings.daily_drawdown_limit,
-            shock_leverage_limit=shock_leverage_limit if shock_leverage_limit is not None else settings.shock_leverage_limit,
-            trend_symbol_leverage_limit=trend_leverage_limit if trend_leverage_limit is not None else settings.trend_symbol_leverage_limit,
+            daily_drawdown_limit=daily_drawdown_limit
+            if daily_drawdown_limit is not None
+            else settings.daily_drawdown_limit,
+            shock_leverage_limit=shock_leverage_limit
+            if shock_leverage_limit is not None
+            else settings.shock_leverage_limit,
+            trend_symbol_leverage_limit=trend_leverage_limit
+            if trend_leverage_limit is not None
+            else settings.trend_symbol_leverage_limit,
             max_signal_risk_multiplier=(
                 max_signal_risk_multiplier
                 if max_signal_risk_multiplier is not None
@@ -181,7 +238,9 @@ def backtest(
                 else settings.liquidity_sweep_require_confirmation
             ),
             enable_shock_trend_scout=(
-                shock_trend_scout if shock_trend_scout is not None else settings.enable_shock_trend_scout
+                shock_trend_scout
+                if shock_trend_scout is not None
+                else settings.enable_shock_trend_scout
             ),
             shock_trend_scout_risk_multiplier=(
                 shock_trend_scout_risk_multiplier
@@ -189,10 +248,19 @@ def backtest(
                 else settings.shock_trend_scout_risk_multiplier
             ),
             enable_two_candle_momentum=(
-                two_candle_momentum if two_candle_momentum is not None else settings.enable_two_candle_momentum
+                two_candle_momentum
+                if two_candle_momentum is not None
+                else settings.enable_two_candle_momentum
+            ),
+            enable_daily_macd_breakout=(
+                daily_macd_breakout
+                if daily_macd_breakout is not None
+                else settings.enable_daily_macd_breakout
             ),
             funding_block_threshold=(
-                funding_block_threshold if funding_block_threshold is not None else settings.funding_block_threshold
+                funding_block_threshold
+                if funding_block_threshold is not None
+                else settings.funding_block_threshold
             ),
             backtest_funding_rate=funding_rate,
             shock_stop_atr=shock_stop_atr,
@@ -202,7 +270,9 @@ def backtest(
             high_vol_min_stop_loss_pct=settings.high_vol_min_stop_loss_pct,
             extreme_vol_min_stop_loss_pct=settings.extreme_vol_min_stop_loss_pct,
             min_take_profit_pct=settings.min_take_profit_pct,
-            llm_regime_review_enabled=llm_review if llm_review is not None else settings.llm_regime_review_enabled,
+            llm_regime_review_enabled=llm_review
+            if llm_review is not None
+            else settings.llm_regime_review_enabled,
             llm_regime_provider=llm_provider or settings.llm_regime_provider,
             llm_regime_model=llm_model or settings.llm_regime_model,
             llm_regime_base_url=settings.llm_regime_base_url,
@@ -227,7 +297,9 @@ def backtest(
 def optimize_params(
     symbol: str = typer.Option(..., help="Single OKX swap symbol, e.g. SOL/USDT:USDT."),
     days: int = typer.Option(30, help="Optimization lookback window in calendar days."),
-    classifier_mode: str = typer.Option("user_4h", help="Regime classifier mode. Only user_4h is supported."),
+    classifier_mode: str = typer.Option(
+        "user_4h", help="Regime classifier mode. Only user_4h is supported."
+    ),
     top_n: int = typer.Option(10, help="Number of top parameter sets to report."),
 ) -> None:
     configure_logging(logging.INFO)
@@ -266,10 +338,16 @@ def optimize_params(
 @app.command("tune-runtime")
 def tune_runtime(
     days: int = typer.Option(30, help="Backtest lookback window in calendar days."),
-    symbols: Optional[str] = typer.Option(None, help="Comma-separated OKX swap symbols. Defaults to .env SYMBOLS."),
+    symbols: Optional[str] = typer.Option(
+        None, help="Comma-separated OKX swap symbols. Defaults to .env SYMBOLS."
+    ),
     initial_equity: float = typer.Option(10_000.0, help="Initial equity in USDT."),
-    llm_review: bool = typer.Option(False, "--llm-review/--no-llm-review", help="Enable LLM review while tuning."),
-    llm_max_calls: int = typer.Option(20, help="Maximum LLM review calls per candidate."),
+    llm_review: bool = typer.Option(
+        False, "--llm-review/--no-llm-review", help="Enable LLM review while tuning."
+    ),
+    llm_max_calls: int = typer.Option(
+        20, help="Maximum LLM review calls per candidate."
+    ),
     confirmation_position_sizing: bool = typer.Option(
         True,
         "--confirmation-position-sizing/--no-confirmation-position-sizing",
@@ -278,7 +356,11 @@ def tune_runtime(
 ) -> None:
     configure_logging(logging.INFO)
     settings = asyncio.run(settings_with_runtime_overrides(Settings()))
-    selected_symbols = [item.strip() for item in symbols.split(",") if item.strip()] if symbols else settings.symbols
+    selected_symbols = (
+        [item.strip() for item in symbols.split(",") if item.strip()]
+        if symbols
+        else settings.symbols
+    )
     base = build_backtest_config_from_settings(
         settings=settings,
         days=days,
@@ -290,7 +372,9 @@ def tune_runtime(
     )
     candidates: list[RuntimeTuningCandidate] = runtime_tuning_candidates(base)
     results, report_path = run_runtime_tuning(candidates, progress=typer.echo)
-    current = next((item for item in results if item.candidate.name == "current"), results[0])
+    current = next(
+        (item for item in results if item.candidate.name == "current"), results[0]
+    )
     recommended = results[0]
     typer.echo(f"report: {report_path}")
     typer.echo(
@@ -307,21 +391,43 @@ def tune_runtime(
 @app.command("tune-runtime-loop")
 def tune_runtime_loop(
     days: int = typer.Option(30, help="Backtest lookback window in calendar days."),
-    interval_hours: float = typer.Option(48.0, help="Run one tuning cycle every N hours."),
-    symbols: Optional[str] = typer.Option(None, help="Comma-separated OKX swap symbols. Defaults to .env SYMBOLS."),
+    interval_hours: float = typer.Option(
+        48.0, help="Run one tuning cycle every N hours."
+    ),
+    symbols: Optional[str] = typer.Option(
+        None, help="Comma-separated OKX swap symbols. Defaults to .env SYMBOLS."
+    ),
     initial_equity: float = typer.Option(10_000.0, help="Initial equity in USDT."),
-    llm_review: bool = typer.Option(False, "--llm-review/--no-llm-review", help="Enable LLM regime review in backtests."),
-    llm_propose: bool = typer.Option(False, "--llm-propose/--no-llm-propose", help="Let LLM propose bounded extra candidates."),
-    max_iterations: int = typer.Option(1, help="Maximum tuning iterations in one cycle."),
-    min_improvement_score: float = typer.Option(0.0, help="Minimum score improvement over current params."),
-    llm_max_calls: int = typer.Option(20, help="Maximum LLM regime review calls per candidate."),
+    llm_review: bool = typer.Option(
+        False,
+        "--llm-review/--no-llm-review",
+        help="Enable LLM regime review in backtests.",
+    ),
+    llm_propose: bool = typer.Option(
+        False,
+        "--llm-propose/--no-llm-propose",
+        help="Let LLM propose bounded extra candidates.",
+    ),
+    max_iterations: int = typer.Option(
+        1, help="Maximum tuning iterations in one cycle."
+    ),
+    min_improvement_score: float = typer.Option(
+        0.0, help="Minimum score improvement over current params."
+    ),
+    llm_max_calls: int = typer.Option(
+        20, help="Maximum LLM regime review calls per candidate."
+    ),
     once: bool = typer.Option(False, help="Run one loop cycle and exit."),
 ) -> None:
     configure_logging(logging.INFO)
 
     async def base_factory() -> BacktestConfig:
         settings = await settings_with_runtime_overrides(Settings())
-        selected_symbols = [item.strip() for item in symbols.split(",") if item.strip()] if symbols else settings.symbols
+        selected_symbols = (
+            [item.strip() for item in symbols.split(",") if item.strip()]
+            if symbols
+            else settings.symbols
+        )
         return build_backtest_config_from_settings(
             settings=settings,
             days=days,

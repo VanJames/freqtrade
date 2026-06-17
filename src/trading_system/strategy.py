@@ -4,10 +4,32 @@ from typing import Any
 
 from trading_system.adaptive_parameters import AdaptiveParameterTuner
 from trading_system.factor_discovery import AdaptiveFactorDiscovery
-from trading_system.indicators import atr, crossed_above, crossed_below, ema, macd, ohlcv_frame, rsi
+from trading_system.indicators import (
+    atr,
+    crossed_above,
+    crossed_below,
+    ema,
+    macd,
+    ohlcv_frame,
+    rsi,
+)
 from trading_system.multi_timeframe_fusion import MultiTimeframeFusion
-from trading_system.models import HedgeLock, MarketFeatures, Position, PositionSide, Regime, Side, SignalType, TradeSignal
-from trading_system.opportunity import opportunity_metadata, score_opportunity, sol_structure_stop, sol_trade_allowed
+from trading_system.models import (
+    HedgeLock,
+    MarketFeatures,
+    Position,
+    PositionSide,
+    Regime,
+    Side,
+    SignalType,
+    TradeSignal,
+)
+from trading_system.opportunity import (
+    opportunity_metadata,
+    score_opportunity,
+    sol_structure_stop,
+    sol_trade_allowed,
+)
 from trading_system.volatility import build_volatility_policy
 
 
@@ -35,6 +57,7 @@ class StrategyEngine:
         liquidity_sweep_risk_multiplier: float = 0.8,
         liquidity_sweep_require_confirmation: bool = True,
         enable_two_candle_momentum: bool = False,
+        enable_daily_macd_breakout: bool = False,
     ) -> None:
         self.min_stop_loss_pct = min_stop_loss_pct
         self.high_vol_min_stop_loss_pct = high_vol_min_stop_loss_pct
@@ -57,11 +80,13 @@ class StrategyEngine:
         self.liquidity_sweep_risk_multiplier = liquidity_sweep_risk_multiplier
         self.liquidity_sweep_require_confirmation = liquidity_sweep_require_confirmation
         self.enable_two_candle_momentum = enable_two_candle_momentum
+        self.enable_daily_macd_breakout = enable_daily_macd_breakout
         self.factor_discovery = AdaptiveFactorDiscovery(window_days=30)
         self.mtf_fusion = MultiTimeframeFusion()
         self.param_tuner = AdaptiveParameterTuner()
         self._pre_cross_cache: dict[tuple[str, str, int, int, float], bool] = {}
         self._frame_cache: dict[tuple[str, int, int, int, float], Any] = {}
+        self._daily_macd_signal_cache: set[tuple[str, str, int]] = set()
 
     def build_signals(
         self,
@@ -73,32 +98,60 @@ class StrategyEngine:
         positions: list[Position],
         candles_1h: list[list[float]] | None = None,
         candles_4h: list[list[float]] | None = None,
+        candles_1d: list[list[float]] | None = None,
         context: dict[str, Any] | None = None,
     ) -> list[TradeSignal]:
         signals: list[TradeSignal] = []
         if regime != Regime.UNKNOWN:
-            signals.extend(self._transition_hedges(symbol, regime, previous_regime, features.close_1h, positions))
+            signals.extend(
+                self._transition_hedges(
+                    symbol, regime, previous_regime, features.close_1h, positions
+                )
+            )
             if signals:
                 return signals
 
-        signal = self._pre_cross_trend_signal(symbol, features, candles_5m, candles_1h, candles_4h, positions)
+        signal = self._pre_cross_trend_signal(
+            symbol, features, candles_5m, candles_1h, candles_4h, positions
+        )
         if signal:
             return [self._with_strategy_route(signal, "pre_cross_trend")]
 
         if regime == Regime.UNKNOWN:
             return []
 
-        signal = self._liquidity_sweep_reversal_signal(symbol, regime, features, candles_5m, positions)
+        signal = self._liquidity_sweep_reversal_signal(
+            symbol, regime, features, candles_5m, positions
+        )
         if signal:
             return [self._with_strategy_route(signal, "liquidity_sweep_reversal")]
 
-        signal = self._user_4h_signal(symbol, regime, features, candles_5m, positions, context or {})
+        signal = self._daily_macd_breakout_signal(
+            symbol,
+            regime,
+            features,
+            candles_5m,
+            positions,
+            candles_1h,
+            candles_4h,
+            candles_1d,
+        )
+        if signal:
+            return [self._with_strategy_route(signal, "daily_macd_breakout")]
+
+        signal = self._user_4h_signal(
+            symbol, regime, features, candles_5m, positions, context or {}
+        )
         if signal:
             return [self._with_strategy_route(signal, "user_4h_core")]
 
-        signal = self._two_candle_momentum_signal(symbol, regime, features, candles_5m, positions)
+        signal = self._two_candle_momentum_signal(
+            symbol, regime, features, candles_5m, positions
+        )
         if signal:
-            return [self._with_strategy_route(signal, "two_candle_momentum_experimental")]
+            return [
+                self._with_strategy_route(signal, "two_candle_momentum_experimental")
+            ]
 
         return []
 
@@ -111,6 +164,7 @@ class StrategyEngine:
         positions: list[Position],
         candles_1h: list[list[float]] | None = None,
         candles_4h: list[list[float]] | None = None,
+        candles_1d: list[list[float]] | None = None,
     ) -> dict[str, Any]:
         if regime == Regime.UNKNOWN:
             return self._diagnostics(
@@ -124,8 +178,16 @@ class StrategyEngine:
             return self._diagnostics(
                 "data_wait",
                 [
-                    {"code": "enough_5m_candles", "passed": len(df) >= 35, "value": len(df)},
-                    {"code": "atr_ready", "passed": features.atr_1h > 0, "value": round(features.atr_1h, 8)},
+                    {
+                        "code": "enough_5m_candles",
+                        "passed": len(df) >= 35,
+                        "value": len(df),
+                    },
+                    {
+                        "code": "atr_ready",
+                        "passed": features.atr_1h > 0,
+                        "value": round(features.atr_1h, 8),
+                    },
                 ],
                 {"regime": regime.value, "positions": len(positions)},
             )
@@ -146,10 +208,14 @@ class StrategyEngine:
         trend_down_aligned = self._multi_timeframe_aligned(df, PositionSide.SHORT)
         volatility_policy = self._volatility_policy(price, features, df)
         trend_long_near_breakout = (
-            price >= features.range_high_4h - volatility_policy.breakout_retrace_atr * features.atr_1h
+            price
+            >= features.range_high_4h
+            - volatility_policy.breakout_retrace_atr * features.atr_1h
         )
         trend_short_near_breakout = (
-            price <= features.range_low_4h + volatility_policy.breakout_retrace_atr * features.atr_1h
+            price
+            <= features.range_low_4h
+            + volatility_policy.breakout_retrace_atr * features.atr_1h
         )
         long_momentum_positive = bool(macd_line.iloc[-1] >= signal_line.iloc[-1])
         short_momentum_positive = bool(macd_line.iloc[-1] <= signal_line.iloc[-1])
@@ -170,7 +236,11 @@ class StrategyEngine:
                 return self._diagnostics(
                     "shock_long",
                     [
-                        {"code": "price_below_midpoint", "passed": True, "value": round(price - midpoint, 8)},
+                        {
+                            "code": "price_below_midpoint",
+                            "passed": True,
+                            "value": round(price - midpoint, 8),
+                        },
                         {"code": "macd_cross_up", "passed": crossed_up},
                     ],
                     metrics,
@@ -178,7 +248,11 @@ class StrategyEngine:
             return self._diagnostics(
                 "shock_short",
                 [
-                    {"code": "price_above_midpoint", "passed": price > midpoint, "value": round(price - midpoint, 8)},
+                    {
+                        "code": "price_above_midpoint",
+                        "passed": price > midpoint,
+                        "value": round(price - midpoint, 8),
+                    },
                     {"code": "macd_cross_down", "passed": crossed_down},
                 ],
                 metrics,
@@ -212,18 +286,46 @@ class StrategyEngine:
                 volatility_tier=volatility_policy.tier,
                 min_score=88,
             )
-            sol_allowed = self._sol_allowed(symbol, PositionSide.LONG, regime, opportunity.score, features)
+            sol_allowed = self._sol_allowed(
+                symbol, PositionSide.LONG, regime, opportunity.score, features
+            )
             return self._diagnostics(
                 "trend_long",
                 [
-                    {"code": "opportunity_score", "passed": opportunity.allow_trade, "value": opportunity.score},
-                    {"code": "multi_timeframe", "passed": (not volatility_policy.require_multi_timeframe or trend_up_aligned)},
-                    {"code": "near_breakout", "passed": (not volatility_policy.require_near_breakout or trend_long_near_breakout)},
+                    {
+                        "code": "opportunity_score",
+                        "passed": opportunity.allow_trade,
+                        "value": opportunity.score,
+                    },
+                    {
+                        "code": "multi_timeframe",
+                        "passed": (
+                            not volatility_policy.require_multi_timeframe
+                            or trend_up_aligned
+                        ),
+                    },
+                    {
+                        "code": "near_breakout",
+                        "passed": (
+                            not volatility_policy.require_near_breakout
+                            or trend_long_near_breakout
+                        ),
+                    },
                     {"code": "pullback_down", "passed": recent_pullback_down},
-                    {"code": "bullish_candle", "passed": float(current.close) > float(current.open)},
+                    {
+                        "code": "bullish_candle",
+                        "passed": float(current.close) > float(current.open),
+                    },
                     {"code": "macd_cross_up", "passed": crossed_up},
-                    {"code": "price_above_ema20_5m", "passed": price >= ema_now * 0.998},
-                    {"code": "rsi_40_66", "passed": rsi_quality, "value": round(last_rsi, 2)},
+                    {
+                        "code": "price_above_ema20_5m",
+                        "passed": price >= ema_now * 0.998,
+                    },
+                    {
+                        "code": "rsi_40_66",
+                        "passed": rsi_quality,
+                        "value": round(last_rsi, 2),
+                    },
                     {"code": "sol_filter", "passed": sol_allowed},
                 ],
                 {**metrics, "opportunity_score": opportunity.score},
@@ -239,7 +341,8 @@ class StrategyEngine:
                     "regime_direction": True,
                     "multi_timeframe": trend_down_aligned,
                     "one_hour_trend": features.ema20_1h <= features.ema60_1h,
-                    "four_hour_trend": trend_short_near_breakout and features.last_4h_close < features.prev_4h_close,
+                    "four_hour_trend": trend_short_near_breakout
+                    and features.last_4h_close < features.prev_4h_close,
                     "pullback": recent_pullback_up,
                     "confirmation_candle": float(current.close) < float(current.open),
                     "momentum_cross": crossed_down,
@@ -258,22 +361,60 @@ class StrategyEngine:
                 volatility_tier=volatility_policy.tier,
                 min_score=88,
             )
-            sol_allowed = self._sol_allowed(symbol, PositionSide.SHORT, regime, opportunity.score, features)
+            sol_allowed = self._sol_allowed(
+                symbol, PositionSide.SHORT, regime, opportunity.score, features
+            )
             return self._diagnostics(
                 "trend_short",
                 [
                     {"code": "trend_short_enabled", "passed": self.enable_trend_short},
-                    {"code": "opportunity_score", "passed": opportunity.allow_trade, "value": opportunity.score},
-                    {"code": "multi_timeframe", "passed": (not volatility_policy.require_multi_timeframe or trend_down_aligned)},
-                    {"code": "near_breakout", "passed": (not volatility_policy.require_near_breakout or trend_short_near_breakout)},
-                    {"code": "one_hour_bearish", "passed": features.ema20_1h <= features.ema60_1h},
-                    {"code": "four_hour_bearish", "passed": features.last_4h_close < features.prev_4h_close},
-                    {"code": "near_4h_low", "passed": features.last_4h_close <= features.range_low_4h * 1.01 and price < features.range_low_4h * 1.003},
+                    {
+                        "code": "opportunity_score",
+                        "passed": opportunity.allow_trade,
+                        "value": opportunity.score,
+                    },
+                    {
+                        "code": "multi_timeframe",
+                        "passed": (
+                            not volatility_policy.require_multi_timeframe
+                            or trend_down_aligned
+                        ),
+                    },
+                    {
+                        "code": "near_breakout",
+                        "passed": (
+                            not volatility_policy.require_near_breakout
+                            or trend_short_near_breakout
+                        ),
+                    },
+                    {
+                        "code": "one_hour_bearish",
+                        "passed": features.ema20_1h <= features.ema60_1h,
+                    },
+                    {
+                        "code": "four_hour_bearish",
+                        "passed": features.last_4h_close < features.prev_4h_close,
+                    },
+                    {
+                        "code": "near_4h_low",
+                        "passed": features.last_4h_close <= features.range_low_4h * 1.01
+                        and price < features.range_low_4h * 1.003,
+                    },
                     {"code": "pullback_up", "passed": recent_pullback_up},
-                    {"code": "bearish_candle", "passed": float(current.close) < float(current.open)},
+                    {
+                        "code": "bearish_candle",
+                        "passed": float(current.close) < float(current.open),
+                    },
                     {"code": "macd_cross_down", "passed": crossed_down},
-                    {"code": "price_below_ema20_5m", "passed": price <= ema_now * 1.002},
-                    {"code": "rsi_34_60", "passed": rsi_quality, "value": round(last_rsi, 2)},
+                    {
+                        "code": "price_below_ema20_5m",
+                        "passed": price <= ema_now * 1.002,
+                    },
+                    {
+                        "code": "rsi_34_60",
+                        "passed": rsi_quality,
+                        "value": round(last_rsi, 2),
+                    },
                     {"code": "sol_filter", "passed": sol_allowed},
                 ],
                 {**metrics, "opportunity_score": opportunity.score},
@@ -320,10 +461,14 @@ class StrategyEngine:
         blockers = [item for item in normalized_requirements if not item["passed"]]
         return {
             "action": action,
-            "summary": "entry_conditions_met" if not blockers else "waiting_for_conditions",
+            "summary": "entry_conditions_met"
+            if not blockers
+            else "waiting_for_conditions",
             "requirements": normalized_requirements,
             "blockers": blockers,
-            "metrics": {str(key): self._json_value(value) for key, value in metrics.items()},
+            "metrics": {
+                str(key): self._json_value(value) for key, value in metrics.items()
+            },
         }
 
     def _shock_trend_diagnostics(
@@ -371,7 +516,8 @@ class StrategyEngine:
                     "confirmation_candle": float(current.close) > float(current.open),
                     "momentum_cross": crossed_up,
                     "momentum_positive": long_momentum_positive,
-                    "price_location": price >= ema_now * 0.998 and price >= features.ema20_1h * 0.997,
+                    "price_location": price >= ema_now * 0.998
+                    and price >= features.ema20_1h * 0.997,
                     "ema_slope": ema_now >= ema_prev,
                     "rsi_quality": rsi_quality,
                     "not_chasing": last_rsi <= 68,
@@ -388,23 +534,56 @@ class StrategyEngine:
                 volatility_tier=volatility_policy.tier,
                 min_score=88,
             )
-            sol_allowed = self._sol_allowed(symbol, PositionSide.LONG, regime, opportunity.score, features)
+            sol_allowed = self._sol_allowed(
+                symbol, PositionSide.LONG, regime, opportunity.score, features
+            )
             return self._diagnostics(
                 "shock_trend_up",
                 [
-                    {"code": "opportunity_score", "passed": opportunity.allow_trade, "value": opportunity.score},
+                    {
+                        "code": "opportunity_score",
+                        "passed": opportunity.allow_trade,
+                        "value": opportunity.score,
+                    },
                     {"code": "multi_timeframe", "passed": trend_up_aligned},
-                    {"code": "one_hour_bullish", "passed": features.ema20_1h >= features.ema60_1h},
-                    {"code": "four_hour_bullish", "passed": features.last_4h_close > features.prev_4h_close},
+                    {
+                        "code": "one_hour_bullish",
+                        "passed": features.ema20_1h >= features.ema60_1h,
+                    },
+                    {
+                        "code": "four_hour_bullish",
+                        "passed": features.last_4h_close > features.prev_4h_close,
+                    },
                     {"code": "pullback_down", "passed": recent_pullback_down},
-                    {"code": "bullish_candle", "passed": float(current.close) > float(current.open)},
+                    {
+                        "code": "bullish_candle",
+                        "passed": float(current.close) > float(current.open),
+                    },
                     {"code": "macd_cross_up", "passed": crossed_up},
-                    {"code": "price_above_ema20_5m", "passed": price >= ema_now * 0.998},
-                    {"code": "price_above_ema20_1h", "passed": price >= features.ema20_1h * 0.997},
+                    {
+                        "code": "price_above_ema20_5m",
+                        "passed": price >= ema_now * 0.998,
+                    },
+                    {
+                        "code": "price_above_ema20_1h",
+                        "passed": price >= features.ema20_1h * 0.997,
+                    },
                     {"code": "ema_slope_up", "passed": ema_now >= ema_prev},
-                    {"code": "rsi_42_66", "passed": rsi_quality, "value": round(last_rsi, 2)},
-                    {"code": "range_position_not_chasing", "passed": features.close_position_72h <= 0.92, "value": round(features.close_position_72h, 4)},
-                    {"code": "late_entry_risk", "passed": True, "value": "HIGH" if not late_entry_ok else "NORMAL"},
+                    {
+                        "code": "rsi_42_66",
+                        "passed": rsi_quality,
+                        "value": round(last_rsi, 2),
+                    },
+                    {
+                        "code": "range_position_not_chasing",
+                        "passed": features.close_position_72h <= 0.92,
+                        "value": round(features.close_position_72h, 4),
+                    },
+                    {
+                        "code": "late_entry_risk",
+                        "passed": True,
+                        "value": "HIGH" if not late_entry_ok else "NORMAL",
+                    },
                     {"code": "sol_filter", "passed": sol_allowed},
                 ],
                 {
@@ -430,7 +609,10 @@ class StrategyEngine:
                 features.ret_72h,
                 recent_5h_position,
             )
-            wide_range_short_risk = features.range_72h >= 0.10 or volatility_policy.tier in {"HIGH", "EXTREME"}
+            wide_range_short_risk = (
+                features.range_72h >= 0.10
+                or volatility_policy.tier in {"HIGH", "EXTREME"}
+            )
             range_floor = 0.18 if wide_range_short_risk else 0.08
             range_ok = features.close_position_72h >= range_floor
             momentum_ok = (
@@ -439,12 +621,11 @@ class StrategyEngine:
                 else True
             )
             low_range_short = features.close_position_72h < 0.35
-            rebound_ready = (
-                not low_range_short
-                or (
-                    last_rsi >= 45
-                    and price >= ema_now * 0.998
-                    and self._timeframe_aligned(self._aggregate_bars(df, 3), PositionSide.SHORT, min_bars=12)
+            rebound_ready = not low_range_short or (
+                last_rsi >= 45
+                and price >= ema_now * 0.998
+                and self._timeframe_aligned(
+                    self._aggregate_bars(df, 3), PositionSide.SHORT, min_bars=12
                 )
             )
             opportunity = score_opportunity(
@@ -460,7 +641,8 @@ class StrategyEngine:
                     "confirmation_candle": float(current.close) < float(current.open),
                     "momentum_cross": crossed_down,
                     "momentum_positive": short_momentum_positive,
-                    "price_location": price <= ema_now * 1.002 and price <= features.ema20_1h * 1.003,
+                    "price_location": price <= ema_now * 1.002
+                    and price <= features.ema20_1h * 1.003,
                     "ema_slope": ema_now <= ema_prev,
                     "rsi_quality": rsi_quality,
                     "not_chasing": last_rsi >= 24,
@@ -472,31 +654,73 @@ class StrategyEngine:
                     and not (features.ret_72h < 0 and features.ret_24h < 0.01),
                     "rsi_extreme": last_rsi < 20,
                     "counter_ema": features.ema20_1h > features.ema60_1h,
-                    "overextended": features.close_position_72h < (0.18 if wide_range_short_risk else 0.04),
+                    "overextended": features.close_position_72h
+                    < (0.18 if wide_range_short_risk else 0.04),
                 },
                 reward_risk=self.trend_reward_risk,
                 volatility_tier=volatility_policy.tier,
                 min_score=96,
             )
-            sol_allowed = self._sol_allowed(symbol, PositionSide.SHORT, regime, opportunity.score, features)
+            sol_allowed = self._sol_allowed(
+                symbol, PositionSide.SHORT, regime, opportunity.score, features
+            )
             return self._diagnostics(
                 "shock_trend_down",
                 [
-                    {"code": "opportunity_score", "passed": opportunity.allow_trade, "value": opportunity.score},
+                    {
+                        "code": "opportunity_score",
+                        "passed": opportunity.allow_trade,
+                        "value": opportunity.score,
+                    },
                     {"code": "multi_timeframe", "passed": trend_down_aligned},
-                    {"code": "one_hour_bearish", "passed": features.ema20_1h <= features.ema60_1h},
-                    {"code": "price_below_ema20_1h", "passed": price <= features.ema20_1h * 1.003},
-                    {"code": "four_hour_bearish", "passed": features.last_4h_close < features.prev_4h_close},
+                    {
+                        "code": "one_hour_bearish",
+                        "passed": features.ema20_1h <= features.ema60_1h,
+                    },
+                    {
+                        "code": "price_below_ema20_1h",
+                        "passed": price <= features.ema20_1h * 1.003,
+                    },
+                    {
+                        "code": "four_hour_bearish",
+                        "passed": features.last_4h_close < features.prev_4h_close,
+                    },
                     {"code": "pullback_up", "passed": recent_pullback_up},
-                    {"code": "bearish_candle", "passed": float(current.close) < float(current.open)},
+                    {
+                        "code": "bearish_candle",
+                        "passed": float(current.close) < float(current.open),
+                    },
                     {"code": "macd_cross_down", "passed": crossed_down},
-                    {"code": "price_below_ema20_5m", "passed": price <= ema_now * 1.002},
+                    {
+                        "code": "price_below_ema20_5m",
+                        "passed": price <= ema_now * 1.002,
+                    },
                     {"code": "ema_slope_down", "passed": ema_now <= ema_prev},
-                    {"code": "rsi_35_58", "passed": rsi_quality, "value": round(last_rsi, 2)},
-                    {"code": "range_position_short_room", "passed": range_ok, "value": round(features.close_position_72h, 4)},
-                    {"code": "down_momentum", "passed": momentum_ok, "value": round(features.ret_24h, 5)},
-                    {"code": "low_range_rebound", "passed": rebound_ready, "value": round(features.close_position_72h, 4)},
-                    {"code": "late_entry_risk", "passed": True, "value": "HIGH" if not late_entry_ok else "NORMAL"},
+                    {
+                        "code": "rsi_35_58",
+                        "passed": rsi_quality,
+                        "value": round(last_rsi, 2),
+                    },
+                    {
+                        "code": "range_position_short_room",
+                        "passed": range_ok,
+                        "value": round(features.close_position_72h, 4),
+                    },
+                    {
+                        "code": "down_momentum",
+                        "passed": momentum_ok,
+                        "value": round(features.ret_24h, 5),
+                    },
+                    {
+                        "code": "low_range_rebound",
+                        "passed": rebound_ready,
+                        "value": round(features.close_position_72h, 4),
+                    },
+                    {
+                        "code": "late_entry_risk",
+                        "passed": True,
+                        "value": "HIGH" if not late_entry_ok else "NORMAL",
+                    },
                     {"code": "sol_filter", "passed": sol_allowed},
                 ],
                 {
@@ -639,13 +863,24 @@ class StrategyEngine:
         if price <= 0 or candle_range <= 0:
             return None
 
-        previous = df.iloc[-50:-2] if self.liquidity_sweep_require_confirmation else df.iloc[-49:-1]
+        previous = (
+            df.iloc[-50:-2]
+            if self.liquidity_sweep_require_confirmation
+            else df.iloc[-49:-1]
+        )
         if len(previous) < 48:
             return None
         recent_low = float(previous.low.min())
         recent_high = float(previous.high.max())
-        atr_5m = float(atr(df.high, df.low, df.close).iloc[setup_index]) or features.atr_1h / 12
-        avg_volume = float(df.volume.iloc[-22:-2].mean()) if self.liquidity_sweep_require_confirmation else float(df.volume.iloc[-21:-1].mean())
+        atr_5m = (
+            float(atr(df.high, df.low, df.close).iloc[setup_index])
+            or features.atr_1h / 12
+        )
+        avg_volume = (
+            float(df.volume.iloc[-22:-2].mean())
+            if self.liquidity_sweep_require_confirmation
+            else float(df.volume.iloc[-21:-1].mean())
+        )
         volume_spike = avg_volume > 0 and float(setup.volume) >= 1.8 * avg_volume
         lower_wick = min(float(setup.open), setup_close) - float(setup.low)
         upper_wick = float(setup.high) - max(float(setup.open), setup_close)
@@ -657,29 +892,49 @@ class StrategyEngine:
         macd_line, signal_line, _ = macd(df.close)
         long_momentum_positive = bool(macd_line.iloc[-1] >= signal_line.iloc[-1])
         short_momentum_positive = bool(macd_line.iloc[-1] <= signal_line.iloc[-1])
-        prior_source = df.iloc[:-2] if self.liquidity_sweep_require_confirmation else df.iloc[:-1]
+        prior_source = (
+            df.iloc[:-2] if self.liquidity_sweep_require_confirmation else df.iloc[:-1]
+        )
         prior_15m = self._aggregate_bars(prior_source, 3).tail(8)
-        prior_return = (float(previous.close.iloc[-1]) - float(previous.open.iloc[0])) / float(previous.open.iloc[0])
+        prior_return = (
+            float(previous.close.iloc[-1]) - float(previous.open.iloc[0])
+        ) / float(previous.open.iloc[0])
         down_context = (
-            len(prior_15m) >= 6
-            and int((prior_15m.close < prior_15m.open).sum()) >= 5
-            and prior_return <= -0.006
-        ) or features.ret_24h <= -0.015 or regime in {Regime.TREND_SHORT, Regime.SHOCK_TREND_DOWN}
+            (
+                len(prior_15m) >= 6
+                and int((prior_15m.close < prior_15m.open).sum()) >= 5
+                and prior_return <= -0.006
+            )
+            or features.ret_24h <= -0.015
+            or regime in {Regime.TREND_SHORT, Regime.SHOCK_TREND_DOWN}
+        )
         up_context = (
-            len(prior_15m) >= 6
-            and int((prior_15m.close > prior_15m.open).sum()) >= 5
-            and prior_return >= 0.006
-        ) or features.ret_24h >= 0.015 or regime in {Regime.TREND_LONG, Regime.SHOCK_TREND_UP}
+            (
+                len(prior_15m) >= 6
+                and int((prior_15m.close > prior_15m.open).sum()) >= 5
+                and prior_return >= 0.006
+            )
+            or features.ret_24h >= 0.015
+            or regime in {Regime.TREND_LONG, Regime.SHOCK_TREND_UP}
+        )
         volatility_policy = self._volatility_policy(price, features, df)
 
         swept_low = float(setup.low) < recent_low * 0.9995
-        setup_reclaimed_low = setup_close > recent_low and setup_close > float(setup.open) and setup_close_position >= 0.62
+        setup_reclaimed_low = (
+            setup_close > recent_low
+            and setup_close > float(setup.open)
+            and setup_close_position >= 0.62
+        )
         confirmed_low = (
-            price >= setup_close
-            and price > recent_low
-            and float(current.low) > float(setup.low)
-            and float(current.close) >= float(current.open) * 0.999
-        ) if self.liquidity_sweep_require_confirmation else True
+            (
+                price >= setup_close
+                and price > recent_low
+                and float(current.low) > float(setup.low)
+                and float(current.close) >= float(current.open) * 0.999
+            )
+            if self.liquidity_sweep_require_confirmation
+            else True
+        )
         reclaimed_low = setup_reclaimed_low and confirmed_low
         lower_pin = lower_wick >= 2.2 * body and lower_wick / candle_range >= 0.52
         long_rsi_ok = 24 <= last_rsi <= 52
@@ -717,7 +972,9 @@ class StrategyEngine:
         ):
             raw_stop = float(setup.low) - max(0.20 * atr_5m, price * 0.0008)
             if price - raw_stop <= price * self.max_stop_loss_pct:
-                stop = self._cap_stop(price, raw_stop, PositionSide.LONG, volatility_policy)
+                stop = self._cap_stop(
+                    price, raw_stop, PositionSide.LONG, volatility_policy
+                )
                 return self._entry_signal(
                     symbol,
                     Side.BUY,
@@ -735,23 +992,38 @@ class StrategyEngine:
                         "breakeven_activate_r": 0.50,
                         "breakeven_buffer_pct": 0.00025,
                         **opportunity_metadata(long_score),
-                        "risk_multiplier": max(self.liquidity_sweep_risk_multiplier, long_score.risk_multiplier),
+                        "risk_multiplier": max(
+                            self.liquidity_sweep_risk_multiplier,
+                            long_score.risk_multiplier,
+                        ),
                         "volatility_tier": volatility_policy.tier,
                         "sweep_low": round(float(setup.low), 8),
                         "reclaim_level": round(recent_low, 8),
-                        "volume_ratio": round(float(setup.volume) / avg_volume, 4) if avg_volume else 0.0,
-                        "confirmation_mode": "next_5m" if self.liquidity_sweep_require_confirmation else "immediate",
+                        "volume_ratio": round(float(setup.volume) / avg_volume, 4)
+                        if avg_volume
+                        else 0.0,
+                        "confirmation_mode": "next_5m"
+                        if self.liquidity_sweep_require_confirmation
+                        else "immediate",
                     },
                 )
 
         swept_high = float(setup.high) > recent_high * 1.0005
-        setup_reclaimed_high = setup_close < recent_high and setup_close < float(setup.open) and setup_close_position <= 0.38
+        setup_reclaimed_high = (
+            setup_close < recent_high
+            and setup_close < float(setup.open)
+            and setup_close_position <= 0.38
+        )
         confirmed_high = (
-            price <= setup_close
-            and price < recent_high
-            and float(current.high) < float(setup.high)
-            and float(current.close) <= float(current.open) * 1.001
-        ) if self.liquidity_sweep_require_confirmation else True
+            (
+                price <= setup_close
+                and price < recent_high
+                and float(current.high) < float(setup.high)
+                and float(current.close) <= float(current.open) * 1.001
+            )
+            if self.liquidity_sweep_require_confirmation
+            else True
+        )
         reclaimed_high = setup_reclaimed_high and confirmed_high
         upper_pin = upper_wick >= 2.2 * body and upper_wick / candle_range >= 0.52
         short_rsi_ok = 48 <= last_rsi <= 76
@@ -789,7 +1061,9 @@ class StrategyEngine:
         ):
             raw_stop = float(setup.high) + max(0.20 * atr_5m, price * 0.0008)
             if raw_stop - price <= price * self.max_stop_loss_pct:
-                stop = self._cap_stop(price, raw_stop, PositionSide.SHORT, volatility_policy)
+                stop = self._cap_stop(
+                    price, raw_stop, PositionSide.SHORT, volatility_policy
+                )
                 return self._entry_signal(
                     symbol,
                     Side.SELL,
@@ -807,12 +1081,19 @@ class StrategyEngine:
                         "breakeven_activate_r": 0.50,
                         "breakeven_buffer_pct": 0.00025,
                         **opportunity_metadata(short_score),
-                        "risk_multiplier": max(self.liquidity_sweep_risk_multiplier, short_score.risk_multiplier),
+                        "risk_multiplier": max(
+                            self.liquidity_sweep_risk_multiplier,
+                            short_score.risk_multiplier,
+                        ),
                         "volatility_tier": volatility_policy.tier,
                         "sweep_high": round(float(setup.high), 8),
                         "reclaim_level": round(recent_high, 8),
-                        "volume_ratio": round(float(setup.volume) / avg_volume, 4) if avg_volume else 0.0,
-                        "confirmation_mode": "next_5m" if self.liquidity_sweep_require_confirmation else "immediate",
+                        "volume_ratio": round(float(setup.volume) / avg_volume, 4)
+                        if avg_volume
+                        else 0.0,
+                        "confirmation_mode": "next_5m"
+                        if self.liquidity_sweep_require_confirmation
+                        else "immediate",
                     },
                 )
         return None
@@ -846,10 +1127,14 @@ class StrategyEngine:
         trend_down_aligned = self._multi_timeframe_aligned(df, PositionSide.SHORT)
         volatility_policy = self._volatility_policy(price, features, df)
         trend_long_near_breakout = (
-            price >= features.range_high_4h - volatility_policy.breakout_retrace_atr * features.atr_1h
+            price
+            >= features.range_high_4h
+            - volatility_policy.breakout_retrace_atr * features.atr_1h
         )
         trend_short_near_breakout = (
-            price <= features.range_low_4h + volatility_policy.breakout_retrace_atr * features.atr_1h
+            price
+            <= features.range_low_4h
+            + volatility_policy.breakout_retrace_atr * features.atr_1h
         )
         long_momentum_positive = bool(macd_line.iloc[-1] >= signal_line.iloc[-1])
         short_momentum_positive = bool(macd_line.iloc[-1] <= signal_line.iloc[-1])
@@ -866,7 +1151,8 @@ class StrategyEngine:
                     checks={
                         "regime_direction": True,
                         "pullback": price < midpoint,
-                        "confirmation_candle": float(current.close) > float(current.open),
+                        "confirmation_candle": float(current.close)
+                        > float(current.open),
                         "momentum_cross": crossed_up,
                         "momentum_positive": long_momentum_positive,
                         "price_location": price > float(previous.low),
@@ -874,7 +1160,9 @@ class StrategyEngine:
                         "not_chasing": True,
                         "range_position": price > features.range_low_4h,
                     },
-                    reward_risk=abs(take_profit - price) / abs(price - stop) if price != stop else 0.0,
+                    reward_risk=abs(take_profit - price) / abs(price - stop)
+                    if price != stop
+                    else 0.0,
                     volatility_tier=volatility_policy.tier,
                 )
                 return self._entry_signal(
@@ -888,7 +1176,10 @@ class StrategyEngine:
                     "user_4h_shock_long_reversal",
                     {
                         **opportunity_metadata(opportunity),
-                        "risk_multiplier": max(self.defensive_risk_multiplier * 0.5, opportunity.risk_multiplier),
+                        "risk_multiplier": max(
+                            self.defensive_risk_multiplier * 0.5,
+                            opportunity.risk_multiplier,
+                        ),
                     },
                 )
             if price > midpoint and crossed_down:
@@ -901,7 +1192,8 @@ class StrategyEngine:
                     checks={
                         "regime_direction": True,
                         "pullback": price > midpoint,
-                        "confirmation_candle": float(current.close) < float(current.open),
+                        "confirmation_candle": float(current.close)
+                        < float(current.open),
                         "momentum_cross": crossed_down,
                         "momentum_positive": short_momentum_positive,
                         "price_location": price < float(previous.high),
@@ -909,7 +1201,9 @@ class StrategyEngine:
                         "not_chasing": True,
                         "range_position": price < features.range_high_4h,
                     },
-                    reward_risk=abs(price - take_profit) / abs(stop - price) if price != stop else 0.0,
+                    reward_risk=abs(price - take_profit) / abs(stop - price)
+                    if price != stop
+                    else 0.0,
                     volatility_tier=volatility_policy.tier,
                 )
                 return self._entry_signal(
@@ -923,7 +1217,10 @@ class StrategyEngine:
                     "user_4h_shock_short_reversal",
                     {
                         **opportunity_metadata(opportunity),
-                        "risk_multiplier": max(self.defensive_risk_multiplier * 0.5, opportunity.risk_multiplier),
+                        "risk_multiplier": max(
+                            self.defensive_risk_multiplier * 0.5,
+                            opportunity.risk_multiplier,
+                        ),
                     },
                 )
 
@@ -958,18 +1255,38 @@ class StrategyEngine:
             regime == Regime.TREND_LONG
             and trend_long_opportunity.allow_trade
             and (not volatility_policy.require_multi_timeframe or trend_up_aligned)
-            and (not volatility_policy.require_near_breakout or trend_long_near_breakout)
+            and (
+                not volatility_policy.require_near_breakout or trend_long_near_breakout
+            )
             and recent_pullback_down
             and float(current.close) > float(current.open)
             and price >= ema_now * 0.998
             and trend_long_rsi_quality
             and crossed_up
-            and self._sol_allowed(symbol, PositionSide.LONG, regime, trend_long_opportunity.score, features)
+            and self._sol_allowed(
+                symbol,
+                PositionSide.LONG,
+                regime,
+                trend_long_opportunity.score,
+                features,
+            )
         ):
-            raw_stop = self._trend_stop(price, features.previous_1h_low, features.atr_1h, PositionSide.LONG, volatility_policy)
+            raw_stop = self._trend_stop(
+                price,
+                features.previous_1h_low,
+                features.atr_1h,
+                PositionSide.LONG,
+                volatility_policy,
+            )
             stop = self._cap_stop(price, raw_stop, PositionSide.LONG, volatility_policy)
             stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
-            reward_risk = self.trend_reward_risk + (0.4 if trend_long_opportunity.score >= 88 else 0.2 if trend_long_opportunity.score >= 78 else 0.0)
+            reward_risk = self.trend_reward_risk + (
+                0.4
+                if trend_long_opportunity.score >= 88
+                else 0.2
+                if trend_long_opportunity.score >= 78
+                else 0.0
+            )
             return self._entry_signal(
                 symbol,
                 Side.BUY,
@@ -984,7 +1301,8 @@ class StrategyEngine:
                     "min_trailing_activate_r": self.min_trailing_activate_r,
                     **opportunity_metadata(trend_long_opportunity),
                     "risk_multiplier": max(
-                        self.trend_long_risk_multiplier * volatility_policy.risk_multiplier,
+                        self.trend_long_risk_multiplier
+                        * volatility_policy.risk_multiplier,
                         trend_long_opportunity.risk_multiplier,
                     ),
                     "volatility_tier": volatility_policy.tier,
@@ -1000,7 +1318,8 @@ class StrategyEngine:
                 "regime_direction": regime == Regime.TREND_SHORT,
                 "multi_timeframe": trend_down_aligned,
                 "one_hour_trend": features.ema20_1h <= features.ema60_1h,
-                "four_hour_trend": trend_short_near_breakout and features.last_4h_close < features.prev_4h_close,
+                "four_hour_trend": trend_short_near_breakout
+                and features.last_4h_close < features.prev_4h_close,
                 "pullback": recent_pullback_up,
                 "confirmation_candle": float(current.close) < float(current.open),
                 "momentum_cross": crossed_down,
@@ -1024,7 +1343,9 @@ class StrategyEngine:
             and regime == Regime.TREND_SHORT
             and trend_short_opportunity.allow_trade
             and (not volatility_policy.require_multi_timeframe or trend_down_aligned)
-            and (not volatility_policy.require_near_breakout or trend_short_near_breakout)
+            and (
+                not volatility_policy.require_near_breakout or trend_short_near_breakout
+            )
             and features.ema20_1h <= features.ema60_1h
             and features.last_4h_close < features.prev_4h_close
             and features.last_4h_close <= features.range_low_4h * 1.01
@@ -1039,12 +1360,32 @@ class StrategyEngine:
                 and features.ret_24h > -0.025
                 and features.ret_72h > -0.035
             )
-            and self._sol_allowed(symbol, PositionSide.SHORT, regime, trend_short_opportunity.score, features)
+            and self._sol_allowed(
+                symbol,
+                PositionSide.SHORT,
+                regime,
+                trend_short_opportunity.score,
+                features,
+            )
         ):
-            raw_stop = self._trend_stop(price, features.previous_1h_high, features.atr_1h, PositionSide.SHORT, volatility_policy)
-            stop = self._cap_stop(price, raw_stop, PositionSide.SHORT, volatility_policy)
+            raw_stop = self._trend_stop(
+                price,
+                features.previous_1h_high,
+                features.atr_1h,
+                PositionSide.SHORT,
+                volatility_policy,
+            )
+            stop = self._cap_stop(
+                price, raw_stop, PositionSide.SHORT, volatility_policy
+            )
             stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
-            reward_risk = self.trend_reward_risk + (0.4 if trend_short_opportunity.score >= 88 else 0.2 if trend_short_opportunity.score >= 78 else 0.0)
+            reward_risk = self.trend_reward_risk + (
+                0.4
+                if trend_short_opportunity.score >= 88
+                else 0.2
+                if trend_short_opportunity.score >= 78
+                else 0.0
+            )
             return self._entry_signal(
                 symbol,
                 Side.SELL,
@@ -1059,7 +1400,8 @@ class StrategyEngine:
                     "min_trailing_activate_r": self.min_trailing_activate_r,
                     **opportunity_metadata(trend_short_opportunity),
                     "risk_multiplier": max(
-                        self.trend_short_risk_multiplier * volatility_policy.risk_multiplier,
+                        self.trend_short_risk_multiplier
+                        * volatility_policy.risk_multiplier,
                         trend_short_opportunity.risk_multiplier,
                     ),
                     "volatility_tier": volatility_policy.tier,
@@ -1123,8 +1465,12 @@ class StrategyEngine:
         quiet_weak_up_drift = features.range_72h < 0.06 and features.ret_24h < 0.008
         local_top_without_impulse = recent_5h_position >= 0.94 and quiet_weak_up_drift
         mixed_uptrend = features.ret_24h * features.ret_72h < 0
-        long_scout_weak_bullish_context = features.ret_24h <= 0 and features.ret_72h > 0.01
-        late_range_long_scout = features.close_position_72h >= 0.70 and features.ret_72h > 0.008
+        long_scout_weak_bullish_context = (
+            features.ret_24h <= 0 and features.ret_72h > 0.01
+        )
+        late_range_long_scout = (
+            features.close_position_72h >= 0.70 and features.ret_72h > 0.008
+        )
         long_scout_weak_followthrough = (
             features.close_position_72h >= 0.60
             and features.ret_24h >= 0.008
@@ -1165,7 +1511,8 @@ class StrategyEngine:
                 "confirmation_candle": float(current.close) > float(current.open),
                 "momentum_cross": crossed_up,
                 "momentum_positive": long_momentum_positive,
-                "price_location": price >= ema_now * 0.998 and price >= features.ema20_1h * 0.997,
+                "price_location": price >= ema_now * 0.998
+                and price >= features.ema20_1h * 0.997,
                 "ema_slope": ema_now >= ema_prev,
                 "rsi_quality": shock_trend_up_rsi_quality,
                 "not_chasing": last_rsi <= 68 and not local_top_without_impulse,
@@ -1206,12 +1553,22 @@ class StrategyEngine:
                 and features.ret_24h < 0.01
                 and features.ret_72h < 0.005
             )
-            and self._sol_allowed(symbol, PositionSide.LONG, regime, shock_trend_up_opportunity.score, features)
+            and self._sol_allowed(
+                symbol,
+                PositionSide.LONG,
+                regime,
+                shock_trend_up_opportunity.score,
+                features,
+            )
         ):
             stop = self._cap_stop(price, features.current_4h_low, PositionSide.LONG)
             stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
             reward_risk = self.trend_reward_risk + (
-                0.4 if shock_trend_up_opportunity.score >= 88 else 0.2 if shock_trend_up_opportunity.score >= 78 else 0.0
+                0.4
+                if shock_trend_up_opportunity.score >= 88
+                else 0.2
+                if shock_trend_up_opportunity.score >= 78
+                else 0.0
             )
             return self._entry_signal(
                 symbol,
@@ -1239,7 +1596,9 @@ class StrategyEngine:
                     "ret_72h": round(features.ret_72h, 6),
                     "range_72h": round(features.range_72h, 6),
                     "recent_5h_position": round(recent_5h_position, 4),
-                    "late_entry_risk": "HIGH" if not shock_trend_up_late_entry_ok else "NORMAL",
+                    "late_entry_risk": "HIGH"
+                    if not shock_trend_up_late_entry_ok
+                    else "NORMAL",
                     "entry_stage": "confirmed",
                 },
             )
@@ -1292,23 +1651,35 @@ class StrategyEngine:
                     "opportunity_grade": "C",
                     "opportunity_confidence": 0.72,
                     "opportunity_reasons": "scout_plan,pullback,one_hour_trend,four_hour_trend",
-                    "risk_multiplier": self.shock_trend_scout_risk_multiplier if self.enable_shock_trend_scout else 0.65,
+                    "risk_multiplier": self.shock_trend_scout_risk_multiplier
+                    if self.enable_shock_trend_scout
+                    else 0.65,
                     "volatility_tier": volatility_policy.tier,
-                    "entry_stage": "scout" if self.enable_shock_trend_scout else "adaptive_scout",
+                    "entry_stage": "scout"
+                    if self.enable_shock_trend_scout
+                    else "adaptive_scout",
                     "close_position_72h": round(features.close_position_72h, 4),
                     "ret_24h": round(features.ret_24h, 6),
                     "ret_72h": round(features.ret_72h, 6),
                     "range_72h": round(features.range_72h, 6),
                     "recent_5h_position": round(recent_5h_position, 4),
-                    "late_entry_risk": "HIGH" if not shock_trend_up_late_entry_ok else "NORMAL",
+                    "late_entry_risk": "HIGH"
+                    if not shock_trend_up_late_entry_ok
+                    else "NORMAL",
                 },
             )
 
         shock_trend_down_rsi_quality = 35 <= last_rsi <= 58
-        wide_range_short_risk = features.range_72h >= 0.10 or volatility_policy.tier in {"HIGH", "EXTREME"}
+        wide_range_short_risk = (
+            features.range_72h >= 0.10 or volatility_policy.tier in {"HIGH", "EXTREME"}
+        )
         shock_trend_down_range_floor = 0.18 if wide_range_short_risk else 0.08
-        shock_trend_down_range_ok = features.close_position_72h >= shock_trend_down_range_floor
-        shock_trend_down_recent_5h_position = self._recent_range_position(df, price, bars=60)
+        shock_trend_down_range_ok = (
+            features.close_position_72h >= shock_trend_down_range_floor
+        )
+        shock_trend_down_recent_5h_position = self._recent_range_position(
+            df, price, bars=60
+        )
         shock_trend_down_late_entry_ok = self._late_shock_trend_entry_ok(
             PositionSide.SHORT,
             features.close_position_72h,
@@ -1321,7 +1692,9 @@ class StrategyEngine:
             if wide_range_short_risk
             else True
         )
-        shock_trend_down_72h_not_bullish_pullback = not (features.ret_72h > 0.003 and features.ret_24h < 0)
+        shock_trend_down_72h_not_bullish_pullback = not (
+            features.ret_72h > 0.003 and features.ret_24h < 0
+        )
         shock_trend_down_mixed_fade = (
             features.ret_72h > 0
             and features.ret_24h > -0.006
@@ -1343,8 +1716,7 @@ class StrategyEngine:
             and -0.018 < features.ret_24h < 0
         )
         deep_scout_short_reversal_risk = (
-            features.close_position_72h < 0.20
-            and features.ret_72h < -0.03
+            features.close_position_72h < 0.20 and features.ret_72h < -0.03
         )
         midrange_scout_short_reversal_risk = (
             0.20 <= features.close_position_72h <= 0.35
@@ -1357,12 +1729,11 @@ class StrategyEngine:
             and features.ret_72h <= -0.05
         )
         low_range_short = features.close_position_72h < 0.35
-        shock_trend_down_rebound_ready = (
-            not low_range_short
-            or (
-                last_rsi >= 45
-                and price >= ema_now * 0.998
-                and self._timeframe_aligned(self._aggregate_bars(df, 3), PositionSide.SHORT, min_bars=12)
+        shock_trend_down_rebound_ready = not low_range_short or (
+            last_rsi >= 45
+            and price >= ema_now * 0.998
+            and self._timeframe_aligned(
+                self._aggregate_bars(df, 3), PositionSide.SHORT, min_bars=12
             )
         )
         shock_trend_down_risk_throttle = 1.0
@@ -1395,7 +1766,8 @@ class StrategyEngine:
                 "confirmation_candle": float(current.close) < float(current.open),
                 "momentum_cross": crossed_down,
                 "momentum_positive": short_momentum_positive,
-                "price_location": price <= ema_now * 1.002 and price <= features.ema20_1h * 1.003,
+                "price_location": price <= ema_now * 1.002
+                and price <= features.ema20_1h * 1.003,
                 "ema_slope": ema_now <= ema_prev,
                 "rsi_quality": shock_trend_down_rsi_quality,
                 "not_chasing": last_rsi >= 24,
@@ -1407,7 +1779,8 @@ class StrategyEngine:
                 and not (features.ret_72h < 0 and features.ret_24h < 0.01),
                 "rsi_extreme": last_rsi < 20,
                 "counter_ema": features.ema20_1h > features.ema60_1h,
-                "overextended": features.close_position_72h < (0.18 if wide_range_short_risk else 0.04),
+                "overextended": features.close_position_72h
+                < (0.18 if wide_range_short_risk else 0.04),
             },
             reward_risk=self.trend_reward_risk,
             volatility_tier=volatility_policy.tier,
@@ -1440,7 +1813,13 @@ class StrategyEngine:
                 and features.close_position_72h <= 0.18
                 and features.ret_24h > -0.015
             )
-            and self._sol_allowed(symbol, PositionSide.SHORT, regime, shock_trend_down_opportunity.score, features)
+            and self._sol_allowed(
+                symbol,
+                PositionSide.SHORT,
+                regime,
+                shock_trend_down_opportunity.score,
+                features,
+            )
         ):
             stop = self._cap_stop(price, features.current_4h_high, PositionSide.SHORT)
             stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
@@ -1462,7 +1841,9 @@ class StrategyEngine:
                 "user_4h_shock_trend_down_pullback_confirmed",
                 {
                     "trailing_gap_pct": self.trailing_gap_pct,
-                    "min_trailing_activate_r": max(self.min_trailing_activate_r, 0.85 if low_range_short else 1.2),
+                    "min_trailing_activate_r": max(
+                        self.min_trailing_activate_r, 0.85 if low_range_short else 1.2
+                    ),
                     "breakeven_activate_r": 0.65 if low_range_short else 0.85,
                     "breakeven_buffer_pct": 0.0003,
                     "risk_throttle": shock_trend_down_risk_throttle,
@@ -1475,7 +1856,9 @@ class StrategyEngine:
                     "close_position_72h": round(features.close_position_72h, 4),
                     "ret_24h": round(features.ret_24h, 6),
                     "ret_72h": round(features.ret_72h, 6),
-                    "late_entry_risk": "HIGH" if not shock_trend_down_late_entry_ok else "NORMAL",
+                    "late_entry_risk": "HIGH"
+                    if not shock_trend_down_late_entry_ok
+                    else "NORMAL",
                     "recent_5h_position": round(shock_trend_down_recent_5h_position, 4),
                     "entry_stage": "confirmed",
                 },
@@ -1525,17 +1908,25 @@ class StrategyEngine:
                     "opportunity_grade": "C",
                     "opportunity_confidence": 0.72,
                     "opportunity_reasons": "scout_plan,pullback,one_hour_trend,four_hour_trend",
-                    "risk_multiplier": self.shock_trend_scout_risk_multiplier if self.enable_shock_trend_scout else 0.65,
+                    "risk_multiplier": self.shock_trend_scout_risk_multiplier
+                    if self.enable_shock_trend_scout
+                    else 0.65,
                     "volatility_tier": volatility_policy.tier,
-                    "entry_stage": "scout" if self.enable_shock_trend_scout else "adaptive_scout",
+                    "entry_stage": "scout"
+                    if self.enable_shock_trend_scout
+                    else "adaptive_scout",
                     "close_position_72h": round(features.close_position_72h, 4),
                     "ret_24h": round(features.ret_24h, 6),
                     "ret_72h": round(features.ret_72h, 6),
-                    "late_entry_risk": "HIGH" if not shock_trend_down_late_entry_ok else "NORMAL",
+                    "late_entry_risk": "HIGH"
+                    if not shock_trend_down_late_entry_ok
+                    else "NORMAL",
                     "recent_5h_position": round(shock_trend_down_recent_5h_position, 4),
                 },
             )
-        if context.get("adaptive_continuation_short") and self._down_continuation_short_ready(
+        if context.get(
+            "adaptive_continuation_short"
+        ) and self._down_continuation_short_ready(
             symbol=symbol,
             regime=regime,
             features=features,
@@ -1569,7 +1960,9 @@ class StrategyEngine:
                     "opportunity_confidence": 0.76,
                     "opportunity_reasons": "down_continuation,one_hour_trend,multi_timeframe,lower_low,not_chasing",
                     "risk_multiplier": 0.62,
-                    "risk_throttle": 0.75 if features.ret_24h <= -0.02 or features.range_24h >= 0.04 else 0.85,
+                    "risk_throttle": 0.75
+                    if features.ret_24h <= -0.02 or features.range_24h >= 0.04
+                    else 0.85,
                     "volatility_tier": volatility_policy.tier,
                     "entry_stage": "continuation",
                     "close_position_72h": round(features.close_position_72h, 4),
@@ -1605,7 +1998,10 @@ class StrategyEngine:
             return False
         if features.ema20_1h > features.ema60_1h:
             return False
-        if features.last_4h_close > features.prev_4h_close and features.ret_24h > -0.008:
+        if (
+            features.last_4h_close > features.prev_4h_close
+            and features.ret_24h > -0.008
+        ):
             return False
         if features.ret_72h > 0.003 and features.ret_24h < 0:
             return False
@@ -1631,7 +2027,9 @@ class StrategyEngine:
             and price <= ema60_now * 1.001
         )
         recent_reference = float(df.close.iloc[-13])
-        recent_return = (price - recent_reference) / recent_reference if recent_reference else 0.0
+        recent_return = (
+            (price - recent_reference) / recent_reference if recent_reference else 0.0
+        )
         return (
             two_step_down
             and weak_rebound_failed
@@ -1651,7 +2049,9 @@ class StrategyEngine:
 
     @staticmethod
     def _has_same_side_position(positions: list[Position], side: PositionSide) -> bool:
-        return any(position.side == side and position.contracts > 0 for position in positions)
+        return any(
+            position.side == side and position.contracts > 0 for position in positions
+        )
 
     @staticmethod
     def _late_shock_trend_entry_ok(
@@ -1666,9 +2066,17 @@ class StrategyEngine:
                 return False
             if close_position_72h >= 0.74 and ret_24h >= 0.020 and ret_72h <= 0.015:
                 return False
-            if close_position_72h >= 0.78 and ret_24h >= 0.018 and recent_5h_position >= 0.55:
+            if (
+                close_position_72h >= 0.78
+                and ret_24h >= 0.018
+                and recent_5h_position >= 0.55
+            ):
                 return False
-            if close_position_72h >= 0.75 and ret_72h >= 0.045 and recent_5h_position >= 0.60:
+            if (
+                close_position_72h >= 0.75
+                and ret_72h >= 0.045
+                and recent_5h_position >= 0.60
+            ):
                 return False
             return True
         if close_position_72h <= 0.12:
@@ -1742,11 +2150,21 @@ class StrategyEngine:
         if len(df15) < 40:
             return None
         frames = {"5m": df5, "15m": df15, "1h": df1h, "4h": df4h}
-        long_setups = {name: self._macd_pre_cross_state(frame, PositionSide.LONG) for name, frame in frames.items()}
-        short_setups = {name: self._macd_pre_cross_state(frame, PositionSide.SHORT) for name, frame in frames.items()}
+        long_setups = {
+            name: self._macd_pre_cross_state(frame, PositionSide.LONG)
+            for name, frame in frames.items()
+        }
+        short_setups = {
+            name: self._macd_pre_cross_state(frame, PositionSide.SHORT)
+            for name, frame in frames.items()
+        }
         price = float(df5.close.iloc[-1])
-        if all(long_setups.values()) and self._multi_frame_price_drift(frames, PositionSide.LONG):
-            raw_stop = min(float(df5.low.iloc[-18:].min()), price - 1.1 * features.atr_1h)
+        if all(long_setups.values()) and self._multi_frame_price_drift(
+            frames, PositionSide.LONG
+        ):
+            raw_stop = min(
+                float(df5.low.iloc[-18:].min()), price - 1.1 * features.atr_1h
+            )
             stop = self._cap_stop(price, raw_stop, PositionSide.LONG)
             stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
             reward = self._reward(price, stop, 2.4)
@@ -1772,8 +2190,12 @@ class StrategyEngine:
                     "entry_stage": "pre_cross_trend",
                 },
             )
-        if all(short_setups.values()) and self._multi_frame_price_drift(frames, PositionSide.SHORT):
-            raw_stop = max(float(df5.high.iloc[-18:].max()), price + 1.1 * features.atr_1h)
+        if all(short_setups.values()) and self._multi_frame_price_drift(
+            frames, PositionSide.SHORT
+        ):
+            raw_stop = max(
+                float(df5.high.iloc[-18:].max()), price + 1.1 * features.atr_1h
+            )
             stop = self._cap_stop(price, raw_stop, PositionSide.SHORT)
             stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
             reward = self._reward(price, stop, 2.4)
@@ -1801,6 +2223,335 @@ class StrategyEngine:
             )
         return None
 
+    def _daily_macd_breakout_signal(
+        self,
+        symbol: str,
+        regime: Regime,
+        features: MarketFeatures,
+        candles_5m: list[list[float]],
+        positions: list[Position],
+        candles_1h: list[list[float]] | None,
+        candles_4h: list[list[float]] | None,
+        candles_1d: list[list[float]] | None,
+    ) -> TradeSignal | None:
+        if not self.enable_daily_macd_breakout:
+            return None
+        if positions:
+            return None
+        if not self._on_15m_boundary(candles_5m):
+            return None
+
+        df5 = self._cached_ohlcv_frame("5m", candles_5m)
+        df1h = self._cached_ohlcv_frame("1h", candles_1h or [])
+        df4h = self._cached_ohlcv_frame("4h", candles_4h or [])
+        df1d = self._cached_ohlcv_frame("1d", candles_1d or [])
+        if len(df5) < 80 or len(df1d) < 35 or features.atr_1h <= 0:
+            return None
+
+        daily_cross = self._latest_daily_macd_histogram_cross(df1d)
+        if daily_cross is None:
+            return None
+
+        price = float(df5.close.iloc[-1])
+        cross_side = daily_cross["side"]
+        cross_key = (symbol, cross_side.value, daily_cross["cross_ts"])
+        if cross_key in self._daily_macd_signal_cache:
+            return None
+        daily_trailing = self._daily_macd_trailing_params(df1d, price)
+
+        if cross_side == PositionSide.LONG:
+            if self._has_same_side_position(positions, PositionSide.LONG):
+                return None
+            self._daily_macd_signal_cache.add(cross_key)
+            raw_stop = self._daily_macd_structure_stop(df1d, price, PositionSide.LONG)
+            stop = self._cap_daily_macd_stop(price, raw_stop, PositionSide.LONG)
+            stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
+            reward = self._reward(price, stop, daily_trailing["reward_risk"])
+            return self._entry_signal(
+                symbol,
+                Side.BUY,
+                PositionSide.LONG,
+                Regime.TREND_LONG,
+                price,
+                stop,
+                None,
+                "daily_macd_golden_cross_breakout_long",
+                {
+                    "opportunity_score": 94,
+                    "opportunity_grade": "A",
+                    "opportunity_confidence": 0.92,
+                    "opportunity_reasons": "daily_macd_golden_cross,latest_daily_cross,immediate_daily_event",
+                    "risk_multiplier": 0.55,
+                    "risk_throttle": 0.8,
+                    "trailing_gap_pct": 0.0,
+                    "min_trailing_activate_r": daily_trailing[
+                        "min_trailing_activate_r"
+                    ],
+                    "breakeven_activate_r": daily_trailing["breakeven_activate_r"],
+                    "breakeven_buffer_pct": 0.0003,
+                    "delay_trailing_until_momentum_exit": True,
+                    "pending_trailing_gap_pct": daily_trailing["trailing_gap_pct"],
+                    "pending_min_trailing_activate_r": daily_trailing[
+                        "min_trailing_activate_r"
+                    ],
+                    "pending_breakeven_activate_r": daily_trailing[
+                        "breakeven_activate_r"
+                    ],
+                    "daily_macd_reward_risk": daily_trailing["reward_risk"],
+                    "daily_atr_pct": daily_trailing["daily_atr_pct"],
+                    "daily_macd_hist_strength": daily_trailing["hist_strength"],
+                    "daily_structure_stop": round(raw_stop, 8),
+                    "daily_structure_stop_basis": "daily_support",
+                    "entry_stage": "daily_macd_breakout",
+                    "daily_macd_mode": daily_cross["mode"],
+                    "daily_macd_mode_ts": daily_cross["cross_ts"],
+                    "daily_macd_histogram": daily_cross["histogram"],
+                    "daily_macd_prev_histogram": daily_cross["prev_histogram"],
+                    "close_position_72h": round(features.close_position_72h, 4),
+                    "ret_24h": round(features.ret_24h, 6),
+                    "ret_72h": round(features.ret_72h, 6),
+                },
+            )
+
+        if self._has_same_side_position(positions, PositionSide.SHORT):
+            return None
+        self._daily_macd_signal_cache.add(cross_key)
+        raw_stop = self._daily_macd_structure_stop(df1d, price, PositionSide.SHORT)
+        stop = self._cap_daily_macd_stop(price, raw_stop, PositionSide.SHORT)
+        stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
+        reward = self._reward(price, stop, daily_trailing["reward_risk"])
+        return self._entry_signal(
+            symbol,
+            Side.SELL,
+            PositionSide.SHORT,
+            Regime.TREND_SHORT,
+            price,
+            stop,
+            None,
+            "daily_macd_death_cross_breakout_short",
+            {
+                "opportunity_score": 94,
+                "opportunity_grade": "A",
+                "opportunity_confidence": 0.92,
+                "opportunity_reasons": "daily_macd_death_cross,latest_daily_cross,immediate_daily_event",
+                "risk_multiplier": 0.55,
+                "risk_throttle": 0.8,
+                "trailing_gap_pct": 0.0,
+                "min_trailing_activate_r": daily_trailing["min_trailing_activate_r"],
+                "breakeven_activate_r": daily_trailing["breakeven_activate_r"],
+                "breakeven_buffer_pct": 0.0003,
+                "delay_trailing_until_momentum_exit": True,
+                "pending_trailing_gap_pct": daily_trailing["trailing_gap_pct"],
+                "pending_min_trailing_activate_r": daily_trailing[
+                    "min_trailing_activate_r"
+                ],
+                "pending_breakeven_activate_r": daily_trailing["breakeven_activate_r"],
+                "daily_macd_reward_risk": daily_trailing["reward_risk"],
+                "daily_atr_pct": daily_trailing["daily_atr_pct"],
+                "daily_macd_hist_strength": daily_trailing["hist_strength"],
+                "daily_structure_stop": round(raw_stop, 8),
+                "daily_structure_stop_basis": "daily_resistance",
+                "entry_stage": "daily_macd_breakout",
+                "daily_macd_mode": daily_cross["mode"],
+                "daily_macd_mode_ts": daily_cross["cross_ts"],
+                "daily_macd_histogram": daily_cross["histogram"],
+                "daily_macd_prev_histogram": daily_cross["prev_histogram"],
+                "close_position_72h": round(features.close_position_72h, 4),
+                "ret_24h": round(features.ret_24h, 6),
+                "ret_72h": round(features.ret_72h, 6),
+            },
+        )
+
+    @staticmethod
+    def _latest_daily_macd_histogram_cross(frame) -> dict[str, Any] | None:
+        if len(frame) < 35:
+            return None
+        _, _, histogram = macd(frame.close.astype(float))
+        prev_hist = float(histogram.iloc[-2])
+        current_hist = float(histogram.iloc[-1])
+        cross_ts = (int(frame.ts.iloc[-1]) // 86_400_000) * 86_400_000
+        if prev_hist <= 0 < current_hist:
+            return {
+                "side": PositionSide.LONG,
+                "mode": "golden_cross_live",
+                "cross_ts": cross_ts,
+                "histogram": round(current_hist, 8),
+                "prev_histogram": round(prev_hist, 8),
+            }
+        if prev_hist >= 0 > current_hist:
+            return {
+                "side": PositionSide.SHORT,
+                "mode": "death_cross_live",
+                "cross_ts": cross_ts,
+                "histogram": round(current_hist, 8),
+                "prev_histogram": round(prev_hist, 8),
+            }
+        return None
+
+    @staticmethod
+    def _daily_macd_structure_stop(frame, price: float, side: PositionSide) -> float:
+        if len(frame) < 8:
+            return price * (0.97 if side == PositionSide.LONG else 1.03)
+        completed = frame.iloc[:-1] if len(frame) > 1 else frame
+        recent = completed.tail(30)
+        daily_atr = float(atr(frame.high, frame.low, frame.close, 14).iloc[-1])
+        buffer = max(price * 0.0025, daily_atr * 0.25)
+        min_structure_distance = max(price * 0.006, daily_atr * 0.45)
+
+        if side == PositionSide.LONG:
+            supports = [
+                float(value)
+                for value in recent.low.astype(float).tolist()
+                if float(value) < price - min_structure_distance
+            ]
+            if len(recent) >= 3:
+                for index in range(1, len(recent) - 1):
+                    low = float(recent.low.iloc[index])
+                    if (
+                        low <= float(recent.low.iloc[index - 1])
+                        and low <= float(recent.low.iloc[index + 1])
+                        and low < price - min_structure_distance
+                    ):
+                        supports.append(low)
+            if not supports:
+                supports = [float(recent.low.min())]
+            return max(supports) - buffer
+
+        resistances = [
+            float(value)
+            for value in recent.high.astype(float).tolist()
+            if float(value) > price + min_structure_distance
+        ]
+        if len(recent) >= 3:
+            for index in range(1, len(recent) - 1):
+                high = float(recent.high.iloc[index])
+                if (
+                    high >= float(recent.high.iloc[index - 1])
+                    and high >= float(recent.high.iloc[index + 1])
+                    and high > price + min_structure_distance
+                ):
+                    resistances.append(high)
+        if not resistances:
+            resistances = [float(recent.high.max())]
+        return min(resistances) + buffer
+
+    def _cap_daily_macd_stop(
+        self, price: float, raw_stop: float, side: PositionSide
+    ) -> float:
+        min_distance = price * max(self.high_vol_min_stop_loss_pct, 0.006)
+        max_distance = price * 0.06
+        if side == PositionSide.LONG:
+            stop = min(raw_stop, price - min_distance)
+            return max(stop, price - max_distance)
+        stop = max(raw_stop, price + min_distance)
+        return min(stop, price + max_distance)
+
+    @staticmethod
+    def _daily_macd_event_mode(frame) -> dict[str, Any] | None:
+        if len(frame) < 35:
+            return None
+        _, _, histogram = macd(frame.close.astype(float))
+        if len(histogram) < 3:
+            return None
+        current_hist = float(histogram.iloc[-1])
+        prev_closed_hist = float(histogram.iloc[-2])
+        prev_prev_closed_hist = float(histogram.iloc[-3])
+        mode_ts = (int(frame.ts.iloc[-1]) // 86_400_000) * 86_400_000
+        if current_hist > 0 and (
+            prev_closed_hist <= 0 or prev_closed_hist > prev_prev_closed_hist
+        ):
+            return {
+                "side": PositionSide.LONG,
+                "mode": "golden_cross_live"
+                if prev_closed_hist <= 0
+                else "golden_cross_continuation",
+                "mode_ts": mode_ts,
+                "histogram": round(current_hist, 8),
+                "prev_closed_histogram": round(prev_closed_hist, 8),
+            }
+        if current_hist < 0 and (
+            prev_closed_hist >= 0 or prev_closed_hist < prev_prev_closed_hist
+        ):
+            return {
+                "side": PositionSide.SHORT,
+                "mode": "death_cross_live"
+                if prev_closed_hist >= 0
+                else "death_cross_continuation",
+                "mode_ts": mode_ts,
+                "histogram": round(current_hist, 8),
+                "prev_closed_histogram": round(prev_closed_hist, 8),
+            }
+        return None
+
+    @staticmethod
+    def _one_hour_frame_with_live(df1h, df5):
+        if df5.empty:
+            return df1h
+        rows = df1h[["ts", "open", "high", "low", "close", "volume"]].values.tolist()
+        latest_ts = int(df5.ts.iloc[-1])
+        hour_start_ms = (latest_ts // 3_600_000) * 3_600_000
+        current = df5[df5.ts.astype(int) >= hour_start_ms]
+        if current.empty:
+            return df1h
+        if rows and (int(rows[-1][0]) // 3_600_000) == (latest_ts // 3_600_000):
+            rows = rows[:-1]
+        rows = rows[-119:]
+        rows.append(
+            [
+                float(current.ts.iloc[-1]),
+                float(current.open.iloc[0]),
+                float(current.high.max()),
+                float(current.low.min()),
+                float(current.close.iloc[-1]),
+                float(current.volume.sum()),
+            ]
+        )
+        return ohlcv_frame(rows)
+
+    @staticmethod
+    def _latest_macd_histogram_cross(
+        frame, side: PositionSide
+    ) -> dict[str, float] | None:
+        if len(frame) < 35:
+            return None
+        _, _, histogram = macd(frame.close.astype(float))
+        prev_hist = float(histogram.iloc[-2])
+        current_hist = float(histogram.iloc[-1])
+        cross_ts = (int(frame.ts.iloc[-1]) // 3_600_000) * 3_600_000
+        if side == PositionSide.LONG and prev_hist <= 0 < current_hist:
+            return {"cross_ts": cross_ts, "histogram": round(current_hist, 8)}
+        if side == PositionSide.SHORT and prev_hist >= 0 > current_hist:
+            return {"cross_ts": cross_ts, "histogram": round(current_hist, 8)}
+        return None
+
+    @staticmethod
+    def _daily_macd_trailing_params(frame, price: float) -> dict[str, float]:
+        daily_atr = (
+            float(atr(frame.high, frame.low, frame.close).iloc[-1])
+            if len(frame) >= 14
+            else 0.0
+        )
+        daily_atr_pct = daily_atr / price if price > 0 else 0.0
+        _, _, histogram = macd(frame.close.astype(float))
+        hist_now = abs(float(histogram.iloc[-1]))
+        hist_reference = float(histogram.tail(20).abs().median()) or hist_now or 1.0
+        hist_strength = hist_now / hist_reference if hist_reference > 0 else 1.0
+
+        trailing_gap_pct = min(max(daily_atr_pct * 0.35, 0.0045), 0.018)
+        min_trailing_activate_r = min(
+            max(1.2 + daily_atr_pct * 35 + min(hist_strength, 2.0) * 0.25, 1.4), 3.0
+        )
+        breakeven_activate_r = min(max(0.8 + daily_atr_pct * 10, 0.8), 1.2)
+        reward_risk = min(max(min_trailing_activate_r + 1.0, 2.4), 4.0)
+        return {
+            "trailing_gap_pct": round(trailing_gap_pct, 6),
+            "min_trailing_activate_r": round(min_trailing_activate_r, 4),
+            "breakeven_activate_r": round(breakeven_activate_r, 4),
+            "reward_risk": round(reward_risk, 4),
+            "daily_atr_pct": round(daily_atr_pct, 6),
+            "hist_strength": round(hist_strength, 4),
+        }
+
     def _two_candle_momentum_signal(
         self,
         symbol: str,
@@ -1822,7 +2573,9 @@ class StrategyEngine:
         if len(df15) < 8:
             return None
         price = float(df5.close.iloc[-1])
-        atr_5m = float(atr(df5.high, df5.low, df5.close).iloc[-1]) or features.atr_1h / 12
+        atr_5m = (
+            float(atr(df5.high, df5.low, df5.close).iloc[-1]) or features.atr_1h / 12
+        )
         long_allowed = (
             regime in {Regime.TREND_LONG, Regime.SHOCK_TREND_UP}
             and features.ema20_1h >= features.ema60_1h
@@ -1913,7 +2666,10 @@ class StrategyEngine:
         gap = float(macd_line.iloc[-1] - signal_line.iloc[-1])
         prev_gap = float(macd_line.iloc[-2] - signal_line.iloc[-2])
         older_gap = float(macd_line.iloc[-4] - signal_line.iloc[-4])
-        gap_limit = max(float(close.iloc[-1]) * 0.0015, float(histogram.tail(24).abs().median()) * 0.85)
+        gap_limit = max(
+            float(close.iloc[-1]) * 0.0015,
+            float(histogram.tail(24).abs().median()) * 0.85,
+        )
         if side == PositionSide.LONG:
             result = gap < 0 and abs(gap) <= gap_limit and gap > prev_gap > older_gap
         else:
@@ -1936,7 +2692,9 @@ class StrategyEngine:
         self._frame_cache[key] = frame
         return frame
 
-    def _multi_frame_price_drift(self, frames: dict[str, Any], side: PositionSide) -> bool:
+    def _multi_frame_price_drift(
+        self, frames: dict[str, Any], side: PositionSide
+    ) -> bool:
         checks = []
         for name, frame in frames.items():
             lookback = 3 if name in {"1h", "4h"} else 5
@@ -1945,7 +2703,9 @@ class StrategyEngine:
             current = float(frame.close.iloc[-1])
             previous = float(frame.close.iloc[-lookback])
             change = (current - previous) / previous if previous else 0.0
-            checks.append(change >= -0.004 if side == PositionSide.LONG else change <= 0.004)
+            checks.append(
+                change >= -0.004 if side == PositionSide.LONG else change <= 0.004
+            )
         return all(checks)
 
     def _two_expanding_candles(self, frame, side: PositionSide) -> bool:
@@ -1991,7 +2751,9 @@ class StrategyEngine:
 
     def _directional_breakout_active(self, features: MarketFeatures) -> bool:
         wide_directional = abs(features.ret_72h) >= 0.04 and features.range_72h >= 0.07
-        short_directional = abs(features.ret_24h) >= 0.03 and features.range_24h >= 0.035
+        short_directional = (
+            abs(features.ret_24h) >= 0.03 and features.range_24h >= 0.035
+        )
         return wide_directional or short_directional
 
     def _trend_signal(
@@ -2012,12 +2774,19 @@ class StrategyEngine:
         volatility_policy = self._volatility_policy(price, features, df)
 
         if regime == Regime.TREND_LONG:
-            near_breakout = price >= features.range_high_4h - volatility_policy.breakout_retrace_atr * features.atr_1h
+            near_breakout = (
+                price
+                >= features.range_high_4h
+                - volatility_policy.breakout_retrace_atr * features.atr_1h
+            )
             momentum_positive = bool(macd_line.iloc[-1] >= signal_line.iloc[-1])
             rsi_quality = 40 <= last_rsi <= 64
             pullback = (
                 (not volatility_policy.require_near_breakout or near_breakout)
-                and (not volatility_policy.require_multi_timeframe or self._multi_timeframe_aligned(df, PositionSide.LONG))
+                and (
+                    not volatility_policy.require_multi_timeframe
+                    or self._multi_timeframe_aligned(df, PositionSide.LONG)
+                )
                 and price >= float(ema20_5m.iloc[-1])
                 and rsi_quality
             )
@@ -2027,11 +2796,14 @@ class StrategyEngine:
                 side=PositionSide.LONG,
                 checks={
                     "regime_direction": True,
-                    "multi_timeframe": self._multi_timeframe_aligned(df, PositionSide.LONG),
+                    "multi_timeframe": self._multi_timeframe_aligned(
+                        df, PositionSide.LONG
+                    ),
                     "one_hour_trend": features.ema20_1h >= features.ema60_1h,
                     "four_hour_trend": near_breakout,
                     "pullback": recent_down_candle(df),
-                    "confirmation_candle": float(df.close.iloc[-1]) > float(df.open.iloc[-1]),
+                    "confirmation_candle": float(df.close.iloc[-1])
+                    > float(df.open.iloc[-1]),
                     "momentum_cross": crossed_above(macd_line, signal_line),
                     "momentum_positive": momentum_positive,
                     "price_location": price >= float(ema20_5m.iloc[-1]),
@@ -2059,9 +2831,19 @@ class StrategyEngine:
                     range_72h=features.range_72h,
                 )
             ):
-                raw_stop = max(float(df.low.iloc[-12:].min()), price - 1.2 * features.atr_1h)
-                raw_stop = self._trend_stop(price, raw_stop, features.atr_1h, PositionSide.LONG, volatility_policy)
-                stop = self._cap_stop(price, raw_stop, PositionSide.LONG, volatility_policy)
+                raw_stop = max(
+                    float(df.low.iloc[-12:].min()), price - 1.2 * features.atr_1h
+                )
+                raw_stop = self._trend_stop(
+                    price,
+                    raw_stop,
+                    features.atr_1h,
+                    PositionSide.LONG,
+                    volatility_policy,
+                )
+                stop = self._cap_stop(
+                    price, raw_stop, PositionSide.LONG, volatility_policy
+                )
                 stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
                 return TradeSignal(
                     symbol=symbol,
@@ -2073,16 +2855,26 @@ class StrategyEngine:
                     stop_loss=stop,
                     take_profit=price + self._reward(price, stop, 2.5),
                     reason="trend_long_pullback_macd_cross",
-                    metadata={"volatility_tier": volatility_policy.tier, **opportunity_metadata(opportunity)},
+                    metadata={
+                        "volatility_tier": volatility_policy.tier,
+                        **opportunity_metadata(opportunity),
+                    },
                 )
 
         if regime == Regime.TREND_SHORT:
-            near_breakout = price <= features.range_low_4h + volatility_policy.breakout_retrace_atr * features.atr_1h
+            near_breakout = (
+                price
+                <= features.range_low_4h
+                + volatility_policy.breakout_retrace_atr * features.atr_1h
+            )
             momentum_positive = bool(macd_line.iloc[-1] <= signal_line.iloc[-1])
             rsi_quality = 36 <= last_rsi <= 58
             pullback = (
                 (not volatility_policy.require_near_breakout or near_breakout)
-                and (not volatility_policy.require_multi_timeframe or self._multi_timeframe_aligned(df, PositionSide.SHORT))
+                and (
+                    not volatility_policy.require_multi_timeframe
+                    or self._multi_timeframe_aligned(df, PositionSide.SHORT)
+                )
                 and price <= float(ema20_5m.iloc[-1])
                 and rsi_quality
             )
@@ -2092,11 +2884,14 @@ class StrategyEngine:
                 side=PositionSide.SHORT,
                 checks={
                     "regime_direction": True,
-                    "multi_timeframe": self._multi_timeframe_aligned(df, PositionSide.SHORT),
+                    "multi_timeframe": self._multi_timeframe_aligned(
+                        df, PositionSide.SHORT
+                    ),
                     "one_hour_trend": features.ema20_1h <= features.ema60_1h,
                     "four_hour_trend": near_breakout,
                     "pullback": recent_up_candle(df),
-                    "confirmation_candle": float(df.close.iloc[-1]) < float(df.open.iloc[-1]),
+                    "confirmation_candle": float(df.close.iloc[-1])
+                    < float(df.open.iloc[-1]),
                     "momentum_cross": crossed_below(macd_line, signal_line),
                     "momentum_positive": momentum_positive,
                     "price_location": price <= float(ema20_5m.iloc[-1]),
@@ -2124,9 +2919,19 @@ class StrategyEngine:
                     range_72h=features.range_72h,
                 )
             ):
-                raw_stop = min(float(df.high.iloc[-12:].max()), price + 1.2 * features.atr_1h)
-                raw_stop = self._trend_stop(price, raw_stop, features.atr_1h, PositionSide.SHORT, volatility_policy)
-                stop = self._cap_stop(price, raw_stop, PositionSide.SHORT, volatility_policy)
+                raw_stop = min(
+                    float(df.high.iloc[-12:].max()), price + 1.2 * features.atr_1h
+                )
+                raw_stop = self._trend_stop(
+                    price,
+                    raw_stop,
+                    features.atr_1h,
+                    PositionSide.SHORT,
+                    volatility_policy,
+                )
+                stop = self._cap_stop(
+                    price, raw_stop, PositionSide.SHORT, volatility_policy
+                )
                 stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
                 return TradeSignal(
                     symbol=symbol,
@@ -2138,7 +2943,10 @@ class StrategyEngine:
                     stop_loss=stop,
                     take_profit=price - self._reward(price, stop, 2.5),
                     reason="trend_short_pullback_macd_cross",
-                    metadata={"volatility_tier": volatility_policy.tier, **opportunity_metadata(opportunity)},
+                    metadata={
+                        "volatility_tier": volatility_policy.tier,
+                        **opportunity_metadata(opportunity),
+                    },
                 )
         return None
 
@@ -2164,8 +2972,12 @@ class StrategyEngine:
         last_rsi = float(rsi_5m.iloc[-1])
         current_4h = df.iloc[-48:]
         frame_4h = self._aggregate_bars(df, 48)
-        last_4h_up = len(frame_4h) >= 2 and float(frame_4h.close.iloc[-1]) > float(frame_4h.close.iloc[-2])
-        last_4h_down = len(frame_4h) >= 2 and float(frame_4h.close.iloc[-1]) < float(frame_4h.close.iloc[-2])
+        last_4h_up = len(frame_4h) >= 2 and float(frame_4h.close.iloc[-1]) > float(
+            frame_4h.close.iloc[-2]
+        )
+        last_4h_down = len(frame_4h) >= 2 and float(frame_4h.close.iloc[-1]) < float(
+            frame_4h.close.iloc[-2]
+        )
         trend_up_aligned = self._multi_timeframe_aligned(df, PositionSide.LONG)
         trend_down_aligned = self._multi_timeframe_aligned(df, PositionSide.SHORT)
         long_momentum_positive = bool(macd_line.iloc[-1] >= signal_line.iloc[-1])
@@ -2185,7 +2997,8 @@ class StrategyEngine:
                 "confirmation_candle": float(current.close) > float(current.open),
                 "momentum_cross": crossed_above(macd_line, signal_line),
                 "momentum_positive": long_momentum_positive,
-                "price_location": price >= ema_now * 0.998 and price >= features.ema20_1h * 0.997,
+                "price_location": price >= ema_now * 0.998
+                and price >= features.ema20_1h * 0.997,
                 "ema_slope": ema_now >= ema_prev,
                 "rsi_quality": long_rsi_quality,
                 "not_chasing": last_rsi <= 68,
@@ -2224,7 +3037,13 @@ class StrategyEngine:
         ):
             stop = self._cap_stop(price, float(current_4h.low.min()), PositionSide.LONG)
             stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
-            reward_risk = self.trend_reward_risk + (0.4 if long_opportunity.score >= 88 else 0.2 if long_opportunity.score >= 78 else 0.0)
+            reward_risk = self.trend_reward_risk + (
+                0.4
+                if long_opportunity.score >= 88
+                else 0.2
+                if long_opportunity.score >= 78
+                else 0.0
+            )
             return TradeSignal(
                 symbol=symbol,
                 signal_type=SignalType.ENTER_TREND,
@@ -2252,7 +3071,8 @@ class StrategyEngine:
                 "confirmation_candle": float(current.close) < float(current.open),
                 "momentum_cross": crossed_below(macd_line, signal_line),
                 "momentum_positive": short_momentum_positive,
-                "price_location": price <= ema_now * 1.002 and price <= features.ema20_1h * 1.003,
+                "price_location": price <= ema_now * 1.002
+                and price <= features.ema20_1h * 1.003,
                 "ema_slope": ema_now <= ema_prev,
                 "rsi_quality": short_rsi_quality,
                 "not_chasing": last_rsi >= 26,
@@ -2289,9 +3109,17 @@ class StrategyEngine:
                 range_72h=features.range_72h,
             )
         ):
-            stop = self._cap_stop(price, float(current_4h.high.max()), PositionSide.SHORT)
+            stop = self._cap_stop(
+                price, float(current_4h.high.max()), PositionSide.SHORT
+            )
             stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
-            reward_risk = self.trend_reward_risk + (0.4 if short_opportunity.score >= 88 else 0.2 if short_opportunity.score >= 78 else 0.0)
+            reward_risk = self.trend_reward_risk + (
+                0.4
+                if short_opportunity.score >= 88
+                else 0.2
+                if short_opportunity.score >= 78
+                else 0.0
+            )
             return TradeSignal(
                 symbol=symbol,
                 signal_type=SignalType.ENTER_TREND,
@@ -2345,7 +3173,11 @@ class StrategyEngine:
         reference = float(closes.iloc[-min(4, len(closes))])
         recent_return = (last_close - reference) / reference if reference else 0.0
         if side == PositionSide.LONG:
-            return last_close >= ema_now and ema_now >= ema_prev and recent_return >= -0.003
+            return (
+                last_close >= ema_now
+                and ema_now >= ema_prev
+                and recent_return >= -0.003
+            )
         return last_close <= ema_now and ema_now <= ema_prev and recent_return <= 0.003
 
     def _grid_signal(
@@ -2388,7 +3220,10 @@ class StrategyEngine:
                 stop_loss=stop,
                 take_profit=price + reward,
                 reason="shock_grid_long_inner_reversal",
-                metadata={"grid_layers": [1.0, 0.5, 0.5], "grid_spacing_atr": [1.2, 1.8]},
+                metadata={
+                    "grid_layers": [1.0, 0.5, 0.5],
+                    "grid_spacing_atr": [1.2, 1.8],
+                },
             )
 
         if (
@@ -2410,7 +3245,10 @@ class StrategyEngine:
                 stop_loss=stop,
                 take_profit=price - reward,
                 reason="shock_grid_short_inner_reversal",
-                metadata={"grid_layers": [1.0, 0.5, 0.5], "grid_spacing_atr": [1.2, 1.8]},
+                metadata={
+                    "grid_layers": [1.0, 0.5, 0.5],
+                    "grid_spacing_atr": [1.2, 1.8],
+                },
             )
         return None
 
@@ -2435,7 +3273,14 @@ class StrategyEngine:
             range_72h=features.range_amplitude_4h,
         )
 
-    def _trend_stop(self, price: float, raw_stop: float, atr_1h: float, side: PositionSide, volatility_policy) -> float:
+    def _trend_stop(
+        self,
+        price: float,
+        raw_stop: float,
+        atr_1h: float,
+        side: PositionSide,
+        volatility_policy,
+    ) -> float:
         if volatility_policy.stop_buffer_atr > 0:
             buffer = volatility_policy.stop_buffer_atr * atr_1h
             if side == PositionSide.LONG:
@@ -2443,8 +3288,14 @@ class StrategyEngine:
             return max(raw_stop + buffer, price + buffer)
         return raw_stop
 
-    def _cap_stop(self, price: float, raw_stop: float, side: PositionSide, volatility_policy=None) -> float:
-        min_stop_loss_pct = volatility_policy.min_stop_loss_pct if volatility_policy else self.min_stop_loss_pct
+    def _cap_stop(
+        self, price: float, raw_stop: float, side: PositionSide, volatility_policy=None
+    ) -> float:
+        min_stop_loss_pct = (
+            volatility_policy.min_stop_loss_pct
+            if volatility_policy
+            else self.min_stop_loss_pct
+        )
         min_distance = price * min_stop_loss_pct
         max_distance = price * self.max_stop_loss_pct
         if side == PositionSide.LONG:

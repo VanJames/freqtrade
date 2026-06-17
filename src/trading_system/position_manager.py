@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from trading_system.models import Position, PositionSide, Regime, Side, SignalType, TradeSignal, TrailingState
+from trading_system.models import (
+    Position,
+    PositionSide,
+    Regime,
+    Side,
+    SignalType,
+    TradeSignal,
+    TrailingState,
+)
 
 
 class PositionManager:
@@ -38,9 +46,27 @@ class PositionManager:
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
             trailing_gap_pct=signal.metadata.get("trailing_gap_pct"),
-            min_trailing_activate_r=float(signal.metadata.get("min_trailing_activate_r", 1.0)),
-            breakeven_activate_r=float(signal.metadata.get("breakeven_activate_r", 0.0) or 0.0),
-            breakeven_buffer_pct=float(signal.metadata.get("breakeven_buffer_pct", 0.0) or 0.0),
+            min_trailing_activate_r=float(
+                signal.metadata.get("min_trailing_activate_r", 1.0)
+            ),
+            breakeven_activate_r=float(
+                signal.metadata.get("breakeven_activate_r", 0.0) or 0.0
+            ),
+            breakeven_buffer_pct=float(
+                signal.metadata.get("breakeven_buffer_pct", 0.0) or 0.0
+            ),
+            delay_trailing_until_momentum_exit=bool(
+                signal.metadata.get("delay_trailing_until_momentum_exit", False)
+            ),
+            pending_trailing_gap_pct=float(
+                signal.metadata.get("pending_trailing_gap_pct", 0.0) or 0.0
+            ),
+            pending_min_trailing_activate_r=float(
+                signal.metadata.get("pending_min_trailing_activate_r", 1.0) or 1.0
+            ),
+            pending_breakeven_activate_r=float(
+                signal.metadata.get("pending_breakeven_activate_r", 0.0) or 0.0
+            ),
             risk_multiplier=float(signal.metadata.get("risk_multiplier", 1.0)),
             highest_price=signal.price,
             lowest_price=signal.price,
@@ -72,15 +98,23 @@ class PositionManager:
             if key in self.trailing:
                 state = self.trailing[key]
                 if not state.active and (
-                    self._position_entry_changed(state.entry_price, pos.entry_price) or self._state_stop_breached(state, price)
+                    self._position_entry_changed(state.entry_price, pos.entry_price)
+                    or self._state_stop_breached(state, price)
                 ):
-                    state = self._recovered_state(pos, price=price, atr_value=atr_value, signal_hint=signal_hints.get(key))
+                    state = self._recovered_state(
+                        pos,
+                        price=price,
+                        atr_value=atr_value,
+                        signal_hint=signal_hints.get(key),
+                    )
                     self.trailing[key] = state
                     info = self._recovered_info(pos, state, regime)
                     self.recovered_positions[key] = info
                     recovered.append(info)
                 continue
-            state = self._recovered_state(pos, price=price, atr_value=atr_value, signal_hint=signal_hints.get(key))
+            state = self._recovered_state(
+                pos, price=price, atr_value=atr_value, signal_hint=signal_hints.get(key)
+            )
             self.trailing[key] = state
             info = self._recovered_info(pos, state, regime)
             self.recovered_positions[key] = info
@@ -104,7 +138,9 @@ class PositionManager:
         return price >= state.stop_loss
 
     @staticmethod
-    def _recovered_info(pos: Position, state: TrailingState, regime: Regime) -> dict[str, object]:
+    def _recovered_info(
+        pos: Position, state: TrailingState, regime: Regime
+    ) -> dict[str, object]:
         return {
             "symbol": pos.symbol,
             "side": pos.side.value,
@@ -145,21 +181,38 @@ class PositionManager:
             state.atr = atr_value or state.atr
             if pos.side == PositionSide.LONG:
                 state.highest_price = max(state.highest_price, price)
-                if state.trailing_gap_pct and state.stop_loss > 0:
+                trailing_enabled = (
+                    not state.delay_trailing_until_momentum_exit
+                    or state.delayed_trailing_activated
+                )
+                if trailing_enabled and state.trailing_gap_pct and state.stop_loss > 0:
                     risk = abs(state.entry_price - state.stop_loss)
                     if (
                         state.breakeven_activate_r > 0
                         and risk > 0
-                        and state.highest_price - state.entry_price >= state.breakeven_activate_r * risk
+                        and state.highest_price - state.entry_price
+                        >= state.breakeven_activate_r * risk
                     ):
-                        state.stop_loss = max(state.stop_loss, state.entry_price * (1 + state.breakeven_buffer_pct))
+                        state.stop_loss = max(
+                            state.stop_loss,
+                            state.entry_price * (1 + state.breakeven_buffer_pct),
+                        )
                         state.active = True
-                    if risk > 0 and state.highest_price - state.entry_price >= state.min_trailing_activate_r * risk:
-                        state.stop_loss = max(state.stop_loss, state.highest_price * (1 - state.trailing_gap_pct))
+                    if (
+                        risk > 0
+                        and state.highest_price - state.entry_price
+                        >= state.min_trailing_activate_r * risk
+                    ):
+                        state.stop_loss = max(
+                            state.stop_loss,
+                            state.highest_price * (1 - state.trailing_gap_pct),
+                        )
                         state.active = True
-                if price - state.entry_price > 2.0 * state.atr:
+                if trailing_enabled and price - state.entry_price > 2.0 * state.atr:
                     state.active = True
-                    state.stop_loss = max(state.stop_loss, state.highest_price - 1.5 * state.atr)
+                    state.stop_loss = max(
+                        state.stop_loss, state.highest_price - 1.5 * state.atr
+                    )
                 if state.stop_loss > 0 and price <= state.stop_loss:
                     reason = "long_trailing_stop" if state.active else "long_stop_loss"
                     signals.append(
@@ -189,23 +242,42 @@ class PositionManager:
                     )
             else:
                 state.lowest_price = min(state.lowest_price or price, price)
-                if state.trailing_gap_pct and state.stop_loss > 0:
+                trailing_enabled = (
+                    not state.delay_trailing_until_momentum_exit
+                    or state.delayed_trailing_activated
+                )
+                if trailing_enabled and state.trailing_gap_pct and state.stop_loss > 0:
                     risk = abs(state.stop_loss - state.entry_price)
                     if (
                         state.breakeven_activate_r > 0
                         and risk > 0
-                        and state.entry_price - state.lowest_price >= state.breakeven_activate_r * risk
+                        and state.entry_price - state.lowest_price
+                        >= state.breakeven_activate_r * risk
                     ):
-                        state.stop_loss = min(state.stop_loss, state.entry_price * (1 - state.breakeven_buffer_pct))
+                        state.stop_loss = min(
+                            state.stop_loss,
+                            state.entry_price * (1 - state.breakeven_buffer_pct),
+                        )
                         state.active = True
-                    if risk > 0 and state.entry_price - state.lowest_price >= state.min_trailing_activate_r * risk:
-                        state.stop_loss = min(state.stop_loss, state.lowest_price * (1 + state.trailing_gap_pct))
+                    if (
+                        risk > 0
+                        and state.entry_price - state.lowest_price
+                        >= state.min_trailing_activate_r * risk
+                    ):
+                        state.stop_loss = min(
+                            state.stop_loss,
+                            state.lowest_price * (1 + state.trailing_gap_pct),
+                        )
                         state.active = True
-                if state.entry_price - price > 2.0 * state.atr:
+                if trailing_enabled and state.entry_price - price > 2.0 * state.atr:
                     state.active = True
-                    state.stop_loss = min(state.stop_loss, state.lowest_price + 1.5 * state.atr)
+                    state.stop_loss = min(
+                        state.stop_loss, state.lowest_price + 1.5 * state.atr
+                    )
                 if state.stop_loss > 0 and price >= state.stop_loss:
-                    reason = "short_trailing_stop" if state.active else "short_stop_loss"
+                    reason = (
+                        "short_trailing_stop" if state.active else "short_stop_loss"
+                    )
                     signals.append(
                         self._exit_signal(
                             symbol,
@@ -266,7 +338,9 @@ class PositionManager:
                 stop_loss=self._float_item(item, "stop_loss"),
                 take_profit=self._optional_float_item(item, "take_profit"),
                 trailing_gap_pct=self._optional_float_item(item, "trailing_gap_pct"),
-                min_trailing_activate_r=self._float_item(item, "min_trailing_activate_r", 1.0),
+                min_trailing_activate_r=self._float_item(
+                    item, "min_trailing_activate_r", 1.0
+                ),
                 breakeven_activate_r=self._float_item(item, "breakeven_activate_r"),
                 breakeven_buffer_pct=self._float_item(item, "breakeven_buffer_pct"),
                 risk_multiplier=self._float_item(item, "risk_multiplier", 1.0),
@@ -286,11 +360,17 @@ class PositionManager:
         entry_price = pos.entry_price or price
         atr_value = atr_value or max(entry_price * self.min_stop_loss_pct, 0.0)
         signal_hint = signal_hint or {}
-        stop_loss = self._metadata_float(pos.metadata, "stop_loss") or self._float_item(signal_hint, "stop_loss")
-        take_profit = self._metadata_float(pos.metadata, "take_profit") or self._float_item(signal_hint, "take_profit")
+        stop_loss = self._metadata_float(pos.metadata, "stop_loss") or self._float_item(
+            signal_hint, "stop_loss"
+        )
+        take_profit = self._metadata_float(
+            pos.metadata, "take_profit"
+        ) or self._float_item(signal_hint, "take_profit")
         if stop_loss <= 0:
             stop_loss = self._protective_stop(entry_price, atr_value, pos.side)
-        stop_loss = self._move_breached_stop_outside_market(stop_loss, entry_price, price, atr_value, pos.side)
+        stop_loss = self._move_breached_stop_outside_market(
+            stop_loss, entry_price, price, atr_value, pos.side
+        )
         return TrailingState(
             symbol=pos.symbol,
             position_side=pos.side,
@@ -298,20 +378,31 @@ class PositionManager:
             atr=atr_value,
             stop_loss=stop_loss,
             take_profit=take_profit if take_profit > 0 else None,
-            trailing_gap_pct=self._optional_float_item(signal_hint, "trailing_gap_pct") or self.trailing_gap_pct,
-            min_trailing_activate_r=self._float_item(signal_hint, "min_trailing_activate_r", self.min_trailing_activate_r),
+            trailing_gap_pct=self._optional_float_item(signal_hint, "trailing_gap_pct")
+            or self.trailing_gap_pct,
+            min_trailing_activate_r=self._float_item(
+                signal_hint, "min_trailing_activate_r", self.min_trailing_activate_r
+            ),
             breakeven_activate_r=self._float_item(signal_hint, "breakeven_activate_r"),
             breakeven_buffer_pct=self._float_item(signal_hint, "breakeven_buffer_pct"),
             risk_multiplier=self._metadata_float(
                 pos.metadata,
                 "risk_multiplier",
-                fallback=self._float_item(signal_hint, "risk_multiplier", self.recovered_risk_multiplier),
+                fallback=self._float_item(
+                    signal_hint, "risk_multiplier", self.recovered_risk_multiplier
+                ),
             ),
-            highest_price=max(entry_price, price) if pos.side == PositionSide.LONG else entry_price,
-            lowest_price=min(entry_price, price) if pos.side == PositionSide.SHORT else entry_price,
+            highest_price=max(entry_price, price)
+            if pos.side == PositionSide.LONG
+            else entry_price,
+            lowest_price=min(entry_price, price)
+            if pos.side == PositionSide.SHORT
+            else entry_price,
         )
 
-    def _protective_stop(self, entry_price: float, atr_value: float, side: PositionSide) -> float:
+    def _protective_stop(
+        self, entry_price: float, atr_value: float, side: PositionSide
+    ) -> float:
         distance = self._protective_distance(entry_price, atr_value)
         if side == PositionSide.LONG:
             return entry_price - distance
@@ -340,7 +431,9 @@ class PositionManager:
         return min(max(atr_value * 1.5, min_distance), max_distance)
 
     @staticmethod
-    def _metadata_float(metadata: dict[str, object], key: str, fallback: float = 0.0) -> float:
+    def _metadata_float(
+        metadata: dict[str, object], key: str, fallback: float = 0.0
+    ) -> float:
         value = metadata.get(key)
         if value is None and isinstance(metadata.get("info"), dict):
             value = metadata["info"].get(key)  # type: ignore[index]

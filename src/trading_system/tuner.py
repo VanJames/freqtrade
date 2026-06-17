@@ -13,7 +13,12 @@ import ccxt
 import pandas as pd
 from pydantic import BaseModel, Field
 
-from trading_system.backtest import BacktestConfig, BacktestResult, OKXBacktester, SimTrade
+from trading_system.backtest import (
+    BacktestConfig,
+    BacktestResult,
+    OKXBacktester,
+    SimTrade,
+)
 from trading_system.config import Settings
 from trading_system.email_notification import ReportEmailNotifier, SmtpConfig
 from trading_system.models import Regime
@@ -113,18 +118,21 @@ def runtime_tuning_candidates(base: BacktestConfig) -> list[RuntimeTuningCandida
             replace(
                 base,
                 confirmation_position_sizing=True,
-                max_signal_risk_multiplier=max(base.max_signal_risk_multiplier, max_signal_risk_multiplier),
+                max_signal_risk_multiplier=max(
+                    base.max_signal_risk_multiplier, max_signal_risk_multiplier
+                ),
                 confirmation_max_risk_multiplier=max(
                     base.confirmation_max_risk_multiplier,
                     confirmation_max_risk_multiplier,
                 ),
-                same_direction_risk_limit=max(base.same_direction_risk_limit, same_direction_risk_limit),
+                same_direction_risk_limit=max(
+                    base.same_direction_risk_limit, same_direction_risk_limit
+                ),
                 shock_leverage_limit=max(base.shock_leverage_limit, 3.0),
                 trend_symbol_leverage_limit=max(base.trend_symbol_leverage_limit, 5.0),
             ),
         )
-        for name, description, max_signal_risk_multiplier, confirmation_max_risk_multiplier, same_direction_risk_limit
-        in candidate_specs
+        for name, description, max_signal_risk_multiplier, confirmation_max_risk_multiplier, same_direction_risk_limit in candidate_specs
     ]
     unique: dict[tuple[tuple[str, float | bool], ...], RuntimeTuningCandidate] = {}
     for candidate in candidates:
@@ -132,7 +140,9 @@ def runtime_tuning_candidates(base: BacktestConfig) -> list[RuntimeTuningCandida
     return list(unique.values())
 
 
-def candidate_from_llm_proposal(base: BacktestConfig, proposal: LLMParameterCandidate) -> RuntimeTuningCandidate:
+def candidate_from_llm_proposal(
+    base: BacktestConfig, proposal: LLMParameterCandidate
+) -> RuntimeTuningCandidate:
     return RuntimeTuningCandidate(
         name=f"llm_{proposal.name}",
         description="LLM 根据参数调优知识库提出，已通过本地边界校验。",
@@ -217,6 +227,7 @@ def build_backtest_config_from_settings(
         liquidity_sweep_risk_multiplier=settings.liquidity_sweep_risk_multiplier,
         liquidity_sweep_require_confirmation=settings.liquidity_sweep_require_confirmation,
         enable_two_candle_momentum=settings.enable_two_candle_momentum,
+        enable_daily_macd_breakout=settings.enable_daily_macd_breakout,
         enable_adaptive_strategy_switch=settings.enable_adaptive_strategy_switch,
         adaptive_no_trade_hours=settings.adaptive_no_trade_hours,
         adaptive_min_range_24h_pct=settings.adaptive_min_range_24h_pct,
@@ -267,7 +278,9 @@ def notify_runtime_tuning_report(
 ) -> bool:
     settings = Settings()
     notifier = ReportEmailNotifier(SmtpConfig.from_settings(settings))
-    sent = notifier.notify_runtime_tuning_report(report_path, summary=format_runtime_tuning_email_summary(results))
+    sent = notifier.notify_runtime_tuning_report(
+        report_path, summary=format_runtime_tuning_email_summary(results)
+    )
     if progress:
         progress(f"runtime tuning report email: {'sent' if sent else 'skipped'}")
     return sent
@@ -276,7 +289,9 @@ def notify_runtime_tuning_report(
 def format_runtime_tuning_email_summary(results: list[RuntimeTuningResult]) -> str:
     if not results:
         return ""
-    current = next((item for item in results if item.candidate.name == "current"), results[0])
+    current = next(
+        (item for item in results if item.candidate.name == "current"), results[0]
+    )
     recommended = results[0]
     lines = [
         f"推荐参数: {recommended.candidate.name}",
@@ -288,7 +303,9 @@ def format_runtime_tuning_email_summary(results: list[RuntimeTuningResult]) -> s
         f"当前参数交易数: {len(current.result.trades)}",
     ]
     if recommended.candidate.name != current.candidate.name:
-        lines.append(f"相对当前收益变化: {recommended.result.total_pnl - current.result.total_pnl:.2f} USDT")
+        lines.append(
+            f"相对当前收益变化: {recommended.result.total_pnl - current.result.total_pnl:.2f} USDT"
+        )
     return "\n".join(lines)
 
 
@@ -309,7 +326,11 @@ async def run_runtime_tuning_loop(
         candidates = runtime_tuning_candidates(cycle_base)
         results, _ = await run_tuning_agent_once(candidates, progress=progress)
         iteration = 1
-        while llm_propose and iteration < max(1, max_iterations) and not has_clear_improvement(results, min_improvement_score):
+        while (
+            llm_propose
+            and iteration < max(1, max_iterations)
+            and not has_clear_improvement(results, min_improvement_score)
+        ):
             try:
                 proposals = propose_llm_candidates(cycle_base, results)
             except Exception as exc:
@@ -322,7 +343,10 @@ async def run_runtime_tuning_loop(
             candidates = dedupe_candidates(
                 [
                     *candidates,
-                    *(candidate_from_llm_proposal(cycle_base, item) for item in proposals),
+                    *(
+                        candidate_from_llm_proposal(cycle_base, item)
+                        for item in proposals
+                    ),
                 ]
             )
             if progress:
@@ -333,7 +357,9 @@ async def run_runtime_tuning_loop(
         await asyncio.sleep(interval_seconds)
 
 
-async def resolve_runtime_base(base: BacktestConfig | RuntimeBaseFactory) -> BacktestConfig:
+async def resolve_runtime_base(
+    base: BacktestConfig | RuntimeBaseFactory,
+) -> BacktestConfig:
     if isinstance(base, BacktestConfig):
         return base
     value = base()
@@ -383,8 +409,14 @@ def propose_llm_candidates(
     max_candidates: int = 2,
 ) -> list[LLMParameterCandidate]:
     provider = base.llm_regime_provider.lower()
-    api_key_env = base.llm_regime_api_key_env or ("DEEPSEEK_API_KEY" if provider == "deepseek" else "OPENAI_API_KEY")
-    api_key = base.llm_regime_api_key or (api_key_env if api_key_env.startswith(("sk-", "sk_")) else os.getenv(api_key_env))
+    api_key_env = base.llm_regime_api_key_env or (
+        "DEEPSEEK_API_KEY" if provider == "deepseek" else "OPENAI_API_KEY"
+    )
+    api_key = base.llm_regime_api_key or (
+        api_key_env
+        if api_key_env.startswith(("sk-", "sk_"))
+        else os.getenv(api_key_env)
+    )
     if not api_key:
         return []
     from openai import OpenAI
@@ -392,7 +424,8 @@ def propose_llm_candidates(
     knowledge = PARAMETER_KNOWLEDGE_PATH.read_text(encoding="utf-8")
     client = OpenAI(
         api_key=api_key,
-        base_url=base.llm_regime_base_url or ("https://api.deepseek.com" if provider == "deepseek" else None),
+        base_url=base.llm_regime_base_url
+        or ("https://api.deepseek.com" if provider == "deepseek" else None),
     )
     payload = {
         "knowledge_base": knowledge,
@@ -404,7 +437,9 @@ def propose_llm_candidates(
             "trend_symbol_leverage_limit": base.trend_symbol_leverage_limit,
             "risk_percent": base.risk_percent,
         },
-        "previous_results": [tuning_result_summary(item) for item in previous_results or []],
+        "previous_results": [
+            tuning_result_summary(item) for item in previous_results or []
+        ],
         "request": f"Propose up to {max_candidates} bounded candidates for a 30-day backtest.",
     }
     response = client.chat.completions.create(
@@ -454,19 +489,29 @@ def tuning_result_summary(item: RuntimeTuningResult) -> dict[str, Any]:
             "validation_trades": walk.validation_trades,
             "validation_score": round(walk.validation_score, 2),
         },
-        "pnl_by_symbol": {symbol: round(pnl, 2) for symbol, pnl in pnl_by_symbol(trades).items()},
-        "pnl_by_regime": {regime: round(pnl, 2) for regime, pnl in pnl_by_regime(trades).items()},
+        "pnl_by_symbol": {
+            symbol: round(pnl, 2) for symbol, pnl in pnl_by_symbol(trades).items()
+        },
+        "pnl_by_regime": {
+            regime: round(pnl, 2) for regime, pnl in pnl_by_regime(trades).items()
+        },
         "params": item.candidate.params,
     }
 
 
-def write_runtime_tuning_report(results: list[RuntimeTuningResult], end_ms: int) -> Path:
+def write_runtime_tuning_report(
+    results: list[RuntimeTuningResult], end_ms: int
+) -> Path:
     if not results:
         raise ValueError("results cannot be empty")
     output_dir = results[0].candidate.config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / f"runtime_tuning_{datetime.now(timezone.utc):%Y%m%d_%H%M%S_%f}.md"
-    current = next((item for item in results if item.candidate.name == "current"), results[0])
+    report_path = (
+        output_dir / f"runtime_tuning_{datetime.now(timezone.utc):%Y%m%d_%H%M%S_%f}.md"
+    )
+    current = next(
+        (item for item in results if item.candidate.name == "current"), results[0]
+    )
     recommended = results[0]
     current_config = current.candidate.config
     lines = [
@@ -489,7 +534,11 @@ def write_runtime_tuning_report(results: list[RuntimeTuningResult], end_ms: int)
         by_symbol = pnl_by_symbol(trades)
         quality = backtest_quality(item.result, item.candidate.config.initial_equity)
         walk = walk_forward_stats(item.result)
-        avg_risk = sum(trade.risk_multiplier for trade in trades) / len(trades) if trades else 0.0
+        avg_risk = (
+            sum(trade.risk_multiplier for trade in trades) / len(trades)
+            if trades
+            else 0.0
+        )
         lines.append(
             f"| {rank} | {item.candidate.name} | {item.score:.2f} | {item.result.total_pnl:.2f} | "
             f"{walk.validation_pnl:.2f} | {walk.validation_win_rate:.2%} | "
@@ -547,9 +596,23 @@ def write_runtime_tuning_report(results: list[RuntimeTuningResult], end_ms: int)
             f"推荐 `{recommended.candidate.name}`，相对当前参数净利润变化 `{delta:.2f} USDT`，"
             f"胜率变化 `{recommended.result.win_rate - current.result.win_rate:.2%}`。"
         )
-    lines.extend(["", "## 分行情表现", "", "| candidate | regime | trades | win_rate | pnl |", "|---|---|---:|---:|---:|"])
+    lines.extend(
+        [
+            "",
+            "## 分行情表现",
+            "",
+            "| candidate | regime | trades | win_rate | pnl |",
+            "|---|---|---:|---:|---:|",
+        ]
+    )
     for item in results:
-        for regime in [Regime.TREND_LONG, Regime.TREND_SHORT, Regime.SHOCK_TREND_UP, Regime.SHOCK_TREND_DOWN, Regime.SHOCK]:
+        for regime in [
+            Regime.TREND_LONG,
+            Regime.TREND_SHORT,
+            Regime.SHOCK_TREND_UP,
+            Regime.SHOCK_TREND_DOWN,
+            Regime.SHOCK,
+        ]:
             trades = [trade for trade in item.result.trades if trade.regime == regime]
             if not trades:
                 continue
@@ -574,7 +637,9 @@ def write_runtime_tuning_report(results: list[RuntimeTuningResult], end_ms: int)
     return report_path
 
 
-def write_research_ledger(results: list[RuntimeTuningResult], report_path: Path, end_ms: int) -> Path:
+def write_research_ledger(
+    results: list[RuntimeTuningResult], report_path: Path, end_ms: int
+) -> Path:
     if not results:
         raise ValueError("results cannot be empty")
     ledger_path = results[0].candidate.config.output_dir / "runtime_tuning_ledger.jsonl"
@@ -591,15 +656,24 @@ def write_research_ledger(results: list[RuntimeTuningResult], report_path: Path,
     return ledger_path
 
 
-def has_clear_improvement(results: list[RuntimeTuningResult], min_improvement_score: float) -> bool:
+def has_clear_improvement(
+    results: list[RuntimeTuningResult], min_improvement_score: float
+) -> bool:
     if not results:
         return False
-    current = next((item for item in results if item.candidate.name == "current"), results[-1])
+    current = next(
+        (item for item in results if item.candidate.name == "current"), results[-1]
+    )
     recommended = results[0]
-    return recommended.candidate.name != current.candidate.name and recommended.score - current.score >= min_improvement_score
+    return (
+        recommended.candidate.name != current.candidate.name
+        and recommended.score - current.score >= min_improvement_score
+    )
 
 
-def dedupe_candidates(candidates: list[RuntimeTuningCandidate]) -> list[RuntimeTuningCandidate]:
+def dedupe_candidates(
+    candidates: list[RuntimeTuningCandidate],
+) -> list[RuntimeTuningCandidate]:
     unique: dict[tuple[tuple[str, float | bool], ...], RuntimeTuningCandidate] = {}
     for candidate in candidates:
         unique.setdefault(tuple(sorted(candidate.params.items())), candidate)
@@ -614,7 +688,9 @@ def format_param_value(value: float | bool | None) -> str:
     return f"`{float(value):.4g}`"
 
 
-def format_param_delta(current: float | bool | None, recommended: float | bool | None) -> str:
+def format_param_delta(
+    current: float | bool | None, recommended: float | bool | None
+) -> str:
     if isinstance(current, bool) or isinstance(recommended, bool):
         return "`changed`" if current != recommended else "`same`"
     if current is None or recommended is None:
@@ -647,12 +723,26 @@ def backtest_quality(result: BacktestResult, initial_equity: float) -> BacktestQ
 
 def walk_forward_stats(result: BacktestResult) -> WalkForwardStats:
     split_time = result.started_at + (result.ended_at - result.started_at) * (2 / 3)
-    train = [trade for trade in result.trades if trade_datetime(trade.entry_time) < split_time]
-    validation = [trade for trade in result.trades if trade_datetime(trade.entry_time) >= split_time]
+    train = [
+        trade
+        for trade in result.trades
+        if trade_datetime(trade.entry_time) < split_time
+    ]
+    validation = [
+        trade
+        for trade in result.trades
+        if trade_datetime(trade.entry_time) >= split_time
+    ]
     train_pnl = sum(trade.pnl for trade in train)
     validation_pnl = sum(trade.pnl for trade in validation)
-    train_win_rate = sum(1 for trade in train if trade.pnl > 0) / len(train) if train else 0.0
-    validation_win_rate = sum(1 for trade in validation if trade.pnl > 0) / len(validation) if validation else 0.0
+    train_win_rate = (
+        sum(1 for trade in train if trade.pnl > 0) / len(train) if train else 0.0
+    )
+    validation_win_rate = (
+        sum(1 for trade in validation if trade.pnl > 0) / len(validation)
+        if validation
+        else 0.0
+    )
     validation_score = validation_pnl
     validation_score -= max(0, 5 - len(validation)) * 50.0
     validation_score -= max(0.0, 0.55 - validation_win_rate) * 500.0

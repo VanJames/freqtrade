@@ -34,7 +34,9 @@ def test_runtime_config_applies_llm_text_and_boolean_fields() -> None:
 
 def test_runtime_config_rejects_unknown_llm_provider() -> None:
     with pytest.raises(ValueError, match="llm_regime_provider"):
-        validate_runtime_config({"llm_regime_provider": "invalid"}, Settings(dry_run=True))
+        validate_runtime_config(
+            {"llm_regime_provider": "invalid"}, Settings(dry_run=True)
+        )
 
 
 def test_runtime_config_boolean_accepts_float_roundtrip() -> None:
@@ -47,6 +49,7 @@ def test_runtime_config_boolean_accepts_float_roundtrip() -> None:
             "enable_shock_trend_scout": 1.0,
             "llm_regime_review_enabled": 1.0,
             "enable_two_candle_momentum": 1.0,
+            "enable_daily_macd_breakout": 1.0,
         },
     )
 
@@ -54,6 +57,13 @@ def test_runtime_config_boolean_accepts_float_roundtrip() -> None:
     assert settings.enable_shock_trend_scout is True
     assert settings.llm_regime_review_enabled is True
     assert settings.enable_two_candle_momentum is True
+    assert settings.enable_daily_macd_breakout is True
+
+
+def test_daily_macd_breakout_enabled_by_default() -> None:
+    settings = Settings(dry_run=True)
+
+    assert settings.enable_daily_macd_breakout is True
 
 
 def test_runtime_config_applies_position_monitor_interval() -> None:

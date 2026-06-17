@@ -174,6 +174,16 @@ RUNTIME_FIELDS: tuple[RuntimeField, ...] = (
         description="按优化指南补充 5m 与 15m 双周期连续放量动量信号。默认关闭，回测验证后再开启实盘。",
     ),
     RuntimeField(
+        "enable_daily_macd_breakout",
+        "启用日线MACD突破单",
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        boolean=True,
+        description="日线MACD近期金叉/死叉时，按单边行情小仓位跟随；默认关闭，需回测确认后再启用。",
+    ),
+    RuntimeField(
         "enable_adaptive_strategy_switch",
         "启用无单自适应策略",
         1.0,
@@ -373,8 +383,14 @@ def runtime_defaults(settings: Settings) -> dict[str, float | str]:
     return defaults
 
 
-def validate_runtime_config(values: dict[str, Any], settings: Settings | None = None) -> dict[str, float | str]:
-    base = runtime_defaults(settings) if settings else {field.key: field.default for field in RUNTIME_FIELDS}
+def validate_runtime_config(
+    values: dict[str, Any], settings: Settings | None = None
+) -> dict[str, float | str]:
+    base = (
+        runtime_defaults(settings)
+        if settings
+        else {field.key: field.default for field in RUNTIME_FIELDS}
+    )
     result: dict[str, float | str] = {}
     for field in RUNTIME_FIELDS:
         raw = values.get(field.key, base[field.key])
@@ -390,14 +406,20 @@ def validate_runtime_config(values: dict[str, Any], settings: Settings | None = 
             if isinstance(raw, (int, float)):
                 value = 1.0 if float(raw) > 0 else 0.0
             else:
-                value = 1.0 if str(raw).lower() in {"1", "1.0", "true", "on", "yes"} else 0.0
+                value = (
+                    1.0
+                    if str(raw).lower() in {"1", "1.0", "true", "on", "yes"}
+                    else 0.0
+                )
         else:
             try:
                 value = float(raw)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"{field.key} must be numeric") from exc
         if value < field.min_value or value > field.max_value:
-            raise ValueError(f"{field.key} must be between {field.min_value} and {field.max_value}")
+            raise ValueError(
+                f"{field.key} must be between {field.min_value} and {field.max_value}"
+            )
         result[field.key] = value
     return result
 
@@ -411,12 +433,17 @@ def apply_runtime_config(settings: Settings, values: dict[str, Any]) -> None:
             "enable_shock_trend_scout",
             "enable_adaptive_strategy_switch",
             "enable_two_candle_momentum",
+            "enable_daily_macd_breakout",
             "llm_regime_review_enabled",
             "email_enabled",
             "smtp_use_ssl",
         }:
             setattr(settings, key, bool(value))
-        elif key in {"llm_regime_review_cache_ttl_seconds", "llm_regime_review_min_interval_seconds", "smtp_port"}:
+        elif key in {
+            "llm_regime_review_cache_ttl_seconds",
+            "llm_regime_review_min_interval_seconds",
+            "smtp_port",
+        }:
             setattr(settings, key, int(float(value)))
         else:
             setattr(settings, key, value)
