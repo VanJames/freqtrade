@@ -206,6 +206,7 @@ def build_backtest_config_from_settings(
         max_signal_risk_multiplier=settings.max_signal_risk_multiplier,
         confirmation_position_sizing=confirmation_position_sizing,
         confirmation_max_risk_multiplier=settings.confirmation_max_risk_multiplier,
+        legacy_a_risk_sizing=settings.legacy_a_risk_sizing,
         funding_block_threshold=settings.funding_block_threshold,
         min_stop_loss_pct=settings.min_stop_loss_pct,
         high_vol_min_stop_loss_pct=settings.high_vol_min_stop_loss_pct,

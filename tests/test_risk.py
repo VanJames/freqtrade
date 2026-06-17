@@ -213,6 +213,42 @@ def test_confirmation_sizing_caps_local_top_shock_trend_up_longs() -> None:
     assert adjusted_risk_multiplier(long_signal, settings) == pytest.approx(0.9)
 
 
+def test_legacy_a_risk_sizing_restores_confirmed_long_boost() -> None:
+    settings = Settings(
+        dry_run=True,
+        confirmation_position_sizing=True,
+        max_signal_risk_multiplier=3.0,
+        confirmation_max_risk_multiplier=3.0,
+        legacy_a_risk_sizing=True,
+    )
+    long_signal = TradeSignal(
+        symbol="XAU/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.SHOCK_TREND_UP,
+        price=4700.0,
+        stop_loss=4650.0,
+        metadata={
+            "opportunity_score": 98,
+            "opportunity_reasons": (
+                "multi_timeframe,one_hour_trend,pullback,confirmation_candle,"
+                "momentum_cross,momentum_positive,not_chasing,rr_good"
+            ),
+            "risk_multiplier": 1.0,
+            "risk_throttle": 1.0,
+            "recent_5h_position": 0.95,
+            "close_position_72h": 0.75,
+            "ret_24h": 0.004,
+            "ret_72h": 0.02,
+            "range_72h": 0.04,
+            "volatility_tier": "NORMAL",
+        },
+    )
+
+    assert adjusted_risk_multiplier(long_signal, settings) == pytest.approx(3.0)
+
+
 def test_confirmation_sizing_caps_weak_drift_shock_trend_up_longs() -> None:
     settings = Settings(
         dry_run=True,

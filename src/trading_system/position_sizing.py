@@ -9,6 +9,7 @@ class SizingSettings(Protocol):
     max_signal_risk_multiplier: float
     confirmation_position_sizing: bool
     confirmation_max_risk_multiplier: float
+    legacy_a_risk_sizing: bool
 
 
 def adjusted_risk_multiplier(signal: TradeSignal | dict[str, Any], settings: SizingSettings) -> float:
@@ -61,7 +62,11 @@ def adjusted_risk_multiplier(signal: TradeSignal | dict[str, Any], settings: Siz
         boosted *= 0.65
     boosted *= throttle
 
-    cap = quality_risk_cap(signal, settings)
+    cap = (
+        min(settings.confirmation_max_risk_multiplier, settings.max_signal_risk_multiplier)
+        if use_legacy_a_risk_sizing(signal, settings, score, required_hits)
+        else quality_risk_cap(signal, settings)
+    )
     floor = min(base * throttle, cap)
     return round(
         max(
@@ -165,6 +170,21 @@ def quality_risk_cap(signal: TradeSignal | dict[str, Any], settings: SizingSetti
     elif volatility_tier == "EXTREME":
         cap *= 0.75
     return max(0.1, cap)
+
+
+def use_legacy_a_risk_sizing(
+    signal: TradeSignal | dict[str, Any],
+    settings: SizingSettings,
+    score: int,
+    required_hits: int,
+) -> bool:
+    if not getattr(settings, "legacy_a_risk_sizing", False):
+        return False
+    if score < 95 or required_hits < 6:
+        return False
+    regime = signal_value(signal, "regime")
+    side = signal_value(signal, "position_side") or signal_value(signal, "side")
+    return regime in {Regime.TREND_LONG, Regime.SHOCK_TREND_UP} and side == PositionSide.LONG
 
 
 def metadata_float(signal: TradeSignal | dict[str, Any], key: str, default: float) -> float:

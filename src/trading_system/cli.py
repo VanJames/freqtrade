@@ -128,6 +128,11 @@ def backtest(
     confirmation_max_risk_multiplier: Optional[float] = typer.Option(
         None, help="Maximum boosted risk multiplier for confirmed signals."
     ),
+    legacy_a_risk_sizing: Optional[bool] = typer.Option(
+        None,
+        "--legacy-a-risk-sizing/--no-legacy-a-risk-sizing",
+        help="Use legacy A-grade sizing without the newer quality caps.",
+    ),
     liquidity_sweep_reversal: Optional[bool] = typer.Option(
         None,
         "--liquidity-sweep-reversal/--no-liquidity-sweep-reversal",
@@ -160,6 +165,11 @@ def backtest(
         None,
         "--daily-macd-breakout/--no-daily-macd-breakout",
         help="Enable daily MACD cross breakout entries.",
+    ),
+    adaptive_strategy_switch: Optional[bool] = typer.Option(
+        None,
+        "--adaptive-strategy-switch/--no-adaptive-strategy-switch",
+        help="Enable adaptive strategy switch during backtest.",
     ),
     funding_rate: float = typer.Option(0.0, help="Backtest funding rate assumption."),
     funding_block_threshold: Optional[float] = typer.Option(
@@ -222,6 +232,11 @@ def backtest(
                 if confirmation_max_risk_multiplier is not None
                 else settings.confirmation_max_risk_multiplier
             ),
+            legacy_a_risk_sizing=(
+                legacy_a_risk_sizing
+                if legacy_a_risk_sizing is not None
+                else settings.legacy_a_risk_sizing
+            ),
             enable_liquidity_sweep_reversal=(
                 liquidity_sweep_reversal
                 if liquidity_sweep_reversal is not None
@@ -278,7 +293,11 @@ def backtest(
             llm_regime_base_url=settings.llm_regime_base_url,
             llm_regime_api_key=settings.llm_regime_api_key,
             llm_regime_api_key_env=settings.llm_regime_api_key_env,
-            enable_adaptive_strategy_switch=settings.enable_adaptive_strategy_switch,
+            enable_adaptive_strategy_switch=(
+                adaptive_strategy_switch
+                if adaptive_strategy_switch is not None
+                else settings.enable_adaptive_strategy_switch
+            ),
             adaptive_no_trade_hours=settings.adaptive_no_trade_hours,
             adaptive_min_range_24h_pct=settings.adaptive_min_range_24h_pct,
             llm_max_calls=llm_max_calls,

@@ -60,6 +60,7 @@ class BacktestConfig:
     max_signal_risk_multiplier: float = 3.0
     confirmation_position_sizing: bool = True
     confirmation_max_risk_multiplier: float = 3.0
+    legacy_a_risk_sizing: bool = False
     funding_block_threshold: float = 0.001
     backtest_funding_rate: float = 0.0
     spike_amplitude_threshold: float = 1.0
@@ -926,6 +927,7 @@ class OKXBacktester:
             f"- 品种: `{', '.join(self.config.symbols)}`",
             f"- 杠杆限制: shock `{self.config.shock_leverage_limit:.1f}x`, trend `{self.config.trend_symbol_leverage_limit:.1f}x`, signal risk cap `{self.config.max_signal_risk_multiplier:.1f}x`",
             f"- 确认级别动态仓位: `{self.config.confirmation_position_sizing}`, max risk `{self.config.confirmation_max_risk_multiplier:.1f}x`",
+            f"- 旧版A级风险: `{self.config.legacy_a_risk_sizing}`",
             f"- 风控约束: same direction `{self.config.same_direction_risk_limit:.2%}`, daily drawdown `{self.config.daily_drawdown_limit:.2%}`, funding block `{self.config.funding_block_threshold:.4%}`, backtest funding `{self.config.backtest_funding_rate:.4%}`",
             f"- 插针/扫单反转策略: `{self.config.enable_liquidity_sweep_reversal}`, risk `{self.config.liquidity_sweep_risk_multiplier:.2f}x`, next confirmation `{self.config.liquidity_sweep_require_confirmation}`",
             f"- 两根K动量补充单: `{self.config.enable_two_candle_momentum}`",

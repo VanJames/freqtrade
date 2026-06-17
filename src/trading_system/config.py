@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     max_signal_risk_multiplier: float = 3.0
     confirmation_position_sizing: bool = True
     confirmation_max_risk_multiplier: float = 3.0
+    legacy_a_risk_sizing: bool = False
     funding_block_threshold: float = 0.001
     spike_amplitude_threshold: float = 0.035
     spike_lock_seconds: int = 7200
