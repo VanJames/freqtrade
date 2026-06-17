@@ -59,6 +59,13 @@ def test_literal_api_key_is_supported_without_env_lookup() -> None:
     assert reviewer.api_key() == "sk-test"
 
 
+def test_direct_api_key_takes_precedence(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    reviewer = LLMRegimeReviewer(api_key="sk-direct", api_key_env="OPENAI_API_KEY")
+
+    assert reviewer.api_key() == "sk-direct"
+
+
 def test_llm_cache_key_ignores_small_price_noise() -> None:
     reviewer = LLMRegimeReviewer(enabled=True)
     base_features = {

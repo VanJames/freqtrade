@@ -204,6 +204,8 @@ def test_build_backtest_config_from_settings_preserves_runtime_values() -> None:
         risk_percent=0.012,
         same_direction_risk_limit=0.06,
         max_signal_risk_multiplier=3.0,
+        enable_two_candle_momentum=True,
+        llm_regime_api_key="sk-test",
     )
 
     config = build_backtest_config_from_settings(
@@ -219,6 +221,8 @@ def test_build_backtest_config_from_settings_preserves_runtime_values() -> None:
     assert config.risk_percent == 0.012
     assert config.same_direction_risk_limit == 0.06
     assert config.max_signal_risk_multiplier == 3.0
+    assert config.enable_two_candle_momentum is True
+    assert config.llm_regime_api_key == "sk-test"
     assert config.confirmation_position_sizing is True
     assert config.llm_regime_review_enabled is False
     assert config.llm_max_calls == 5

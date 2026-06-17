@@ -121,6 +121,11 @@ def backtest(
         None,
         help="Risk multiplier for SHOCK_TREND scout entries.",
     ),
+    two_candle_momentum: Optional[bool] = typer.Option(
+        None,
+        "--two-candle-momentum/--no-two-candle-momentum",
+        help="Enable 5m/15m two-candle momentum supplemental entries.",
+    ),
     funding_rate: float = typer.Option(0.0, help="Backtest funding rate assumption."),
     funding_block_threshold: Optional[float] = typer.Option(None, help="Funding rate threshold used by risk checks."),
     llm_review: Optional[bool] = typer.Option(None, help="Enable LLM regime review during backtest. Defaults to .env."),
@@ -183,6 +188,9 @@ def backtest(
                 if shock_trend_scout_risk_multiplier is not None
                 else settings.shock_trend_scout_risk_multiplier
             ),
+            enable_two_candle_momentum=(
+                two_candle_momentum if two_candle_momentum is not None else settings.enable_two_candle_momentum
+            ),
             funding_block_threshold=(
                 funding_block_threshold if funding_block_threshold is not None else settings.funding_block_threshold
             ),
@@ -198,6 +206,7 @@ def backtest(
             llm_regime_provider=llm_provider or settings.llm_regime_provider,
             llm_regime_model=llm_model or settings.llm_regime_model,
             llm_regime_base_url=settings.llm_regime_base_url,
+            llm_regime_api_key=settings.llm_regime_api_key,
             llm_regime_api_key_env=settings.llm_regime_api_key_env,
             enable_adaptive_strategy_switch=settings.enable_adaptive_strategy_switch,
             adaptive_no_trade_hours=settings.adaptive_no_trade_hours,

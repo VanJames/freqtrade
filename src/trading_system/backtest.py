@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 from dataclasses import dataclass, field, replace
@@ -11,6 +12,9 @@ from typing import Any
 import ccxt
 import pandas as pd
 
+from trading_system.adaptive_parameters import AdaptiveParameterTuner, MarketCondition
+from trading_system.expectancy_optimizer import ExpectancyOptimizer, trades_to_frame
+from trading_system.factor_discovery import AdaptiveFactorDiscovery
 from trading_system.indicators import atr, ema, macd, ohlcv_frame, rsi
 from trading_system.llm_regime import LLMRegimeReviewer, RegimeReviewInput
 from trading_system.models import Position, PositionSide, Regime, Side, SignalType, TradeSignal
@@ -78,6 +82,7 @@ class BacktestConfig:
     enable_liquidity_sweep_reversal: bool = False
     liquidity_sweep_risk_multiplier: float = 0.8
     liquidity_sweep_require_confirmation: bool = True
+    enable_two_candle_momentum: bool = False
     enable_adaptive_strategy_switch: bool = True
     adaptive_no_trade_hours: float = 48.0
     adaptive_min_range_24h_pct: float = 0.012
@@ -85,6 +90,7 @@ class BacktestConfig:
     llm_regime_provider: str = "openai"
     llm_regime_model: str = "gpt-4.1-mini"
     llm_regime_base_url: str = ""
+    llm_regime_api_key: str = ""
     llm_regime_api_key_env: str = ""
     llm_max_calls: int = 50
 
@@ -203,6 +209,7 @@ class OKXBacktester:
             model=config.llm_regime_model,
             provider=config.llm_regime_provider,
             base_url=config.llm_regime_base_url or None,
+            api_key=config.llm_regime_api_key or None,
             api_key_env=config.llm_regime_api_key_env or None,
             enabled=config.llm_regime_review_enabled,
         )
@@ -227,6 +234,7 @@ class OKXBacktester:
             enable_liquidity_sweep_reversal=config.enable_liquidity_sweep_reversal,
             liquidity_sweep_risk_multiplier=config.liquidity_sweep_risk_multiplier,
             liquidity_sweep_require_confirmation=config.liquidity_sweep_require_confirmation,
+            enable_two_candle_momentum=config.enable_two_candle_momentum,
         )
         self.llm_review_count = 0
 
@@ -322,17 +330,19 @@ class OKXBacktester:
                 if idx is None or idx < 240:
                     continue
                 row = df5.iloc[idx]
-                history_1h = completed_history_until(state["df1h"], now)
-                history_4h = completed_history_until(state["df4h"], now)
-                if len(history_1h) < 80 or len(history_4h) < 50:
+                df1h = state["df1h"]
+                df4h = state["df4h"]
+                history_1h_end = completed_history_end(df1h, now)
+                history_4h_end = completed_history_end(df4h, now)
+                if history_1h_end < 80 or history_4h_end < 50:
                     continue
 
                 regime_bucket = now.floor("1h") if regime_interval == "1h" else now.floor("15min")
-                feature_key = (history_1h.index[-1], history_4h.index[-1], regime_bucket)
+                feature_key = (df1h.index[history_1h_end - 1], df4h.index[history_4h_end - 1], regime_bucket)
                 if feature_key != state["last_feature_key"]:
                     classify_5m = df5.iloc[max(0, idx - 999) : idx + 1]
-                    classify_1h = history_1h.iloc[-120:]
-                    classify_4h = history_4h.iloc[-80:]
+                    classify_1h = df1h.iloc[max(0, history_1h_end - 120) : history_1h_end]
+                    classify_4h = df4h.iloc[max(0, history_4h_end - 80) : history_4h_end]
                     regime, market_features = classify_user_4h_market(classify_1h, classify_4h, symbol, classify_5m)
                     state["cached_regime"] = regime
                     state["cached_market_features"] = market_features
@@ -381,8 +391,8 @@ class OKXBacktester:
                     features=market_features,
                     candles_5m=state["rows5"][max(0, idx - 299) : idx + 1],
                     positions=backtest_positions(symbol, state["open_position"]),
-                    candles_1h=state["rows1h"][max(0, len(history_1h) - 120) : len(history_1h)],
-                    candles_4h=state["rows4h"][max(0, len(history_4h) - 100) : len(history_4h)],
+                    candles_1h=state["rows1h"][max(0, history_1h_end - 120) : history_1h_end],
+                    candles_4h=state["rows4h"][max(0, history_4h_end - 100) : history_4h_end],
                     context=adaptive_strategy_context(
                         self.config,
                         now,
@@ -598,17 +608,17 @@ class OKXBacktester:
             if int(row.ts) < start_ms:
                 continue
 
-            history_1h = completed_history_until(df1h, now)
-            history_4h = completed_history_until(df4h, now)
-            if len(history_1h) < 80 or len(history_4h) < 50:
+            history_1h_end = completed_history_end(df1h, now)
+            history_4h_end = completed_history_end(df4h, now)
+            if history_1h_end < 80 or history_4h_end < 50:
                 continue
 
             regime_bucket = now.floor("1h") if regime_interval == "1h" else now.floor("15min")
-            feature_key = (history_1h.index[-1], history_4h.index[-1], regime_bucket)
+            feature_key = (df1h.index[history_1h_end - 1], df4h.index[history_4h_end - 1], regime_bucket)
             if feature_key != last_feature_key:
                 classify_5m = df5.iloc[max(0, idx - 999) : idx + 1]
-                classify_1h = history_1h.iloc[-120:]
-                classify_4h = history_4h.iloc[-80:]
+                classify_1h = df1h.iloc[max(0, history_1h_end - 120) : history_1h_end]
+                classify_4h = df4h.iloc[max(0, history_4h_end - 80) : history_4h_end]
                 cached_regime, cached_market_features = classify_user_4h_market(
                     classify_1h,
                     classify_4h,
@@ -656,8 +666,8 @@ class OKXBacktester:
                 features=market_features,
                 candles_5m=rows5[max(0, idx - 299) : idx + 1],
                 positions=backtest_positions(symbol, open_position),
-                candles_1h=rows1h[max(0, len(history_1h) - 120) : len(history_1h)],
-                candles_4h=rows4h[max(0, len(history_4h) - 100) : len(history_4h)],
+                candles_1h=rows1h[max(0, history_1h_end - 120) : history_1h_end],
+                candles_4h=rows4h[max(0, history_4h_end - 100) : history_4h_end],
                 context=adaptive_strategy_context(
                     self.config,
                     now,
@@ -734,6 +744,7 @@ class OKXBacktester:
             f"- 确认级别动态仓位: `{self.config.confirmation_position_sizing}`, max risk `{self.config.confirmation_max_risk_multiplier:.1f}x`",
             f"- 风控约束: same direction `{self.config.same_direction_risk_limit:.2%}`, daily drawdown `{self.config.daily_drawdown_limit:.2%}`, funding block `{self.config.funding_block_threshold:.4%}`, backtest funding `{self.config.backtest_funding_rate:.4%}`",
             f"- 插针/扫单反转策略: `{self.config.enable_liquidity_sweep_reversal}`, risk `{self.config.liquidity_sweep_risk_multiplier:.2f}x`, next confirmation `{self.config.liquidity_sweep_require_confirmation}`",
+            f"- 两根K动量补充单: `{self.config.enable_two_candle_momentum}`",
             f"- SHOCK_TREND scout: `{self.config.enable_shock_trend_scout}`, risk `{self.config.shock_trend_scout_risk_multiplier:.2f}x`",
             f"- 自适应策略切换: `{self.config.enable_adaptive_strategy_switch}`, no-trade `{self.config.adaptive_no_trade_hours:.1f}h`, min 24h range `{self.config.adaptive_min_range_24h_pct:.2%}`",
             f"- 手续费假设: maker `{self.config.fee_rate:.4%}` 每边，滑点 `{self.config.slippage_rate:.4%}` 每边",
@@ -760,6 +771,8 @@ class OKXBacktester:
             f"- 平均亏损: `{result.avg_loss:.2f} USDT`",
             f"- 行情趋势准确度: `{result.regime_accuracy:.2%}`，样本 `{len(result.regime_hits)}`",
             f"- 行情状态计数: `{result.regime_counts}`",
+            "",
+            *optimization_guide_sections(result, self.config),
             "",
             "## 亏损归因",
             "",
@@ -969,9 +982,116 @@ def avg_entry_gap_hours(trades: list[SimTrade]) -> float:
     return sum(gaps) / len(gaps)
 
 
+def format_profit_factor(value: float) -> str:
+    if math.isinf(value):
+        return "inf"
+    return f"{value:.2f}"
+
+
+def optimization_guide_sections(result: BacktestResult, config: BacktestConfig) -> list[str]:
+    trade_frame = trades_to_frame(result.trades)
+    metrics = ExpectancyOptimizer.calculate_metrics(trade_frame)
+    factor_columns = [
+        "risk_multiplier",
+        "entry_close_position_72h",
+        "entry_ret_24h",
+        "entry_ret_72h",
+    ]
+    if not trade_frame.empty:
+        trade_frame["abs_ret_24h"] = trade_frame["entry_ret_24h"].abs()
+        trade_frame["abs_ret_72h"] = trade_frame["entry_ret_72h"].abs()
+        factor_columns.extend(["abs_ret_24h", "abs_ret_72h"])
+    factor_importance = AdaptiveFactorDiscovery().learn_from_backtest(trade_frame, factor_columns)
+    by_stage = (
+        trade_frame.groupby("entry_stage")["pnl"].agg(["count", "sum", "mean"])
+        if not trade_frame.empty
+        else pd.DataFrame()
+    )
+    by_signal = (
+        trade_frame.groupby("signal_reason")["pnl"].agg(["count", "sum", "mean"])
+        if not trade_frame.empty
+        else pd.DataFrame()
+    )
+    condition = MarketCondition(
+        volatility=abs(float(trade_frame["entry_ret_24h"].mean())) if not trade_frame.empty else 0.0,
+        trend_strength=abs(float(trade_frame["entry_ret_72h"].mean())) if not trade_frame.empty else 0.0,
+        momentum=float(trade_frame["entry_ret_24h"].mean()) if not trade_frame.empty else 0.0,
+        regime="PORTFOLIO_BACKTEST",
+    )
+    params = AdaptiveParameterTuner().adjust_parameters(condition)
+    frequency_state = "偏低" if len(result.trades) < 20 else "正常" if len(result.trades) <= 60 else "偏高"
+    lines = [
+        "## 优化指南对齐诊断",
+        "",
+        "### 方案1 动态因子发现",
+        "",
+        "| factor | importance |",
+        "|---|---:|",
+    ]
+    if factor_importance:
+        for factor, importance in factor_importance.items():
+            lines.append(f"| {factor} | {importance:.4f} |")
+    else:
+        lines.append("| 样本不足 | 0.0000 |")
+    lines.extend(
+        [
+            "",
+            "### 方案2 多时间框架信号融合",
+            "",
+            f"- 行情分类准确度: `{result.regime_accuracy:.2%}`",
+            f"- 平均入场间隔: `{result.avg_entry_gap_hours:.2f}h`",
+            f"- 交易频率状态: `{frequency_state}`",
+            "",
+            "| entry_stage | count | pnl | avg |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    if by_stage.empty:
+        lines.append("| 无交易 | 0 | 0.00 | 0.00 |")
+    else:
+        for stage, row in by_stage.sort_values("sum").iterrows():
+            lines.append(f"| {stage or '-'} | {int(row['count'])} | {row['sum']:.2f} | {row['mean']:.2f} |")
+    lines.extend(
+        [
+            "",
+            "### 方案3 机器学习因子筛选",
+            "",
+            f"- 因子筛选模式: `{'random_forest_or_correlation' if factor_importance else 'insufficient_sample'}`",
+            f"- 推荐优先观察因子: `{', '.join(list(factor_importance)[:3]) if factor_importance else 'N/A'}`",
+            "",
+            "### 方案4 参数自适应调优",
+            "",
+            f"- 组合波动代理: `{condition.volatility:.4%}`",
+            f"- 组合动量代理: `{condition.momentum:.4%}`",
+            f"- 建议风险缩放: `{params['risk_multiplier_scale']:.2f}x`",
+            f"- 建议止盈缩放: `{params['take_profit_scale']:.2f}x`",
+            f"- 建议止损缩放: `{params['stop_loss_scale']:.2f}x`",
+            "",
+            "### 方案5 交易频率与胜率优化",
+            "",
+            f"- 单笔期望值: `{metrics['expectancy']:.4f} USDT`",
+            f"- 利润因子: `{format_profit_factor(metrics['profit_factor'])}`",
+            f"- Kelly 安全仓位建议: `{ExpectancyOptimizer.optimize_position_sizing(config.initial_equity, metrics['expectancy'], metrics['win_rate']):.2%}`",
+            "",
+            "| signal | count | pnl | avg |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    if by_signal.empty:
+        lines.append("| 无交易 | 0 | 0.00 | 0.00 |")
+    else:
+        for signal, row in by_signal.sort_values("sum").iterrows():
+            lines.append(f"| {signal or '-'} | {int(row['count'])} | {row['sum']:.2f} | {row['mean']:.2f} |")
+    return lines
+
+
 def completed_history_until(frame: pd.DataFrame, now: pd.Timestamp) -> pd.DataFrame:
+    return frame.iloc[: completed_history_end(frame, now)]
+
+
+def completed_history_end(frame: pd.DataFrame, now: pd.Timestamp) -> int:
     rows_including_current = frame.index.searchsorted(now, side="right")
-    return frame.iloc[: max(rows_including_current - 1, 0)]
+    return max(rows_including_current - 1, 0)
 
 
 def ohlcv_rows(frame: pd.DataFrame) -> list[list[float]]:
@@ -1749,6 +1869,7 @@ def build_user_rule_signal(
         and price >= ema20_5m_value * 0.998
         and ema20_5m_value >= ema20_5m_prev
         and shock_trend_up_rsi_quality
+        and shock_trend_up_late_entry_ok
         and sol_trade_allowed(
             symbol=symbol,
             side=PositionSide.LONG,

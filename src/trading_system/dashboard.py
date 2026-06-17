@@ -1058,7 +1058,7 @@ def render_page(data: dict[str, Any]) -> str:
       e("div", { className:"form-grid" }, (data.runtime_fields || []).map((field) => {
         const checked = boolEnabled(form[field.key]);
         if (field.boolean) return e("label", { className:"field switch-row", key:field.key }, e("span", null, e("span", { className:"field-title" }, field.label), e("div", { className:"field-note" }, field.description || "")), e("input", { type:"checkbox", name:field.key, checked, onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.checked ? "1" : "0" })) }));
-        const inputType = field.key === "email_pass" ? "password" : (field.text ? "text" : "number");
+        const inputType = ["email_pass", "llm_regime_api_key"].includes(field.key) ? "password" : (field.text ? "text" : "number");
         return e("label", { className:"field", key:field.key }, e("span", { className:"field-title" }, field.label), e("input", { type:inputType, name:field.key, min:field.min, max:field.max, step:field.step || "any", value:value(form[field.key], ""), onChange:(event) => setForm(Object.assign({}, form, { [field.key]: event.target.value })) }), e("span", { className:"field-note" }, field.description || ""));
       })),
       e("div", { className:"actions" }, e("button", { type:"submit" }, "保存配置"), e("span", { className:"muted small" }, status))
@@ -1713,7 +1713,7 @@ def runtime_config_form(fields: list[dict[str, Any]], values: dict[str, Any]) ->
         hint = f"{field['min']} - {field['max']}"
         if field.get("percent"):
             hint += "，0.01=1%"
-        input_type = "checkbox" if field.get("boolean") else "password" if key == "email_pass" else "text" if field.get("text") else "number"
+        input_type = "checkbox" if field.get("boolean") else "password" if key in {"email_pass", "llm_regime_api_key"} else "text" if field.get("text") else "number"
         checked = " checked" if field.get("boolean") and float(values.get(key, 0.0) or 0.0) >= 1.0 else ""
         value_attr = " value=\"1\"" if field.get("boolean") else f" value=\"{escape(str(values.get(key, '')))}\""
         number_attrs = (

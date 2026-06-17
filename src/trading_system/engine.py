@@ -85,6 +85,7 @@ class OKXQuantEngine:
             enable_liquidity_sweep_reversal=settings.enable_liquidity_sweep_reversal,
             liquidity_sweep_risk_multiplier=settings.liquidity_sweep_risk_multiplier,
             liquidity_sweep_require_confirmation=settings.liquidity_sweep_require_confirmation,
+            enable_two_candle_momentum=settings.enable_two_candle_momentum,
         )
         self.risk = RiskManager(settings)
         self.email_notifier = OrderEmailNotifier(SmtpConfig.from_settings(settings))
@@ -106,6 +107,7 @@ class OKXQuantEngine:
             model=settings.llm_regime_model,
             provider=settings.llm_regime_provider,
             base_url=settings.llm_regime_base_url or None,
+            api_key=settings.llm_regime_api_key or None,
             api_key_env=settings.llm_regime_api_key_env or None,
             enabled=settings.llm_regime_review_enabled,
             cache_ttl_seconds=settings.llm_regime_review_cache_ttl_seconds,
@@ -1482,6 +1484,7 @@ class OKXQuantEngine:
             self.llm_reviewer.provider,
             self.llm_reviewer.model,
             self.llm_reviewer.base_url,
+            bool(self.llm_reviewer.api_key_value),
             self.llm_reviewer.enabled,
             self.llm_reviewer.cache_ttl_seconds,
             self.llm_reviewer.min_interval_seconds,
@@ -1510,6 +1513,7 @@ class OKXQuantEngine:
         self.llm_reviewer.provider = provider
         self.llm_reviewer.model = self.settings.llm_regime_model
         self.llm_reviewer.base_url = base_url
+        self.llm_reviewer.api_key_value = self.settings.llm_regime_api_key
         self.llm_reviewer.api_key_env = api_key_env
         self.llm_reviewer.enabled = self.settings.llm_regime_review_enabled
         self.llm_reviewer.cache_ttl_seconds = self.settings.llm_regime_review_cache_ttl_seconds
@@ -1518,6 +1522,7 @@ class OKXQuantEngine:
             self.llm_reviewer.provider,
             self.llm_reviewer.model,
             self.llm_reviewer.base_url,
+            bool(self.llm_reviewer.api_key_value),
             self.llm_reviewer.enabled,
             self.llm_reviewer.cache_ttl_seconds,
             self.llm_reviewer.min_interval_seconds,

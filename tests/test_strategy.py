@@ -219,6 +219,56 @@ def test_late_shock_trend_up_blocks_burst_without_72h_followthrough() -> None:
     )
 
 
+def test_shock_trend_up_confirmed_requires_late_entry_filter(monkeypatch) -> None:
+    engine = StrategyEngine()
+    monkeypatch.setattr(engine, "_recent_range_position", lambda *args, **kwargs: 0.65)
+    monkeypatch.setattr(engine, "_sol_allowed", lambda *args, **kwargs: True)
+    candles = [[index * 300_000, 100.0 + index, 100.2 + index, 99.8 + index, 100.1 + index, 1.0] for index in range(70)]
+    frame = ohlcv_frame(candles)
+    features = MarketFeatures(
+        atr_1h=1.0,
+        close_1h=168.0,
+        ema20_1h=160.0,
+        ema60_1h=150.0,
+        current_4h_low=155.0,
+        current_4h_high=170.0,
+        last_4h_close=168.0,
+        prev_4h_close=164.0,
+        close_position_72h=0.84,
+        ret_24h=0.026,
+        ret_72h=0.030,
+    )
+    current = frame.iloc[-1].copy()
+    current.open = 166.0
+    current.close = 168.0
+    volatility_policy = engine._volatility_policy(168.0, features, frame)
+
+    signal = engine._user_4h_shock_trend_signal(
+        "BTC/USDT:USDT",
+        Regime.SHOCK_TREND_UP,
+        features,
+        frame,
+        168.0,
+        current,
+        True,
+        False,
+        True,
+        False,
+        True,
+        False,
+        True,
+        False,
+        165.0,
+        164.0,
+        55.0,
+        volatility_policy,
+        [],
+        {},
+    )
+
+    assert signal is None
+
+
 def test_liquidity_sweep_reversal_detects_downside_reclaim() -> None:
     engine = StrategyEngine(enable_liquidity_sweep_reversal=True, max_stop_loss_pct=0.015)
     candles = []

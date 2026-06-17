@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from trading_system.adaptive_parameters import AdaptiveParameterTuner
+from trading_system.factor_discovery import AdaptiveFactorDiscovery
 from trading_system.indicators import atr, crossed_above, crossed_below, ema, macd, ohlcv_frame, rsi
+from trading_system.multi_timeframe_fusion import MultiTimeframeFusion
 from trading_system.models import HedgeLock, MarketFeatures, Position, PositionSide, Regime, Side, SignalType, TradeSignal
 from trading_system.opportunity import opportunity_metadata, score_opportunity, sol_structure_stop, sol_trade_allowed
 from trading_system.volatility import build_volatility_policy
@@ -54,6 +57,9 @@ class StrategyEngine:
         self.liquidity_sweep_risk_multiplier = liquidity_sweep_risk_multiplier
         self.liquidity_sweep_require_confirmation = liquidity_sweep_require_confirmation
         self.enable_two_candle_momentum = enable_two_candle_momentum
+        self.factor_discovery = AdaptiveFactorDiscovery(window_days=30)
+        self.mtf_fusion = MultiTimeframeFusion()
+        self.param_tuner = AdaptiveParameterTuner()
         self._pre_cross_cache: dict[tuple[str, str, int, int, float], bool] = {}
         self._frame_cache: dict[tuple[str, int, int, int, float], Any] = {}
 
@@ -1189,6 +1195,7 @@ class StrategyEngine:
             and price >= ema_now * 0.998
             and ema_now >= ema_prev
             and shock_trend_up_rsi_quality
+            and shock_trend_up_late_entry_ok
             and not local_top_without_impulse
             and features.close_position_72h <= 0.85
             and not (mixed_uptrend and features.close_position_72h >= 0.58)

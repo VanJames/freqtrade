@@ -216,6 +216,7 @@ def build_backtest_config_from_settings(
         enable_liquidity_sweep_reversal=settings.enable_liquidity_sweep_reversal,
         liquidity_sweep_risk_multiplier=settings.liquidity_sweep_risk_multiplier,
         liquidity_sweep_require_confirmation=settings.liquidity_sweep_require_confirmation,
+        enable_two_candle_momentum=settings.enable_two_candle_momentum,
         enable_adaptive_strategy_switch=settings.enable_adaptive_strategy_switch,
         adaptive_no_trade_hours=settings.adaptive_no_trade_hours,
         adaptive_min_range_24h_pct=settings.adaptive_min_range_24h_pct,
@@ -224,6 +225,7 @@ def build_backtest_config_from_settings(
         llm_regime_provider=settings.llm_regime_provider,
         llm_regime_model=settings.llm_regime_model,
         llm_regime_base_url=settings.llm_regime_base_url,
+        llm_regime_api_key=settings.llm_regime_api_key,
         llm_regime_api_key_env=settings.llm_regime_api_key_env,
         llm_max_calls=llm_max_calls,
     )
@@ -382,7 +384,7 @@ def propose_llm_candidates(
 ) -> list[LLMParameterCandidate]:
     provider = base.llm_regime_provider.lower()
     api_key_env = base.llm_regime_api_key_env or ("DEEPSEEK_API_KEY" if provider == "deepseek" else "OPENAI_API_KEY")
-    api_key = api_key_env if api_key_env.startswith(("sk-", "sk_")) else os.getenv(api_key_env)
+    api_key = base.llm_regime_api_key or (api_key_env if api_key_env.startswith(("sk-", "sk_")) else os.getenv(api_key_env))
     if not api_key:
         return []
     from openai import OpenAI

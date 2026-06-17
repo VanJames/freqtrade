@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     enable_liquidity_sweep_reversal: bool = False
     liquidity_sweep_risk_multiplier: float = 0.8
     liquidity_sweep_require_confirmation: bool = True
+    enable_two_candle_momentum: bool = False
     enable_adaptive_strategy_switch: bool = True
     adaptive_no_trade_hours: float = 48.0
     adaptive_min_range_24h_pct: float = 0.012
@@ -70,6 +71,7 @@ class Settings(BaseSettings):
     llm_regime_provider: str = "openai"
     llm_regime_model: str = "gpt-4.1-mini"
     llm_regime_base_url: str = ""
+    llm_regime_api_key: str = ""
     llm_regime_api_key_env: str = ""
     llm_regime_review_cache_ttl_seconds: int = 900
     llm_regime_review_min_interval_seconds: int = 900

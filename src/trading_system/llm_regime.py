@@ -44,6 +44,7 @@ class LLMRegimeReviewer:
         self,
         model: str = "gpt-4.1-mini",
         provider: str = "openai",
+        api_key: str | None = None,
         api_key_env: str | None = None,
         base_url: str | None = None,
         knowledge_path: Path = Path("knowledge/regime_rules.md"),
@@ -54,6 +55,7 @@ class LLMRegimeReviewer:
     ) -> None:
         self.model = model
         self.provider = provider.lower()
+        self.api_key_value = api_key or ""
         self.api_key_env = api_key_env or ("DEEPSEEK_API_KEY" if self.provider == "deepseek" else "OPENAI_API_KEY")
         self.base_url = base_url or ("https://api.deepseek.com" if self.provider == "deepseek" else None)
         self.knowledge_path = knowledge_path
@@ -272,6 +274,8 @@ class LLMRegimeReviewer:
         return self._rules_cache
 
     def api_key(self) -> str | None:
+        if self.api_key_value:
+            return self.api_key_value
         if self.api_key_env.startswith(("sk-", "sk_")):
             return self.api_key_env
         return os.getenv(self.api_key_env)
