@@ -424,7 +424,7 @@ class HotcoinExchange(ExchangeClient):
         ord_type = str(params.get("ordType") or "").lower()
         status = "open" if ord_type == "post_only" and not reduce_only else "closed"
         metrics = extract_hotcoin_order_metrics(payload)
-        filled = metrics["filled"] if metrics["filled"] > 0 else (amount if status == "closed" else 0.0)
+        filled = self._hotcoin_units_to_base(symbol, metrics["filled"]) if metrics["filled"] > 0 else (amount if status == "closed" else 0.0)
         average = metrics["average"] if metrics["average"] > 0 else price
         order = OrderResult(
             id=order_id,

@@ -30,6 +30,7 @@ order_tracks = Table(
     Column("filled_qty", Numeric(18, 8), nullable=False, default=0),
     Column("avg_price", Numeric(18, 8), nullable=False, default=0),
     Column("realized_pnl", Numeric(18, 8), nullable=True),
+    Column("pnl_source", String(32), nullable=False, default=""),
     Column("side", String(8), nullable=False, default=""),
     Column("position_side", String(8), nullable=False, default=""),
     Column("signal_reason", Text, nullable=False, default=""),
@@ -90,11 +91,13 @@ class StateStore:
         signal: TradeSignal | None = None,
     ) -> None:
         realized_pnl = order.realized_pnl
-        if realized_pnl is None and signal is not None:
+        pnl_source = "exchange" if realized_pnl is not None else ""
+        if realized_pnl is None and signal is not None and self.exchange_id != "hotcoin":
             realized_pnl = estimate_realized_pnl(order, signal)
+            pnl_source = "estimated" if realized_pnl is not None else ""
         async with self.engine.begin() as conn:
             stmt = pg_insert(order_tracks).values(
-                **self._order_values(order, regime, signal, realized_pnl, created_at=datetime.now(timezone.utc))
+                **self._order_values(order, regime, signal, realized_pnl, pnl_source, created_at=datetime.now(timezone.utc))
             ).on_conflict_do_update(
                 index_elements=[order_tracks.c.order_id],
                 set_={
@@ -103,6 +106,7 @@ class StateStore:
                     "avg_price": order.average or order.price,
                     "fee_paid": order.fee,
                     "realized_pnl": realized_pnl,
+                    "pnl_source": pnl_source,
                     "side": order.side.value,
                     "position_side": order.position_side.value,
                     "signal_reason": signal.reason if signal else order_tracks.c.signal_reason,
@@ -131,14 +135,17 @@ class StateStore:
     ) -> None:
         if realized_pnl is None:
             realized_pnl = order.realized_pnl
-        if realized_pnl is None and signal is not None:
+        pnl_source = "exchange" if realized_pnl is not None else ""
+        if realized_pnl is None and signal is not None and self.exchange_id != "hotcoin":
             realized_pnl = estimate_realized_pnl(order, signal)
+            pnl_source = "estimated" if realized_pnl is not None else ""
         values: dict[str, Any] = {
             "status": order.status,
             "filled_qty": order.filled,
             "avg_price": order.average or order.price,
             "fee_paid": order.fee,
             "realized_pnl": realized_pnl,
+            "pnl_source": pnl_source,
             "side": order.side.value,
             "position_side": order.position_side.value,
         }
@@ -226,6 +233,7 @@ class StateStore:
                 add column if not exists filled_qty numeric(18, 8) not null default 0,
                 add column if not exists avg_price numeric(18, 8) not null default 0,
                 add column if not exists realized_pnl numeric(18, 8),
+                add column if not exists pnl_source varchar(32) not null default '',
                 add column if not exists side varchar(8) not null default '',
                 add column if not exists position_side varchar(8) not null default '',
                 add column if not exists signal_reason text not null default '',
@@ -240,6 +248,7 @@ class StateStore:
         regime: Regime,
         signal: TradeSignal | None,
         realized_pnl: float | None,
+        pnl_source: str,
         *,
         created_at: datetime,
     ) -> dict[str, Any]:
@@ -255,6 +264,7 @@ class StateStore:
             "filled_qty": order.filled,
             "avg_price": order.average or order.price,
             "realized_pnl": realized_pnl,
+            "pnl_source": pnl_source,
             "side": order.side.value,
             "position_side": order.position_side.value,
             "signal_reason": signal.reason if signal else "",

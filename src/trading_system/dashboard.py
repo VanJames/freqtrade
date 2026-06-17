@@ -89,6 +89,7 @@ async def ensure_dashboard_schema(conn: asyncpg.Connection) -> None:
             filled_qty numeric(18, 8) not null default 0,
             avg_price numeric(18, 8) not null default 0,
             realized_pnl numeric(18, 8),
+            pnl_source varchar(32) not null default '',
             side varchar(8) not null default '',
             position_side varchar(8) not null default '',
             signal_reason text not null default '',
@@ -104,6 +105,7 @@ async def ensure_dashboard_schema(conn: asyncpg.Connection) -> None:
         add column if not exists filled_qty numeric(18, 8) not null default 0,
         add column if not exists avg_price numeric(18, 8) not null default 0,
         add column if not exists realized_pnl numeric(18, 8),
+        add column if not exists pnl_source varchar(32) not null default '',
         add column if not exists side varchar(8) not null default '',
         add column if not exists position_side varchar(8) not null default '',
         add column if not exists signal_reason text not null default '',
@@ -213,7 +215,7 @@ async def fetch_orders_for_exchange(exchange_id: str) -> dict[str, Any]:
                 """
                 select order_id, symbol, regime_mode, initial_qty, maker_filled,
                        taker_twap_filled, fee_paid, status, filled_qty,
-                       avg_price, realized_pnl, side, position_side, signal_reason,
+                       avg_price, realized_pnl, pnl_source, side, position_side, signal_reason,
                        exchange_id, created_at
                 from order_tracks
                 where exchange_id = 'hotcoin'
@@ -227,7 +229,7 @@ async def fetch_orders_for_exchange(exchange_id: str) -> dict[str, Any]:
                 """
                 select order_id, symbol, regime_mode, initial_qty, maker_filled,
                        taker_twap_filled, fee_paid, status, filled_qty,
-                       avg_price, realized_pnl, side, position_side, signal_reason,
+                       avg_price, realized_pnl, pnl_source, side, position_side, signal_reason,
                        exchange_id, created_at
                 from order_tracks
                 where exchange_id in ('', 'okx')
@@ -239,11 +241,21 @@ async def fetch_orders_for_exchange(exchange_id: str) -> dict[str, Any]:
     finally:
         await conn.close()
     orders = [normalize_row(row) for row in rows]
-    if exchange_id != "hotcoin":
+    if exchange_id == "hotcoin":
+        orders = normalize_hotcoin_order_display(orders)
+    else:
         orders = await merge_okx_realized_pnl_bills(orders)
         orders.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
         orders = orders[:30]
     return {"orders": orders, "count": int(count or 0)}
+
+
+def normalize_hotcoin_order_display(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for order in orders:
+        if order.get("pnl_source") != "exchange":
+            order["fee_paid"] = None
+            order["realized_pnl"] = None
+    return orders
 
 
 async def merge_okx_realized_pnl_bills(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -766,6 +778,15 @@ def render_page(data: dict[str, Any]) -> str:
     if (row.status === "exchange_bill") return pnl(row.realized_pnl);
     return isClosingOrder(row) ? pnl(row.realized_pnl) : "-";
   }
+  function trailingActivatePrice(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const entry = Number(raw.entry_price), stop = Number(raw.stop_loss);
+    if (!Number.isFinite(entry) || !Number.isFinite(stop) || stop <= 0) return null;
+    const minR = Number(raw.min_trailing_activate_r || 1);
+    const risk = Math.abs(stop - entry);
+    const side = String(raw.position_side || raw.side || "").toLowerCase();
+    return side === "short" ? entry - minR * risk : entry + minR * risk;
+  }
   function conditionText(item) {
     const code = String((item && item.code) || "unknown");
     let label = conditionLabels[code] || code;
@@ -920,7 +941,15 @@ def render_page(data: dict[str, Any]) -> str:
     Object.entries(mem.trailing_states || {}).forEach(([key, raw]) => {
       if (!raw || typeof raw !== "object") return;
       const symbol = String(raw.symbol || key.split(":")[0]), side = String(raw.position_side || key.split(":").pop());
-      rows[symbol + ":" + side] = Object.assign(rows[symbol + ":" + side] || { symbol, side }, { entry_price:raw.entry_price, stop_loss:raw.stop_loss, take_profit:raw.take_profit, atr:raw.atr, source:"移动止盈状态" });
+      rows[symbol + ":" + side] = Object.assign(rows[symbol + ":" + side] || { symbol, side }, {
+        entry_price:raw.entry_price,
+        stop_loss:raw.stop_loss,
+        take_profit:raw.take_profit,
+        trailing_activate_price:trailingActivatePrice(raw),
+        trailing_active:!!raw.active,
+        atr:raw.atr,
+        source:"移动止盈状态"
+      });
     });
     Object.entries(mem.recovered_positions || {}).forEach(([key, raw]) => {
       if (!raw || typeof raw !== "object") return;
@@ -933,7 +962,9 @@ def render_page(data: dict[str, Any]) -> str:
     const rows = protectedRows(memory(data));
     return e(Panel, { title:"持仓保护" }, e(Table, { rows, empty:"暂无持仓保护数据", columns:[
       {key:"symbol", label:"品种"}, {key:"side", label:"方向"}, {key:"contracts", label:"数量", render:(row) => formatNumber(row.contracts, 6)}, {key:"entry_price", label:"开仓价", render:(row) => price(row.entry_price)},
-      {key:"stop_loss", label:"保护止损", render:(row) => price(row.stop_loss)}, {key:"take_profit", label:"止盈", render:(row) => price(row.take_profit)}, {key:"atr", label:"ATR", render:(row) => formatNumber(row.atr, 6)}, {key:"regime", label:"恢复行情"}, {key:"source", label:"来源"}
+      {key:"stop_loss", label:"保护止损", render:(row) => price(row.stop_loss)}, {key:"take_profit", label:"止盈", render:(row) => price(row.take_profit)},
+      {key:"trailing_activate_price", label:"trailing激活价", render:(row) => price(row.trailing_activate_price)}, {key:"trailing_active", label:"trailing已激活", render:(row) => row.trailing_active ? "true" : "false"},
+      {key:"atr", label:"ATR", render:(row) => formatNumber(row.atr, 6)}, {key:"regime", label:"恢复行情"}, {key:"source", label:"来源"}
     ]}));
   }
   function Orders({ data }) {
@@ -1337,6 +1368,8 @@ def recovered_positions_panel(
             f"<td>{escape(format_price(item.get('entry_price')))}</td>"
             f"<td>{escape(format_price(item.get('stop_loss')))}</td>"
             f"<td>{escape(format_price(item.get('take_profit')))}</td>"
+            f"<td>{escape(format_price(item.get('trailing_activate_price')))}</td>"
+            f"<td>{escape(str(item.get('trailing_active') if item.get('trailing_active') is not None else '-'))}</td>"
             f"<td>{escape(format_metric_value(item.get('atr', '-')))}</td>"
             f"<td>{escape(str(item.get('regime') or '-'))}</td>"
             f"<td>{escape(str(item.get('source') or '-'))}</td>"
@@ -1344,7 +1377,7 @@ def recovered_positions_panel(
         )
     return (
         "<table><thead><tr><th>品种</th><th>方向</th><th>数量</th><th>开仓价</th>"
-        "<th>保护止损</th><th>止盈</th><th>ATR</th><th>恢复行情</th><th>来源</th></tr></thead>"
+        "<th>保护止损</th><th>止盈</th><th>trailing激活价</th><th>trailing已激活</th><th>ATR</th><th>恢复行情</th><th>来源</th></tr></thead>"
         f"<tbody>{rows}</tbody></table>"
     )
 
@@ -1382,6 +1415,8 @@ def protected_position_rows(
                 "entry_price": raw.get("entry_price", row.get("entry_price")),
                 "stop_loss": raw.get("stop_loss"),
                 "take_profit": raw.get("take_profit"),
+                "trailing_activate_price": trailing_activate_price(raw),
+                "trailing_active": bool(raw.get("active")),
                 "atr": raw.get("atr"),
                 "source": "移动止盈状态",
             }
@@ -1399,6 +1434,17 @@ def protected_position_rows(
                 row[field] = value
         row["source"] = "恢复持仓"
     return rows
+
+
+def trailing_activate_price(raw: dict[str, Any]) -> float | None:
+    entry = _float(raw.get("entry_price"))
+    stop = _float(raw.get("stop_loss"))
+    if entry <= 0 or stop <= 0:
+        return None
+    min_r = _float(raw.get("min_trailing_activate_r")) or 1.0
+    risk = abs(stop - entry)
+    side = str(raw.get("position_side") or raw.get("side") or "").lower()
+    return entry - min_r * risk if side == "short" else entry + min_r * risk
 
 
 def condition_text(item: dict[str, Any]) -> str:
