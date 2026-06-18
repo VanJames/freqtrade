@@ -501,6 +501,98 @@ async def api_hotcoin_session(request: Request) -> JSONResponse:
     )
 
 
+@app.post("/api/hotcoin/test-session")
+async def api_hotcoin_test_session(request: Request) -> JSONResponse:
+    require_dashboard_auth(request)
+    settings = Settings()
+    session_data = await load_hotcoin_session(settings.postgres_dsn)
+    if not session_data or not session_data.get("token"):
+        return JSONResponse(
+            {
+                "ok": True,
+                "connected": False,
+                "trade_auth_valid": False,
+                "summary": "未保存 Hotcoin 登录会话",
+                "checks": [],
+            }
+        )
+
+    client = HotcoinWebSession(
+        base_url=settings.hotcoin_base_url,
+        device_id=settings.hotcoin_device_id,
+        timeout=settings.exchange_request_timeout_seconds,
+        session_loader=lambda: asyncio.run(load_hotcoin_session(settings.postgres_dsn)),
+    )
+    client.load_session_data(session_data)
+    checks: list[dict[str, Any]] = []
+
+    def check_item(name: str, ok: bool, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        return {
+            "name": name,
+            "ok": ok,
+            "code": payload.get("code"),
+            "msg": payload.get("msg") or payload.get("message") or payload.get("error") or "",
+        }
+
+    try:
+        user = await asyncio.to_thread(client.get_user_info)
+        checks.append({"name": "user_info", "ok": bool(user), "code": 200 if user else None, "msg": ""})
+    except Exception as exc:
+        checks.append({"name": "user_info", "ok": False, "code": None, "msg": str(exc)})
+
+    try:
+        balance = await asyncio.to_thread(client.get_balance)
+        checks.append(check_item("balance", balance.get("code") == 200, balance))
+    except Exception as exc:
+        checks.append({"name": "balance", "ok": False, "code": None, "msg": str(exc)})
+
+    try:
+        positions = await asyncio.to_thread(client.get_positions)
+        checks.append({"name": "positions", "ok": isinstance(positions, list), "code": 200, "msg": f"{len(positions)} positions"})
+    except Exception as exc:
+        checks.append({"name": "positions", "ok": False, "code": None, "msg": str(exc)})
+
+    probe_symbol = settings.symbols[0] if settings.symbols else "BTC/USDT:USDT"
+    trade_probe: dict[str, Any]
+    try:
+        trade_probe = await asyncio.to_thread(
+            client.place_order,
+            symbol=probe_symbol,
+            side="sell",
+            amount=0.0,
+            price=1.0,
+            order_type="limit",
+            reduce_only=True,
+        )
+        trade_auth_valid = trade_probe.get("code") != 401
+        checks.append(check_item("zero_amount_order_probe", trade_auth_valid, trade_probe))
+    except Exception as exc:
+        trade_probe = {"code": None, "msg": str(exc)}
+        trade_auth_valid = False
+        checks.append({"name": "zero_amount_order_probe", "ok": False, "code": None, "msg": str(exc)})
+
+    query_ok = any(item.get("ok") for item in checks if item.get("name") in {"user_info", "balance", "positions"})
+    if trade_probe.get("code") == 401:
+        summary = "交易接口返回 401，Hotcoin 登录或交易 Cookie 已失效"
+    elif trade_auth_valid:
+        summary = "交易接口未返回 401，登录态有效；0 数量下单返回的是业务校验结果"
+    elif query_ok:
+        summary = "查询接口可用，但交易接口探测失败，请查看错误信息"
+    else:
+        summary = "Hotcoin 查询与交易接口均未通过"
+    return JSONResponse(
+        {
+            "ok": True,
+            "connected": query_ok,
+            "trade_auth_valid": trade_auth_valid,
+            "probe_symbol": probe_symbol,
+            "summary": summary,
+            "checks": checks,
+        }
+    )
+
+
 @app.get("/login", response_class=HTMLResponse)
 async def login() -> str:
     return render_login_page()
@@ -1068,6 +1160,8 @@ def render_page(data: dict[str, Any]) -> str:
     const current = String((data.mode || {}).selected_exchange_id || (data.mode || {}).exchange_id || "okx").toLowerCase();
     const [exchange, setExchange] = React.useState(current);
     const [status, setStatus] = React.useState("");
+    const [testStatus, setTestStatus] = React.useState("");
+    const [testRows, setTestRows] = React.useState([]);
     const [qr, setQr] = React.useState(null);
     const [token, setToken] = React.useState("");
     React.useEffect(() => setExchange(current), [current]);
@@ -1096,12 +1190,26 @@ def render_page(data: dict[str, Any]) -> str:
       if (!response.ok) { setStatus(body.detail || "二维码生成失败"); return; }
       setQr(body.image); setToken(body.qr_token); setStatus("请用 Hotcoin App 扫码确认");
     }
+    async function testHotcoin() {
+      setTestStatus("测试中...");
+      setTestRows([]);
+      const response = await fetch("/api/hotcoin/test-session", { method:"POST" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) { setTestStatus(body.detail || "测试失败"); return; }
+      setTestStatus(body.summary || "测试完成");
+      setTestRows(body.checks || []);
+    }
     return e(Panel, { title:"交易所连接" },
       e("form", { onSubmit:save, className:"two-col" },
         e("label", { className:"field" }, e("span", { className:"field-title" }, "交易所"), e("select", { value:exchange, onChange:(event) => setExchange(event.target.value) }, e("option", { value:"okx" }, "OKX"), e("option", { value:"hotcoin" }, "Hotcoin"))),
         e("div", { className:"actions" }, e("button", { type:"submit" }, "保存交易所"), e("span", { className:"muted small" }, status))
       ),
-      e("div", { className:"qr-box" }, qr ? e("img", { src:qr, alt:"Hotcoin QR" }) : e("div", { className:"panel", style:{ minHeight:"180px", display:"grid", placeItems:"center" } }, e("span", { className:"muted small" }, "Hotcoin 二维码")), e("div", null, e("button", { type:"button", className:"ghost-button", onClick:startQr }, "生成 Hotcoin 扫码二维码"), e("div", { className:"muted small", style:{ marginTop:"10px" } }, "扫码成功后 token 会保存到数据库，交易所切换仍需重启实盘 app。"))),
+      e("div", { className:"qr-box" }, qr ? e("img", { src:qr, alt:"Hotcoin QR" }) : e("div", { className:"panel", style:{ minHeight:"180px", display:"grid", placeItems:"center" } }, e("span", { className:"muted small" }, "Hotcoin 二维码")), e("div", null,
+        e("div", { className:"actions" }, e("button", { type:"button", className:"ghost-button", onClick:startQr }, "生成 Hotcoin 扫码二维码"), e("button", { type:"button", className:"ghost-button", onClick:testHotcoin }, "测试 Hotcoin 会话")),
+        e("div", { className:"muted small", style:{ marginTop:"10px" } }, "扫码成功后 token 会保存到数据库，交易所切换仍需重启实盘 app。"),
+        testStatus ? e("div", { className:"muted small", style:{ marginTop:"10px" } }, testStatus) : null
+      )),
+      testRows.length ? e(Table, { rows:testRows, columns:[{key:"name", label:"检查项"}, {key:"ok", label:"结果", render:(row) => row.ok ? "通过" : "失败"}, {key:"code", label:"Code", render:(row) => value(row.code)}, {key:"msg", label:"返回", render:(row) => value(row.msg)}] }) : null,
       e(Panel, { title:"已保存会话" }, e(Table, { rows:data.exchange_sessions || [], empty:"暂无会话", columns:[{key:"exchange_id", label:"交易所"}, {key:"connected", label:"状态", render:(row) => row.connected ? "已连接" : "未连接"}, {key:"token", label:"Token"}, {key:"device_id", label:"设备"}, {key:"updated_at", label:"更新时间", render:(row) => localTime(row.updated_at)}] }))
     );
   }

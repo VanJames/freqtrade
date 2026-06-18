@@ -361,6 +361,21 @@ class HotcoinWebSession:
         return "open_long" if side == "buy" else "open_short"
 
 
+from trading_system.hotcoin_sdk import (  # noqa: E402
+    DEFAULT_DEVICE_ID as DEFAULT_DEVICE_ID,
+    HOTCOIN_LOGIN_BASE_URL as HOTCOIN_LOGIN_BASE_URL,  # noqa: F811
+    HOTCOIN_QR_BASE_URL as HOTCOIN_QR_BASE_URL,  # noqa: F811
+    HOTCOIN_SESSION_KEY as HOTCOIN_SESSION_KEY,
+    HOTCOIN_WEB_BASE_URL as HOTCOIN_WEB_BASE_URL,
+    HotcoinQrLogin as HotcoinQrLogin,  # noqa: F811
+    HotcoinWebSession as HotcoinWebSession,  # noqa: F811
+    dashboard_dsn as dashboard_dsn,  # noqa: F811
+    ensure_hotcoin_session_schema as ensure_hotcoin_session_schema,  # noqa: F811
+    load_hotcoin_session as load_hotcoin_session,  # noqa: F811
+    save_hotcoin_session as save_hotcoin_session,  # noqa: F811
+)
+
+
 class HotcoinExchange(ExchangeClient):
     """ExchangeClient adapter for Hotcoin trading with OKX public market data."""
 
@@ -374,6 +389,9 @@ class HotcoinExchange(ExchangeClient):
             base_url=settings.hotcoin_base_url,
             device_id=settings.hotcoin_device_id,
             timeout=settings.exchange_request_timeout_seconds,
+            session_loader=lambda: asyncio.run(
+                load_hotcoin_session(settings.postgres_dsn)
+            ),
         )
         self._orders: dict[str, OrderResult] = {}
 
