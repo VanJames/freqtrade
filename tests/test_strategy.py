@@ -12,9 +12,33 @@ from trading_system.backtest import (
     signal_reward,
 )
 from trading_system.indicators import ohlcv_frame
-from trading_system.models import MarketFeatures, PositionSide, Regime
+from trading_system.models import (
+    MarketFeatures,
+    PositionSide,
+    Regime,
+    Side,
+    SignalType,
+    TradeSignal,
+)
 from trading_system.strategy import StrategyEngine
 from trading_system.volatility import build_volatility_policy
+
+
+def _steady_rows(close: float = 100.0, count: int = 60) -> list[list[float]]:
+    rows = []
+    for index in range(count):
+        price = close + index * 0.02
+        rows.append(
+            [
+                index * 300_000,
+                price - 0.01,
+                price + 0.05,
+                price - 0.05,
+                price,
+                10.0,
+            ]
+        )
+    return rows
 
 
 def test_short_stop_expands_to_minimum_distance() -> None:
@@ -60,6 +84,140 @@ def test_backtest_reward_never_below_min_take_profit_pct() -> None:
 
     assert stop == pytest.approx(2304.6)
     assert reward == pytest.approx(9.2)
+
+
+def test_liquidation_plugin_signal_takes_priority_over_unknown_regime() -> None:
+    engine = StrategyEngine()
+    candles = _steady_rows()
+    price = candles[-1][4]
+    features = MarketFeatures(
+        atr_1h=1.0,
+        close_1h=price,
+        previous_1h_low=price - 0.8,
+        previous_1h_high=price + 0.8,
+        range_low_4h=price - 2.0,
+        range_high_4h=price + 2.0,
+    )
+
+    signals = engine.build_signals(
+        "BTC/USDT:USDT",
+        Regime.UNKNOWN,
+        Regime.UNKNOWN,
+        features,
+        candles,
+        [],
+        context={
+            "liquidation_plugin": {
+                "status": "long",
+                "weight": 0.65,
+                "matched_scenario": "C_confirmed_long",
+                "target_take_profit": price + 3.0,
+                "trigger_condition": "stood above key level",
+                "predicted_liquidation_side": "shorts",
+                "basis": "upper short liquidation confirmed",
+                "mapping_version": "test",
+                "lower_price_high": price - 1.2,
+            }
+        },
+    )
+
+    assert len(signals) == 1
+    assert signals[0].position_side == PositionSide.LONG
+    assert signals[0].metadata["strategy_route"] == "liquidation_plugin"
+    assert signals[0].metadata["liquidation_plugin_weight"] == 0.65
+    assert signals[0].take_profit == pytest.approx(price + 3.0)
+
+
+def test_liquidation_plugin_blocks_opposite_native_entry() -> None:
+    engine = StrategyEngine()
+    native_long = TradeSignal(
+        symbol="BTC/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.TREND_LONG,
+        price=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+    )
+
+    signals = engine._routed_entry(
+        native_long,
+        "native_test",
+        {
+            "liquidation_plugin": {
+                "status": "short",
+                "weight": 0.65,
+                "matched_scenario": "A_breakdown_short",
+                "lower_strength": 0.9,
+                "upper_strength": 0.1,
+            }
+        },
+    )
+
+    assert signals == []
+
+
+def test_liquidation_plugin_no_trade_does_not_block_native_candidate() -> None:
+    engine = StrategyEngine()
+    native_long = TradeSignal(
+        symbol="BTC/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.TREND_LONG,
+        price=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+    )
+
+    signals = engine._routed_entry(
+        native_long,
+        "native_test",
+        context={
+            "liquidation_plugin": {
+                "status": "no_trade",
+                "weight": 0.65,
+                "no_trade_reason": "Upper/lower liquidation candidates are near-tied",
+            }
+        },
+    )
+
+    assert len(signals) == 1
+    assert signals[0].metadata["strategy_route"] == "native_test"
+
+
+def test_liquidation_plugin_alignment_marks_hybrid_confirmation() -> None:
+    engine = StrategyEngine()
+    native_long = TradeSignal(
+        symbol="BTC/USDT:USDT",
+        signal_type=SignalType.ENTER_TREND,
+        side=Side.BUY,
+        position_side=PositionSide.LONG,
+        regime=Regime.TREND_LONG,
+        price=100.0,
+        stop_loss=99.0,
+        take_profit=103.0,
+        metadata={"opportunity_score": 82, "risk_multiplier": 0.4},
+    )
+
+    signals = engine._routed_entry(
+        native_long,
+        "native_test",
+        {
+            "liquidation_plugin": {
+                "status": "long",
+                "weight": 0.65,
+                "matched_scenario": "C_confirmed_long",
+                "upper_strength": 0.9,
+                "lower_strength": 0.2,
+            }
+        },
+    )
+
+    assert len(signals) == 1
+    assert signals[0].metadata["liquidation_plugin_aligned"] is True
+    assert signals[0].metadata["hybrid_decision"] == "notice_lifted_native_candidate"
 
 
 def test_short_breakeven_protects_profit_before_full_trailing_activation() -> None:

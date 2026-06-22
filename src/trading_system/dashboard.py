@@ -785,6 +785,7 @@ def render_page(data: dict[str, Any]) -> str:
   const navItems = [
     ["overview", "概览", "总"],
     ["market", "行情", "行"],
+    ["notice", "清算策略", "清"],
     ["flow", "交易过程", "流"],
     ["diagnostics", "入场诊断", "诊"],
     ["positions", "持仓保护", "仓"],
@@ -834,6 +835,7 @@ def render_page(data: dict[str, Any]) -> str:
     Object.keys(mem.regimes || {}).forEach((item) => union.add(item));
     Object.keys(mem.prices || {}).forEach((item) => union.add(item));
     Object.keys(mem.entry_diagnostics || {}).forEach((item) => union.add(item));
+    Object.keys(mem.liquidation_plugin || {}).forEach((item) => union.add(item));
     return Array.from(union);
   }
   function localTime(raw) {
@@ -968,6 +970,45 @@ def render_page(data: dict[str, Any]) -> str:
     return e(Panel, { title:"当前行情" }, e(Table, { rows, empty:"暂无行情数据", columns:[
       {key:"symbol", label:"品种"}, {key:"price", label:"实时价格", render:(row) => price(row.price)}, {key:"regime", label:"行情判断", render:(row) => value(row.regime)}, {key:"checked", label:"最近判断时间", render:(row) => localTime(row.checked)}
     ]}));
+  }
+  function NoticeStrategy({ data }) {
+    const mem = memory(data);
+    const plugin = mem.liquidation_plugin || {};
+    const rows = symbols(data).map((symbol) => Object.assign({ symbol }, plugin[symbol] || {}));
+    return e(Panel, { title:"清算地图策略", extra:e("span", { className:"tag" }, "notice + 主策略互补") },
+      e(Table, { rows, empty:"暂无清算地图数据", columns:[
+        {key:"symbol", label:"品种"},
+        {key:"status", label:"方向", render:(row) => value(row.status)},
+        {key:"matched_scenario", label:"场景", render:(row) => value(row.matched_scenario)},
+        {key:"weight", label:"权重", render:(row) => formatNumber(row.weight, 2)},
+        {key:"suggested_entry_price", label:"建议下单价", render:(row) => price(row.suggested_entry_price)},
+        {key:"stop_loss", label:"止损", render:(row) => price(row.stop_loss)},
+        {key:"target_take_profit", label:"目标止盈", render:(row) => price(row.target_take_profit)},
+        {key:"upper_strength", label:"上方空头清算", render:(row) => formatNumber(row.upper_strength, 2)},
+        {key:"lower_strength", label:"下方多头清算", render:(row) => formatNumber(row.lower_strength, 2)},
+        {key:"near_tie", label:"强度接近", render:(row) => row.near_tie === true ? "是" : (row.near_tie === false ? "否" : "-")},
+        {key:"checked_at", label:"更新时间", render:(row) => localTime(row.checked_at)}
+      ]}),
+      e("div", { className:"diag-list", style:{ marginTop:"14px" } }, rows.map((row) => e("div", { className:"diag-card", key:row.symbol },
+        e("div", { className:"diag-head" },
+          e("div", null,
+            e("div", { className:"diag-title" }, row.symbol),
+            e("div", { className:"diag-action" }, value(row.trigger_condition || row.no_trade_reason || row.reason))
+          ),
+          e("span", { className:"tag " + (row.status === "failure" ? "bad" : (row.status === "no_trade" ? "warn" : "good")) }, value(row.status))
+        ),
+        e("div", { className:"metric-tags" },
+          e("span", { className:"tag" }, "上方区间 " + price(row.upper_price_low) + " - " + price(row.upper_price_high)),
+          e("span", { className:"tag" }, "下方区间 " + price(row.lower_price_low) + " - " + price(row.lower_price_high)),
+          e("span", { className:"tag" }, "下单 " + price(row.suggested_entry_price)),
+          e("span", { className:"tag" }, "止损 " + price(row.stop_loss)),
+          e("span", { className:"tag" }, "止盈 " + price(row.target_take_profit)),
+          e("span", { className:"tag" }, "对手盘 " + value(row.predicted_liquidation_side)),
+          e("span", { className:"tag" }, "mapping " + value(row.mapping_version))
+        ),
+        e("div", { className:"muted small", style:{ marginTop:"10px" } }, value(row.basis || row.reason || row.no_trade_reason, "暂无依据"))
+      )))
+    );
   }
   function TradeFlow({ data }) {
     const mem = memory(data);
@@ -1253,6 +1294,7 @@ def render_page(data: dict[str, Any]) -> str:
     let body;
     if (view === "overview") body = e(Overview, { data });
     else if (view === "market") body = e(Market, { data });
+    else if (view === "notice") body = e(NoticeStrategy, { data });
     else if (view === "flow") body = e(TradeFlow, { data });
     else if (view === "diagnostics") body = e(Diagnostics, { data });
     else if (view === "positions") body = e(Positions, { data });

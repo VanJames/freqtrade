@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <body>
+    <section data-testid="liquidation-heatmap">
+      <svg data-testid="heatmap-svg" width="640" height="320">
+        <g data-testid="price-axis">
+          <text class="price-tick" x="4" y="260">$1600</text>
+          <text class="price-tick" x="4" y="160">$1700</text>
+          <text class="price-tick" x="4" y="60">$1800</text>
+        </g>
+        <g data-testid="heatmap-bars">
+          <rect class="liq-bar upper" data-side="upper_short" data-period="1H"
+                data-strength="0.82" x="412" y="80" width="9" height="42" />
+          <rect class="liq-bar lower" data-side="lower_long" data-period="4H"
+                data-strength="0.76" x="220" y="210" width="10" height="39" />
+        </g>
+      </svg>
+    </section>
+  </body>
+</html>

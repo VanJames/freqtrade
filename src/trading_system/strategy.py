@@ -101,6 +101,7 @@ class StrategyEngine:
         candles_1d: list[list[float]] | None = None,
         context: dict[str, Any] | None = None,
     ) -> list[TradeSignal]:
+        context = context or {}
         signals: list[TradeSignal] = []
         if regime != Regime.UNKNOWN:
             signals.extend(
@@ -115,16 +116,19 @@ class StrategyEngine:
             symbol, features, candles_5m, candles_1h, candles_4h, positions
         )
         if signal:
-            return [self._with_strategy_route(signal, "pre_cross_trend")]
+            return self._routed_entry(signal, "pre_cross_trend", context)
 
         if regime == Regime.UNKNOWN:
-            return []
+            signal = self._liquidation_plugin_signal(
+                symbol, regime, features, candles_5m, positions, context
+            )
+            return [self._with_strategy_route(signal, "liquidation_plugin")] if signal else []
 
         signal = self._liquidity_sweep_reversal_signal(
             symbol, regime, features, candles_5m, positions
         )
         if signal:
-            return [self._with_strategy_route(signal, "liquidity_sweep_reversal")]
+            return self._routed_entry(signal, "liquidity_sweep_reversal", context)
 
         signal = self._daily_macd_breakout_signal(
             symbol,
@@ -137,23 +141,26 @@ class StrategyEngine:
             candles_1d,
         )
         if signal:
-            return [self._with_strategy_route(signal, "daily_macd_breakout")]
+            return self._routed_entry(signal, "daily_macd_breakout", context)
 
         signal = self._user_4h_signal(
-            symbol, regime, features, candles_5m, positions, context or {}
+            symbol, regime, features, candles_5m, positions, context
         )
         if signal:
-            return [self._with_strategy_route(signal, "user_4h_core")]
+            return self._routed_entry(signal, "user_4h_core", context)
 
         signal = self._two_candle_momentum_signal(
             symbol, regime, features, candles_5m, positions
         )
         if signal:
-            return [
-                self._with_strategy_route(signal, "two_candle_momentum_experimental")
-            ]
+            return self._routed_entry(
+                signal, "two_candle_momentum_experimental", context
+            )
 
-        return []
+        signal = self._liquidation_plugin_signal(
+            symbol, regime, features, candles_5m, positions, context
+        )
+        return [self._with_strategy_route(signal, "liquidation_plugin")] if signal else []
 
     def entry_diagnostics(
         self,
@@ -2128,6 +2135,185 @@ class StrategyEngine:
         signal.metadata = {**(signal.metadata or {}), "strategy_route": route}
         return signal
 
+    def _routed_entry(
+        self, signal: TradeSignal, route: str, context: dict[str, Any]
+    ) -> list[TradeSignal]:
+        plugin = self._liquidation_plugin_context(context)
+        if not plugin or plugin.get("status") not in {"long", "short"}:
+            return [self._with_strategy_route(signal, route)]
+        plugin_score = self._liquidation_plugin_score(plugin)
+        native_score = self._native_signal_score(signal)
+        if plugin.get("status") == signal.position_side.value:
+            signal.metadata = {
+                **(signal.metadata or {}),
+                "liquidation_plugin_aligned": True,
+                "liquidation_plugin_weight": plugin.get("weight"),
+                "liquidation_plugin_scenario": plugin.get("matched_scenario"),
+                "liquidation_plugin_score": plugin_score,
+                "hybrid_decision": "native_with_notice_confirmation",
+            }
+            if native_score < 88 <= plugin_score:
+                signal.metadata["hybrid_decision"] = "notice_lifted_native_candidate"
+            return [self._with_strategy_route(signal, route)]
+        if plugin_score >= 85 and native_score < 92:
+            return []
+        signal.metadata = {
+            **(signal.metadata or {}),
+            "liquidation_plugin_conflict": True,
+            "liquidation_plugin_weight": plugin.get("weight"),
+            "liquidation_plugin_scenario": plugin.get("matched_scenario"),
+            "liquidation_plugin_score": plugin_score,
+            "hybrid_decision": "native_allowed_notice_conflict_weak",
+            "risk_multiplier": min(
+                float((signal.metadata or {}).get("risk_multiplier", 1.0) or 1.0),
+                0.35,
+            ),
+        }
+        return [self._with_strategy_route(signal, route)]
+
+    def _liquidation_plugin_signal(
+        self,
+        symbol: str,
+        regime: Regime,
+        features: MarketFeatures,
+        candles_5m: list[list[float]],
+        positions: list[Position],
+        context: dict[str, Any],
+    ) -> TradeSignal | None:
+        if positions:
+            return None
+        plugin = self._liquidation_plugin_context(context)
+        if not plugin or plugin.get("status") not in {"long", "short"}:
+            return None
+        df = self._cached_ohlcv_frame("5m", candles_5m)
+        if len(df) < 35 or features.atr_1h <= 0:
+            return None
+        price = float(df.close.iloc[-1])
+        target = self._float_or_none(plugin.get("target_take_profit"))
+        if target is None:
+            return None
+        side = (
+            PositionSide.LONG
+            if plugin.get("status") == "long"
+            else PositionSide.SHORT
+        )
+        if side == PositionSide.LONG and target <= price:
+            return None
+        if side == PositionSide.SHORT and target >= price:
+            return None
+        raw_stop = self._liquidation_plugin_raw_stop(price, side, plugin, features)
+        stop = self._cap_stop(price, raw_stop, side, self._volatility_policy(price, features, df))
+        reward_risk = (
+            abs(target - price) / abs(price - stop) if price != stop else 0.0
+        )
+        metadata = {
+            "liquidation_plugin_weight": plugin.get("weight"),
+            "liquidation_plugin_scenario": plugin.get("matched_scenario"),
+            "liquidation_plugin_trigger": plugin.get("trigger_condition"),
+            "liquidation_plugin_counterparty": plugin.get(
+                "predicted_liquidation_side"
+            ),
+            "liquidation_plugin_basis": plugin.get("basis"),
+            "liquidation_plugin_mapping_version": plugin.get("mapping_version"),
+            "risk_multiplier": max(0.2, min(1.0, float(plugin.get("weight") or 0.65))),
+            "reward_risk": round(reward_risk, 4),
+            "entry_stage": "liquidation_plugin",
+            "liquidation_plugin_score": self._liquidation_plugin_score(plugin),
+            "hybrid_decision": "notice_standalone",
+        }
+        return self._entry_signal(
+            symbol,
+            Side.BUY if side == PositionSide.LONG else Side.SELL,
+            side,
+            regime,
+            price,
+            stop,
+            target,
+            f"liquidation_plugin_{plugin.get('matched_scenario') or side.value}",
+            metadata,
+        )
+
+    @staticmethod
+    def _liquidation_plugin_context(context: dict[str, Any]) -> dict[str, Any] | None:
+        plugin = context.get("liquidation_plugin")
+        return plugin if isinstance(plugin, dict) else None
+
+    def _liquidation_plugin_score(self, plugin: dict[str, Any]) -> float:
+        same_side_strength = (
+            plugin.get("upper_strength")
+            if plugin.get("status") == "long"
+            else plugin.get("lower_strength")
+        )
+        opposite_strength = (
+            plugin.get("lower_strength")
+            if plugin.get("status") == "long"
+            else plugin.get("upper_strength")
+        )
+        strength = self._normalized_score(same_side_strength)
+        opposite = self._normalized_score(opposite_strength)
+        gap_bonus = max(0.0, strength - opposite) * 0.2
+        scenario_bonus = 5.0 if plugin.get("matched_scenario") in {
+            "A_breakdown_short",
+            "C_confirmed_long",
+        } else 2.0
+        return min(100.0, strength + gap_bonus + scenario_bonus)
+
+    @staticmethod
+    def _native_signal_score(signal: TradeSignal) -> float:
+        metadata = signal.metadata or {}
+        score = metadata.get("opportunity_score")
+        try:
+            return float(score)
+        except (TypeError, ValueError):
+            return 86.0
+
+    @staticmethod
+    def _normalized_score(value: object) -> float:
+        try:
+            parsed = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 70.0
+        if parsed <= 0:
+            return 0.0
+        if parsed <= 1.0:
+            return parsed * 100.0
+        return min(parsed, 100.0)
+
+    def _liquidation_plugin_raw_stop(
+        self,
+        price: float,
+        side: PositionSide,
+        plugin: dict[str, Any],
+        features: MarketFeatures,
+    ) -> float:
+        if side == PositionSide.LONG:
+            lower_high = self._float_or_none(plugin.get("lower_price_high"))
+            candidates = [
+                lower_high,
+                features.previous_1h_low,
+                features.range_low_4h,
+                price - features.atr_1h,
+            ]
+            valid = [item for item in candidates if item is not None and 0 < item < price]
+            return max(valid) if valid else price * (1 - self.min_stop_loss_pct)
+        upper_low = self._float_or_none(plugin.get("upper_price_low"))
+        candidates = [
+            upper_low,
+            features.previous_1h_high,
+            features.range_high_4h,
+            price + features.atr_1h,
+        ]
+        valid = [item for item in candidates if item is not None and item > price]
+        return min(valid) if valid else price * (1 + self.min_stop_loss_pct)
+
+    @staticmethod
+    def _float_or_none(value: object) -> float | None:
+        try:
+            parsed = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
     def _pre_cross_trend_signal(
         self,
         symbol: str,
@@ -2242,8 +2428,6 @@ class StrategyEngine:
             return None
 
         df5 = self._cached_ohlcv_frame("5m", candles_5m)
-        df1h = self._cached_ohlcv_frame("1h", candles_1h or [])
-        df4h = self._cached_ohlcv_frame("4h", candles_4h or [])
         df1d = self._cached_ohlcv_frame("1d", candles_1d or [])
         if len(df5) < 80 or len(df1d) < 35 or features.atr_1h <= 0:
             return None
@@ -2266,7 +2450,6 @@ class StrategyEngine:
             raw_stop = self._daily_macd_structure_stop(df1d, price, PositionSide.LONG)
             stop = self._cap_daily_macd_stop(price, raw_stop, PositionSide.LONG)
             stop = sol_structure_stop(symbol, PositionSide.LONG, price, stop)
-            reward = self._reward(price, stop, daily_trailing["reward_risk"])
             return self._entry_signal(
                 symbol,
                 Side.BUY,
@@ -2319,7 +2502,6 @@ class StrategyEngine:
         raw_stop = self._daily_macd_structure_stop(df1d, price, PositionSide.SHORT)
         stop = self._cap_daily_macd_stop(price, raw_stop, PositionSide.SHORT)
         stop = sol_structure_stop(symbol, PositionSide.SHORT, price, stop)
-        reward = self._reward(price, stop, daily_trailing["reward_risk"])
         return self._entry_signal(
             symbol,
             Side.SELL,

@@ -17,6 +17,7 @@ from trading_system.exchange import CcxtOkxExchange, DryRunExchange, ExchangeCli
 from trading_system.foresight import ForesightProvider
 from trading_system.indicators import macd, ohlcv_frame
 from trading_system.hotcoin import HotcoinExchange
+from trading_system.liquidation_plugin import LiquidationDirectionPlugin
 from trading_system.models import (
     HedgeLock,
     OrderResult,
@@ -127,6 +128,7 @@ class OKXQuantEngine:
             cache_ttl_seconds=settings.llm_regime_review_cache_ttl_seconds,
             min_interval_seconds=settings.llm_regime_review_min_interval_seconds,
         )
+        self.liquidation_plugin = LiquidationDirectionPlugin(settings)
         self.hedge_locks: dict[str, HedgeLock] = {}
         self.klines = {
             symbol: {"5m": [], "1h": [], "4h": [], "1d": []}
@@ -560,6 +562,10 @@ class OKXQuantEngine:
                 symbol, diagnostics, price=latest_price, regime=regime
             )
             return exit_signals
+        strategy_context = await self._adaptive_strategy_context(symbol, regime, features)
+        strategy_context.update(
+            await self._liquidation_plugin_context(symbol, latest_price)
+        )
         signals = self.strategy.build_signals(
             symbol,
             regime,
@@ -570,7 +576,7 @@ class OKXQuantEngine:
             self.klines[symbol]["1h"],
             self.klines[symbol]["4h"],
             self._daily_candles_with_live(symbol),
-            context=await self._adaptive_strategy_context(symbol, regime, features),
+            context=strategy_context,
         )
         if not signals:
             return []
@@ -908,6 +914,35 @@ class OKXQuantEngine:
                 continuation_short,
                 context["adaptive_reason"],
             )
+        return context
+
+    async def _liquidation_plugin_context(
+        self, symbol: str, latest_price: float
+    ) -> dict[str, object]:
+        if not self.settings.enable_liquidation_plugin:
+            return {}
+        try:
+            result = await self.liquidation_plugin.evaluate(
+                symbol,
+                current_price=latest_price,
+                candles_15m=self._resample_5m_cache(symbol, "15m", limit=120),
+                candles_1h=self.klines[symbol]["1h"],
+                candles_4h=self.klines[symbol]["4h"],
+                candles_1d=self._daily_candles_with_live(symbol),
+            )
+        except Exception as exc:
+            logger.exception("liquidation plugin failed symbol=%s", symbol)
+            plugin = {
+                "status": "failure",
+                "weight": self.settings.liquidation_plugin_weight,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "matched_scenario": "none",
+            }
+            self.symbol_status.setdefault(symbol, {})["liquidation_plugin"] = plugin
+            return {"liquidation_plugin": plugin}
+        context = result.as_context()
+        plugin = context["liquidation_plugin"]
+        self.symbol_status.setdefault(symbol, {})["liquidation_plugin"] = plugin
         return context
 
     async def _hours_since_latest_entry(self) -> float:
@@ -1511,6 +1546,11 @@ class OKXQuantEngine:
             },
             "entry_diagnostics": display_entry_diagnostics,
             "current_entry_diagnostics": current_entry_diagnostics,
+            "liquidation_plugin": {
+                symbol: status.get("liquidation_plugin")
+                for symbol, status in self.symbol_status.items()
+                if status.get("liquidation_plugin") is not None
+            },
             "last_signal": {
                 symbol: status.get("last_signal")
                 for symbol, status in self.symbol_status.items()

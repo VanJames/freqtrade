@@ -72,6 +72,25 @@ class Settings(BaseSettings):
     liquidity_sweep_require_confirmation: bool = True
     enable_two_candle_momentum: bool = False
     enable_daily_macd_breakout: bool = True
+    enable_liquidation_plugin: bool = True
+    liquidation_plugin_weight: float = 0.65
+    coinglass_heatmap_url: str = ""
+    coinglass_session_path: str = ""
+    coinglass_heatmap_ranges: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["24 hour"]
+    )
+    coinglass_screenshot_dir: str = ""
+    liquidation_plugin_analysis_interval: str = "15m"
+    liquidation_plugin_scrape_min_seconds: int = 3600
+    liquidation_plugin_max_staleness_seconds: int = 7200
+    liquidation_plugin_price_move_trigger: float = 0.01
+    liquidation_plugin_price_move_cooldown_seconds: int = 900
+    liquidation_plugin_price_sanity_max_distance: float = 0.50
+    liquidation_plugin_liquidation_sufficiency: float = 0.7
+    liquidation_plugin_near_tie: float = 0.05
+    liquidation_plugin_stood_above: float = 0.001
+    liquidation_plugin_broke_below: float = 0.001
+    liquidation_plugin_volume_confirmation: float = 1.2
     enable_adaptive_strategy_switch: bool = True
     adaptive_no_trade_hours: float = 48.0
     adaptive_min_range_24h_pct: float = 0.012
@@ -95,6 +114,13 @@ class Settings(BaseSettings):
     @field_validator("symbols", mode="before")
     @classmethod
     def parse_symbols(cls, value: object) -> list[str]:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value  # type: ignore[return-value]
+
+    @field_validator("coinglass_heatmap_ranges", mode="before")
+    @classmethod
+    def parse_coinglass_heatmap_ranges(cls, value: object) -> list[str]:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value  # type: ignore[return-value]

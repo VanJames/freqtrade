@@ -23,8 +23,10 @@ print("\n".join(project["dependencies"]))
 PY
 
 RUN pip install -r /tmp/requirements.txt
+RUN python -m playwright install --with-deps chromium
 
 COPY src ./src
+COPY notice ./notice
 COPY knowledge ./knowledge
 
 RUN pip install -e . --no-deps
