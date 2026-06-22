@@ -83,6 +83,11 @@ class FakePage:
         return []
 
 
+class CrashingPage(FakePage):
+    def goto(self, url, wait_until="networkidle", timeout=30000):
+        raise RuntimeError("Page.goto: Page crashed")
+
+
 class FakeEchartsPage(FakePage):
     def __init__(self, *, empty_echarts_reads=0, **kwargs):
         super().__init__(**kwargs)
@@ -211,6 +216,14 @@ def test_render_timeout_returns_failure_state():
 
     assert signal.failure.category == "scrape_render"
     assert signal.validation.render_valid is False
+
+
+def test_page_crash_returns_retryable_failure_state():
+    signal = scrape_liquidation_signal(config(), page=CrashingPage(), max_attempts=1)
+
+    assert signal.failure.category == "coinglass_scrape"
+    assert signal.failure.retryable is True
+    assert "page crashed" in signal.failure.safe_message
 
 
 def test_blank_screenshot_returns_failure_state():

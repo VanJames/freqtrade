@@ -142,7 +142,15 @@ def _scrape_once(
         except Exception as exc:  # pragma: no cover - environment-specific
             raise LiquidationScrapeError("coinglass_scrape", "Playwright is unavailable") from exc
         own_playwright = sync_playwright().start()
-        own_browser = own_playwright.chromium.launch(headless=True)
+        own_browser = own_playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
+        )
         session_path = Path(config.coinglass_session_path) if config.coinglass_session_path else None
         storage_state = str(session_path) if session_path and session_path.exists() else None
         context = own_browser.new_context(
@@ -220,9 +228,14 @@ def _scrape_once(
             validation=validation,
         )
     except Exception as exc:
-        if exc.__class__.__name__ != "TimeoutError":
-            raise
-        raise LiquidationScrapeError("scrape_render", "Chart render timed out") from exc
+        if exc.__class__.__name__ == "TimeoutError":
+            raise LiquidationScrapeError("scrape_render", "Chart render timed out") from exc
+        message = str(exc)
+        if "Page crashed" in message or "Target closed" in message:
+            raise LiquidationScrapeError(
+                "coinglass_scrape", "CoinGlass browser page crashed during render"
+            ) from exc
+        raise
     finally:
         if own_browser is not None:  # pragma: no cover - integration boundary
             own_browser.close()

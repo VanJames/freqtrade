@@ -91,6 +91,7 @@ class LiquidationDirectionPlugin:
         self.settings = settings
         self.weight = max(0.61, float(settings.liquidation_plugin_weight))
         self._states: dict[str, Any] = {}
+        self._scrape_lock = asyncio.Lock()
 
     async def evaluate(
         self,
@@ -139,13 +140,14 @@ class LiquidationDirectionPlugin:
             },
         )
         state = self._states.setdefault(symbol, ScrapeRuntimeState())
-        liquidation = await asyncio.to_thread(
-            scrape_liquidation_signal,
-            config,
-            now=now,
-            state=state,
-            current_market_price=current_price,
-        )
+        async with self._scrape_lock:
+            liquidation = await asyncio.to_thread(
+                scrape_liquidation_signal,
+                config,
+                now=now,
+                state=state,
+                current_market_price=current_price,
+            )
         decision = decide_strategy(config, liquidation, klines, now.strftime("%Y%m%dT%H%M%SZ"))
         reason = getattr(decision, "basis", "") or getattr(decision, "no_trade_reason", "")
         return LiquidationPluginResult(
