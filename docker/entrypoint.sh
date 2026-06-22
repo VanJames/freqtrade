@@ -5,10 +5,16 @@ CONTAINER_POSTGRES_DSN="${POSTGRES_DSN:-}"
 CONTAINER_REDIS_URL="${REDIS_URL:-}"
 
 if [ -f /run/secrets/app_env ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . /run/secrets/app_env
-  set +a
+  eval "$(
+    python - <<'PY'
+from dotenv import dotenv_values
+from shlex import quote
+
+for key, value in dotenv_values("/run/secrets/app_env").items():
+    if key and value is not None:
+        print(f"export {key}={quote(value)}")
+PY
+  )"
 fi
 
 if [ -n "$CONTAINER_POSTGRES_DSN" ]; then
