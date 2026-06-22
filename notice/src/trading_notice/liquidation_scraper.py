@@ -586,12 +586,21 @@ _ECHARTS_EXTRACTION_SCRIPT = r"""
   const lastCandle = candle?.data?.[candle.data.length - 1] || null;
   const currentPrice = lastCandle ? Number(lastCandle[1]) : null;
 
+  function parseFiniteNumber(value) {
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    if (typeof value !== "string") return null;
+    const cleaned = value.replace(/[$,\s]/g, "");
+    if (!cleaned) return null;
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   function normalize(point) {
     if (!Array.isArray(point)) return null;
     const x = Number(point[0]);
     const yIndex = Number(point[1]);
     const value = Number(point[2]);
-    const price = yPrices[yIndex] === undefined ? Number(yIndex) : Number(yPrices[yIndex]);
+    const price = yPrices[yIndex] === undefined ? yIndex : parseFiniteNumber(yPrices[yIndex]);
     if (![x, yIndex, value, price].every(Number.isFinite)) return null;
     return {x, yIndex, price, value};
   }
@@ -605,6 +614,7 @@ _ECHARTS_EXTRACTION_SCRIPT = r"""
 
   const rows = (heatmap?.data || []).map(normalize).filter(Boolean);
   const latestRows = rows.filter((row) => row.x === latestX);
+  const numericYPrices = yPrices.map(parseFiniteNumber).filter((value) => value !== null);
   const rangeLabels = [
     '12 hour', '24 hour', '48 hour', '3 day', '1 week', '2 week',
     '1 month', '3 month', '6 month', '1 Year', '2 Year'
@@ -617,8 +627,8 @@ _ECHARTS_EXTRACTION_SCRIPT = r"""
     selectedRange,
     currentPrice,
     latestTime: xLabels[latestX] || null,
-    yMin: Math.min(...yPrices.map(Number).filter(Number.isFinite)),
-    yMax: Math.max(...yPrices.map(Number).filter(Number.isFinite)),
+    yMin: numericYPrices.length ? Math.min(...numericYPrices) : null,
+    yMax: numericYPrices.length ? Math.max(...numericYPrices) : null,
     yCount: yPrices.length,
     heatmapPoints: rows.length,
     latestColumnPoints: latestRows.length,
@@ -679,6 +689,8 @@ def _required_float(value: Any, field: str) -> float:
 
 
 def _optional_float(value: Any) -> float | None:
+    if isinstance(value, str):
+        value = value.replace("$", "").replace(",", "").strip()
     try:
         parsed = float(value)
     except (TypeError, ValueError):

@@ -1,7 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
 from trading_notice.config import load_analysis_config
-from trading_notice.liquidation_scraper import ScrapeRuntimeState, scrape_liquidation_signal
+from trading_notice.liquidation_scraper import (
+    ScrapeRuntimeState,
+    _optional_float,
+    scrape_liquidation_signal,
+)
 
 
 PNG_BYTES = (
@@ -89,9 +93,10 @@ class CrashingPage(FakePage):
 
 
 class FakeEchartsPage(FakePage):
-    def __init__(self, *, empty_echarts_reads=0, **kwargs):
+    def __init__(self, *, empty_echarts_reads=0, formatted_axis=False, **kwargs):
         super().__init__(**kwargs)
         self.empty_echarts_reads = empty_echarts_reads
+        self.formatted_axis = formatted_axis
         self.evaluate_calls = 0
         self.selected_range = "24 hour"
 
@@ -122,13 +127,15 @@ class FakeEchartsPage(FakePage):
                 "latestLowerTop": [],
             }
         multiplier = 2 if self.selected_range == "48 hour" else 1
+        y_min = "$60,477.7" if self.formatted_axis else 60477.7
+        y_max = "66,837.75" if self.formatted_axis else 66837.75
         return {
             "chartFound": True,
             "selectedRange": self.selected_range,
             "currentPrice": 63972.6,
             "latestTime": "21 Jun 2026, 00:55",
-            "yMin": 60477.7,
-            "yMax": 66837.75,
+            "yMin": y_min,
+            "yMax": y_max,
             "yCount": 132,
             "heatmapPoints": 13545,
             "latestColumnPoints": 86,
@@ -198,6 +205,16 @@ def test_echarts_canvas_waits_until_series_data_is_ready(monkeypatch):
     assert signal.strongest_lower_candidate.strength == 49129438.84
 
 
+def test_echarts_canvas_accepts_formatted_axis_numbers():
+    signal = scrape_liquidation_signal(
+        config(current="63972.6"), page=FakeEchartsPage(formatted_axis=True), max_attempts=1
+    )
+
+    assert signal.failure is None
+    assert signal.strongest_upper_candidate.price_low < 64604.45
+    assert signal.strongest_lower_candidate.price_high > 63633.45
+
+
 def test_echarts_canvas_aggregates_configured_heatmap_ranges():
     signal = scrape_liquidation_signal(
         config_with_ranges(current="63972.6", ranges="24 hour,48 hour"),
@@ -259,3 +276,9 @@ def test_stale_latest_valid_scrape_returns_failure_without_scraping():
 
     assert signal.failure.category == "stale_scrape"
     assert signal.validation.staleness_seconds == 10800
+
+
+def test_optional_float_accepts_common_chart_number_formatting():
+    assert _optional_float("$60,477.70") == 60477.7
+    assert _optional_float(" 66,837.75 ") == 66837.75
+    assert _optional_float("not-a-number") is None
