@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -197,7 +198,17 @@ class LiquidationDirectionPlugin:
             coinglass_session_path=self.settings.coinglass_session_path or None,
             current_market_price=current_price,
             screenshot_dir=self.settings.coinglass_screenshot_dir or None,
+            coinglass_auth_ref=self._coinglass_auth_ref(),
         )
+
+    @staticmethod
+    def _coinglass_auth_ref() -> dict[str, str]:
+        if os.environ.get("COINGLASS_EMAIL") and os.environ.get("COINGLASS_PASSWORD"):
+            return {
+                "email": "COINGLASS_EMAIL",
+                "password": "COINGLASS_PASSWORD",
+            }
+        return {}
 
     @staticmethod
     def _kline_signals(config: Any, candles_by_period: dict[str, list[list[float]]]) -> list[Any]:
