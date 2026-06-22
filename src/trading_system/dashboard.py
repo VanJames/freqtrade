@@ -566,7 +566,7 @@ async def api_hotcoin_test_session(request: Request) -> JSONResponse:
             reduce_only=True,
         )
         trade_auth_valid = trade_probe.get("code") != 401
-        checks.append(check_item("zero_amount_order_probe", trade_auth_valid, trade_probe))
+        checks.append(hotcoin_order_probe_check(trade_probe))
     except Exception as exc:
         trade_probe = {"code": None, "msg": str(exc)}
         trade_auth_valid = False
@@ -576,7 +576,7 @@ async def api_hotcoin_test_session(request: Request) -> JSONResponse:
     if trade_probe.get("code") == 401:
         summary = "交易接口返回 401，Hotcoin 登录或交易 Cookie 已失效"
     elif trade_auth_valid:
-        summary = "交易接口未返回 401，登录态有效；0 数量下单返回的是业务校验结果"
+        summary = "交易接口认证有效；0 数量下单未真实通过，仅返回业务校验结果"
     elif query_ok:
         summary = "查询接口可用，但交易接口探测失败，请查看错误信息"
     else:
@@ -591,6 +591,34 @@ async def api_hotcoin_test_session(request: Request) -> JSONResponse:
             "checks": checks,
         }
     )
+
+
+def hotcoin_order_probe_check(payload: dict[str, Any]) -> dict[str, Any]:
+    code = payload.get("code")
+    message = payload.get("msg") or payload.get("message") or payload.get("error") or ""
+    if code == 200:
+        return {
+            "name": "zero_amount_order_probe",
+            "ok": True,
+            "auth_ok": True,
+            "code": code,
+            "msg": message,
+        }
+    if code == 401:
+        return {
+            "name": "zero_amount_order_probe",
+            "ok": False,
+            "auth_ok": False,
+            "code": code,
+            "msg": message or "Hotcoin 登录或交易 Cookie 已失效",
+        }
+    return {
+        "name": "zero_amount_order_probe",
+        "ok": False,
+        "auth_ok": True,
+        "code": code,
+        "msg": f"认证通过；0 数量订单被业务校验拒绝：{message or code or '-'}",
+    }
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1250,7 +1278,7 @@ def render_page(data: dict[str, Any]) -> str:
         e("div", { className:"muted small", style:{ marginTop:"10px" } }, "扫码成功后 token 会保存到数据库，交易所切换仍需重启实盘 app。"),
         testStatus ? e("div", { className:"muted small", style:{ marginTop:"10px" } }, testStatus) : null
       )),
-      testRows.length ? e(Table, { rows:testRows, columns:[{key:"name", label:"检查项"}, {key:"ok", label:"结果", render:(row) => row.ok ? "通过" : "失败"}, {key:"code", label:"Code", render:(row) => value(row.code)}, {key:"msg", label:"返回", render:(row) => value(row.msg)}] }) : null,
+      testRows.length ? e(Table, { rows:testRows, columns:[{key:"name", label:"检查项"}, {key:"ok", label:"结果", render:(row) => row.ok ? "通过" : (row.auth_ok ? "认证通过/业务拒绝" : "失败")}, {key:"code", label:"Code", render:(row) => value(row.code)}, {key:"msg", label:"返回", render:(row) => value(row.msg)}] }) : null,
       e(Panel, { title:"已保存会话" }, e(Table, { rows:data.exchange_sessions || [], empty:"暂无会话", columns:[{key:"exchange_id", label:"交易所"}, {key:"connected", label:"状态", render:(row) => row.connected ? "已连接" : "未连接"}, {key:"token", label:"Token"}, {key:"device_id", label:"设备"}, {key:"updated_at", label:"更新时间", render:(row) => localTime(row.updated_at)}] }))
     );
   }
