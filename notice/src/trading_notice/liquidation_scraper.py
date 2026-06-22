@@ -350,11 +350,11 @@ def _ensure_coinglass_login_if_configured(
 ) -> None:
     if not config.coinglass_auth_ref:
         return
-    if config.coinglass_session_path and _coinglass_session_is_authenticated(page):
+    session_path = Path(config.coinglass_session_path) if config.coinglass_session_path else None
+    if session_path and session_path.exists() and _coinglass_session_is_authenticated(page):
         return
     _login_to_coinglass(config, page)
-    if config.coinglass_session_path:
-        session_path = Path(config.coinglass_session_path)
+    if session_path:
         session_path.parent.mkdir(parents=True, exist_ok=True)
         context.storage_state(path=str(session_path))
 

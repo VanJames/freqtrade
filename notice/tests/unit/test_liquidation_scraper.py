@@ -1,8 +1,10 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from trading_notice.config import load_analysis_config
 from trading_notice.liquidation_scraper import (
     ScrapeRuntimeState,
+    _ensure_coinglass_login_if_configured,
     _optional_float,
     scrape_liquidation_signal,
 )
@@ -150,6 +152,14 @@ class FakeEchartsPage(FakePage):
         }
 
 
+class FakeBrowserContext:
+    def __init__(self):
+        self.storage_state_path = None
+
+    def storage_state(self, path):
+        self.storage_state_path = path
+
+
 def config(current="1700"):
     env = {
         "TRADING_SYMBOL": "ETH/USDT",
@@ -213,6 +223,32 @@ def test_echarts_canvas_accepts_formatted_axis_numbers():
     assert signal.failure is None
     assert signal.strongest_upper_candidate.price_low < 64604.45
     assert signal.strongest_lower_candidate.price_high > 63633.45
+
+
+def test_coinglass_login_does_not_reuse_missing_session_file(monkeypatch, tmp_path):
+    cfg = replace(
+        config(current="63972.6"),
+        coinglass_auth_ref={"email": "COINGLASS_EMAIL", "password": "COINGLASS_PASSWORD"},
+        coinglass_session_path=str(tmp_path / "session.json"),
+    )
+    page = FakePage()
+    context = FakeBrowserContext()
+    calls = {"auth_check": 0, "login": 0}
+
+    def fail_auth_check(page):
+        calls["auth_check"] += 1
+        return True
+
+    def login(config, page):
+        calls["login"] += 1
+
+    monkeypatch.setattr("trading_notice.liquidation_scraper._coinglass_session_is_authenticated", fail_auth_check)
+    monkeypatch.setattr("trading_notice.liquidation_scraper._login_to_coinglass", login)
+
+    _ensure_coinglass_login_if_configured(cfg, page, context)
+
+    assert calls == {"auth_check": 0, "login": 1}
+    assert context.storage_state_path == cfg.coinglass_session_path
 
 
 def test_echarts_canvas_aggregates_configured_heatmap_ranges():
