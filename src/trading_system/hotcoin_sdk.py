@@ -259,6 +259,11 @@ class HotcoinWebSession:
             self.csrf_token = str(data.get("csrfToken") or data.get("csrf_token") or "")
             self._apply_token()
             user = self.get_user_info()
+            if not user:
+                return {
+                    "status": "error",
+                    "message": "Hotcoin login token was not accepted; please re-scan",
+                }
             return {"status": "connected", "session": self.export_session_data(), "user": user}
         if code in {201, 10030}:
             return {"status": "pending", "message": payload.get("msg") or "waiting for scan"}

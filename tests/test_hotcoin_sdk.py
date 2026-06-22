@@ -120,3 +120,21 @@ def test_hotcoin_sdk_places_orders_with_v3_encrypted_payload(monkeypatch) -> Non
     assert body["randomKey"] == "rsa:AAAAAAAAAAAAAAAA"
     assert body["randomIv"] == "rsa:AAAAAAAAAAAAAAAA"
     assert isinstance(body["bizData"], str)
+
+
+def test_hotcoin_qr_login_rejects_token_that_fails_user_validation(monkeypatch) -> None:
+    client = HotcoinWebSession()
+
+    def fake_post(url, files=None, headers=None, timeout=None):
+        return FakeResponse(
+            "{}",
+            {"code": 200, "data": {"token": "expired-token", "csrfToken": "csrf-1"}},
+        )
+
+    client.session.post = fake_post  # type: ignore[method-assign]
+    monkeypatch.setattr(client, "get_user_info", lambda: None)
+
+    result = client.poll_qr_login("qr-token")
+
+    assert result["status"] == "error"
+    assert "not accepted" in result["message"]
