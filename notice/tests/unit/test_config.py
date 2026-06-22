@@ -20,6 +20,7 @@ def test_load_analysis_config_defaults_are_documented_and_secret_refs_only():
 
     assert config.liquidation_periods == ("15M", "1H", "4H", "1D")
     assert config.kline_periods == ("15m", "1h", "4h", "1d")
+    assert config.kline_exchange_id == "okx"
     assert config.kline_check_interval_seconds == 60
     assert config.scrape_min_interval_seconds == 3600
     assert config.max_scrape_staleness_seconds == 7200

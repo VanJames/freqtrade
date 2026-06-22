@@ -56,6 +56,7 @@ class AnalysisConfiguration:
     coinglass_heatmap_ranges: tuple[str, ...] = ("24 hour",)
     liquidation_periods: tuple[str, ...] = ("15M", "1H", "4H", "1D")
     kline_periods: tuple[str, ...] = ("15m", "1h", "4h", "1d")
+    kline_exchange_id: str = "okx"
     kline_check_interval_seconds: int = 60
     scrape_min_interval_seconds: int = 3600
     scrape_failure_backoff_seconds: int = 300

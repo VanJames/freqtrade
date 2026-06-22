@@ -30,9 +30,11 @@ class FakeExchange:
         self.result = result
         self.error = error
         self.calls = 0
+        self.symbols = []
 
     def fetch_ohlcv(self, symbol, timeframe, limit):
         self.calls += 1
+        self.symbols.append(symbol)
         if self.error:
             raise self.error
         return self.result
@@ -65,3 +67,12 @@ def test_analyze_kline_signals_converts_ccxt_exception_to_failure():
 
     assert result[0].failure.category == "ccxt_api"
     assert "secret" not in result[0].failure.safe_message.lower()
+    assert result[0].failure.source == "ccxt.okx.fetch_ohlcv"
+
+
+def test_analyze_kline_signals_converts_okx_swap_symbol():
+    exchange = FakeExchange(candles())
+
+    analyze_kline_signals(config(), exchange=exchange)
+
+    assert exchange.symbols[0] == "ETH/USDT:USDT"

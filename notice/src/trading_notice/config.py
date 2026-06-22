@@ -84,6 +84,7 @@ def load_analysis_config(env: Mapping[str, str] | None = None) -> AnalysisConfig
         coinglass_heatmap_ranges=_split_csv(env.get("COINGLASS_HEATMAP_RANGES", "24 hour")),
         liquidation_periods=_split_csv(env.get("LIQUIDATION_PERIODS", "15M,1H,4H,1D")),
         kline_periods=_split_csv(env.get("KLINE_PERIODS", "15m,1h,4h,1d")),
+        kline_exchange_id=env.get("KLINE_EXCHANGE_ID", "okx").strip().lower() or "okx",
         kline_check_interval_seconds=_int_env(env, "KLINE_CHECK_INTERVAL_SECONDS", 60),
         scrape_min_interval_seconds=scrape_min_interval,
         scrape_failure_backoff_seconds=_int_env(env, "SCRAPE_FAILURE_BACKOFF_SECONDS", 300),

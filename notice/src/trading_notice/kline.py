@@ -22,16 +22,35 @@ def analyze_kline_signals(
             import ccxt
         except Exception:
             return [_failure_signal(config.symbol, period, "ccxt import failed", 1) for period in config.kline_periods]
-        own_exchange = ccxt.binance({"enableRateLimit": True})
+        try:
+            exchange_cls = getattr(ccxt, config.kline_exchange_id)
+        except AttributeError:
+            return [
+                _failure_signal(
+                    config.symbol,
+                    period,
+                    f"unsupported ccxt exchange {config.kline_exchange_id}",
+                    1,
+                    source=f"ccxt.{config.kline_exchange_id}.fetch_ohlcv",
+                )
+                for period in config.kline_periods
+            ]
+        own_exchange = exchange_cls(
+            {
+                "enableRateLimit": True,
+                "options": {"defaultType": "swap"},
+            }
+        )
         exchange = own_exchange
 
     results: list[KlineSignal] = []
+    symbol = _exchange_symbol(config)
     for period in config.kline_periods:
         attempts = 0
         last_error = ""
         for attempts in range(1, max_attempts + 1):
             try:
-                candles = exchange.fetch_ohlcv(config.symbol, timeframe=period.lower(), limit=limit)
+                candles = exchange.fetch_ohlcv(symbol, timeframe=period.lower(), limit=limit)
                 results.append(_signal_from_candles(config, period, candles))
                 break
             except Exception as exc:
@@ -39,7 +58,15 @@ def analyze_kline_signals(
                 if sleep_seconds:
                     time.sleep(sleep_seconds)
         else:
-            results.append(_failure_signal(config.symbol, period, last_error, attempts))
+            results.append(
+                _failure_signal(
+                    config.symbol,
+                    period,
+                    last_error,
+                    attempts,
+                    source=f"ccxt.{config.kline_exchange_id}.fetch_ohlcv",
+                )
+            )
     if own_exchange is not None and hasattr(own_exchange, "close"):
         own_exchange.close()
     return results
@@ -105,7 +132,21 @@ def _signal_from_candles(config: AnalysisConfiguration, period: str, candles: li
     )
 
 
-def _failure_signal(symbol: str, period: str, message: str, attempts: int) -> KlineSignal:
+def _exchange_symbol(config: AnalysisConfiguration) -> str:
+    symbol = config.symbol
+    if config.kline_exchange_id == "okx" and ":" not in symbol:
+        return f"{symbol}:USDT"
+    return symbol
+
+
+def _failure_signal(
+    symbol: str,
+    period: str,
+    message: str,
+    attempts: int,
+    *,
+    source: str = "ccxt.fetch_ohlcv",
+) -> KlineSignal:
     return KlineSignal(
         symbol=symbol,
         period=period,
@@ -116,7 +157,7 @@ def _failure_signal(symbol: str, period: str, message: str, attempts: int) -> Kl
             category="ccxt_api",
             retryable=True,
             attempts=attempts,
-            source="ccxt.binance.fetch_ohlcv",
+            source=source,
             safe_message=_safe_message(message),
         ),
     )

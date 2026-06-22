@@ -174,6 +174,7 @@ class LiquidationDirectionPlugin:
             recipients=(),
             coinglass_heatmap_url=str(self.settings.coinglass_heatmap_url),
             coinglass_heatmap_ranges=tuple(self.settings.coinglass_heatmap_ranges),
+            kline_exchange_id="okx",
             kline_periods=("15m", "1h", "4h", "1d"),
             scrape_min_interval_seconds=int(self.settings.liquidation_plugin_scrape_min_seconds),
             max_scrape_staleness_seconds=int(
