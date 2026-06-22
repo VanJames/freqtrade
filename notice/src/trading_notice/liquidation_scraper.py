@@ -168,7 +168,7 @@ def _scrape_once(
         _ensure_coinglass_login_if_configured(config, page, context)
 
     try:
-        page.goto(config.coinglass_heatmap_url, wait_until="load", timeout=45000)
+        page.goto(config.coinglass_heatmap_url, wait_until="domcontentloaded", timeout=45000)
         echarts_signal = _try_scrape_echarts_canvas(
             config, mapping, page, current_market_price, now
         )
