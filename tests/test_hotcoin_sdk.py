@@ -19,6 +19,7 @@ def test_hotcoin_sdk_loads_full_cookie_metadata_and_headers() -> None:
     client.load_session_data(
         {
             "token": "tok-1",
+            "csrf_token": "csrf-1",
             "device_id": "device-1",
             "session_headers": {"User-Agent": "Agent/1", "Referer": "https://www.hotcoinv5.com/"},
             "full_cookies": [
@@ -33,6 +34,8 @@ def test_hotcoin_sdk_loads_full_cookie_metadata_and_headers() -> None:
     )
 
     assert client.device_id == "device-1"
+    assert client.csrf_token == "csrf-1"
+    assert client.export_session_data()["csrf_token"] == "csrf-1"
     assert client.session.headers["User-Agent"] == "Agent/1"
     cookies = {(cookie.name, cookie.domain) for cookie in client.session.cookies}
     assert ("acw_tc", "bi.hotcoins.cn") in cookies
@@ -73,3 +76,47 @@ def test_hotcoin_sdk_waf_retry_preserves_auth_headers_and_sets_cookie() -> None:
         assert headers["Authorization"] == "Bearer tok-3"
     cookies = {(cookie.name, cookie.domain) for cookie in client.session.cookies}
     assert ("acw_sc__v2", "bi.hotcoins.cn") in cookies
+
+
+def test_hotcoin_sdk_places_orders_with_v3_encrypted_payload(monkeypatch) -> None:
+    client = HotcoinWebSession()
+    client.load_session_data({"token": "tok-4", "csrfToken": "csrf-4"})
+    calls: list[dict] = []
+
+    monkeypatch.setattr(client, "_get_secret_signing_key", lambda: "signing-secret")
+    monkeypatch.setattr(client, "_rsa_oaep_encrypt_base64", lambda value: f"rsa:{value}")
+    monkeypatch.setattr(client, "_random_crypto_text", lambda length: "A" * length)
+
+    def fake_request(method, url, timeout=None, **kwargs):
+        calls.append({"method": method, "url": url, "kwargs": kwargs})
+        return FakeResponse("{}", {"code": 200, "msg": "ok"})
+
+    client.session.request = fake_request  # type: ignore[method-assign]
+
+    payload = client.place_order(
+        symbol="XAU/USDT:USDT",
+        side="sell",
+        amount=0.0,
+        price=1.0,
+        order_type="limit",
+        reduce_only=True,
+    )
+
+    assert payload["code"] == 200
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["method"] == "POST"
+    assert "/swap/v3/perpetual/products/XAUUSDT/batch-order" in call["url"]
+    assert "token=" not in call["url"]
+    headers = call["kwargs"]["headers"]
+    assert headers["token"] == "tok-4"
+    assert headers["x-csrf-token"] == "csrf-4"
+    assert "Authorization" not in headers
+    assert "_skip_authorization" not in headers
+    assert headers["Origin"] == "https://www.hotcoinv12.com"
+    assert headers["Referer"] == "https://www.hotcoinv12.com/"
+    body = call["kwargs"]["json"]
+    assert set(body) == {"randomKey", "randomIv", "ver", "bizData", "signature", "timestamp"}
+    assert body["randomKey"] == "rsa:AAAAAAAAAAAAAAAA"
+    assert body["randomIv"] == "rsa:AAAAAAAAAAAAAAAA"
+    assert isinstance(body["bizData"], str)

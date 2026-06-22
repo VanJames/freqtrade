@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import io
 import json
 import re
+import secrets
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -13,14 +16,28 @@ from typing import Any
 
 import asyncpg
 import requests
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding as asymmetric_padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.padding import PKCS7
 
 logger = getLogger(__name__)
 
 HOTCOIN_QR_BASE_URL = "https://binn.adffhttct.com"
 HOTCOIN_LOGIN_BASE_URL = "https://binn.hotcoins.cn"
 HOTCOIN_WEB_BASE_URL = "https://bi.hotcoins.cn"
+HOTCOIN_TRADE_BASE_URL = "https://binn.adffhttct.com"
+HOTCOIN_WEB_ORIGIN = "https://www.hotcoinv12.com"
+HOTCOIN_MATTS_PUBLIC_KEY = (
+    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnnX54w9+Hiolvw/izXt+oD7oHJAP00Nf3tGz"
+    "BPHAqV+7DNCRSaCjQXdSnehnHgZV4i84e1yb0iZ4atITMyCzyQqTWybTB6co4NTAeydyEWRRr3ktzaOk"
+    "R22bD0H6CYkcrgBPCGYB0fOF6s7XgC5syHgqRK0q4H40UP2RrXSU+G6hmgCOkt7JVma4YAXCf0X6Qvx"
+    "ARrm9fsV5cIliPUgtAbCAwqfHtK/Ek86lyLb650HoXz7V1/Xp/Qocio//WcL7JIXunWW7zq6jkKmyzsx"
+    "O9f6F7JU1SBa+6SkV8/XIf8lQGJEMWtqRhceMvxKGJpJ6d3QSoZ8BH9UwpH9Ue5poGQIDAQAB"
+)
 DEFAULT_DEVICE_ID = "P_qWAfKXrQ5xBBUlEAUReGmPALdmrgafYJ"
 HOTCOIN_SESSION_KEY = "default"
+RANDOM_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
 @dataclass(slots=True)
@@ -116,6 +133,9 @@ class HotcoinWebSession:
         self.retries = retries
         self.session_loader = session_loader
         self.token = ""
+        self.csrf_token = ""
+        self.trade_base_url = HOTCOIN_TRADE_BASE_URL
+        self._hotcoin_ssk: str | None = None
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -125,8 +145,8 @@ class HotcoinWebSession:
                 ),
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                "Referer": "https://www.hotcoinv5.com/",
-                "Origin": "https://www.hotcoinv5.com",
+                "Referer": f"{HOTCOIN_WEB_ORIGIN}/",
+                "Origin": HOTCOIN_WEB_ORIGIN,
                 "sec-ch-ua": '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
                 "sec-ch-ua-mobile": "?0",
                 "sec-ch-ua-platform": '"macOS"',
@@ -141,6 +161,7 @@ class HotcoinWebSession:
         if not data:
             return
         self.token = str(data.get("token") or "")
+        self.csrf_token = str(data.get("csrf_token") or data.get("csrfToken") or "")
         self.device_id = str(data.get("device_id") or self.device_id)
         headers = data.get("session_headers")
         if isinstance(headers, dict):
@@ -184,6 +205,7 @@ class HotcoinWebSession:
         ]
         return {
             "token": self.token,
+            "csrf_token": self.csrf_token,
             "device_id": self.device_id,
             "session_headers": dict(self.session.headers),
             "full_cookies": full_cookies,
@@ -229,10 +251,12 @@ class HotcoinWebSession:
         payload = response.json()
         code = payload.get("code")
         if code == 200:
-            token = str((payload.get("data") or {}).get("token") or "")
+            data = payload.get("data") or {}
+            token = str(data.get("token") or "")
             if not token:
                 return {"status": "error", "message": "Hotcoin login succeeded without token"}
             self.token = token
+            self.csrf_token = str(data.get("csrfToken") or data.get("csrf_token") or "")
             self._apply_token()
             user = self.get_user_info()
             return {"status": "connected", "session": self.export_session_data(), "user": user}
@@ -338,14 +362,29 @@ class HotcoinWebSession:
             item["price"] = str(price)
             item["triggerPrice"] = str(price)
         endpoint = self._add_auth_params(
-            f"{self.base_url}/swap/v1/perpetual/products/{hotcoin_symbol(symbol)}/batch-order"
+            f"{self.trade_base_url}/swap/v3/perpetual/products/{hotcoin_symbol(symbol)}/batch-order",
+            include_token=False,
         )
-        payload = self._json_request("POST", endpoint, json=[item])
+        payload = self._json_request(
+            "POST",
+            endpoint,
+            json=self._encrypted_payload([item]),
+            headers=self._v3_headers(),
+        )
         if payload.get("code") == 401 and self._reload_session():
             endpoint = self._add_auth_params(
-                f"{self.base_url}/swap/v1/perpetual/products/{hotcoin_symbol(symbol)}/batch-order"
+                (
+                    f"{self.trade_base_url}/swap/v3/perpetual/products/"
+                    f"{hotcoin_symbol(symbol)}/batch-order"
+                ),
+                include_token=False,
             )
-            payload = self._json_request("POST", endpoint, json=[item])
+            payload = self._json_request(
+                "POST",
+                endpoint,
+                json=self._encrypted_payload([item]),
+                headers=self._v3_headers(),
+            )
         return payload
 
     def create_order(
@@ -414,20 +453,22 @@ class HotcoinWebSession:
     def _prepare_auth(self, url: str, kwargs: dict[str, Any]) -> None:
         self._apply_token(url)
         headers = dict(kwargs.pop("headers", {}) or {})
+        skip_authorization = bool(headers.pop("_skip_authorization", False))
         if self.token:
             headers.setdefault("token", self.token)
-            headers.setdefault("Authorization", f"Bearer {self.token}")
+            if not skip_authorization:
+                headers.setdefault("Authorization", f"Bearer {self.token}")
         merged_headers = dict(self.session.headers)
         merged_headers.update(headers)
         kwargs["headers"] = merged_headers
 
-    def _add_auth_params(self, url: str) -> str:
+    def _add_auth_params(self, url: str, *, include_token: bool = True) -> str:
         separator = "&" if "?" in url else "?"
         query = (
             f"lang=zh_CN&platform=1&client=1&deviceId={urllib.parse.quote(self.device_id)}"
             f"&versionCode=3.2.0&deviceModel={urllib.parse.quote_plus(self._device_model())}"
         )
-        if self.token:
+        if include_token and self.token:
             query += f"&token={urllib.parse.quote(self.token)}"
         return f"{url}{separator}{query}"
 
@@ -439,7 +480,13 @@ class HotcoinWebSession:
             self.session.cookies.set("token", self.token, domain=domain, path="/")
 
     def _token_cookie_domains(self, request_url: str | None = None) -> list[str]:
-        domains = [self._host(self.base_url), ".hotcoins.cn", "hotcoins.cn", ".hotcoinv5.com"]
+        domains = [
+            self._host(self.base_url),
+            ".hotcoins.cn",
+            "hotcoins.cn",
+            ".hotcoinv5.com",
+            ".hotcoinv12.com",
+        ]
         if request_url:
             host = self._host(request_url)
             if host:
@@ -453,6 +500,164 @@ class HotcoinWebSession:
         chrome_ver = chrome_match.group(1) if chrome_match else "143.0.0.0"
         os_name = os_match.group(1) if os_match else "macOS"
         return f"Chrome {chrome_ver} ({os_name})"
+
+    def _v3_headers(self) -> dict[str, str]:
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": self.session.headers.get("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8"),
+            "Cache-Control": "no-cache",
+            "Content-Type": "application/json",
+            "Origin": HOTCOIN_WEB_ORIGIN,
+            "Pragma": "no-cache",
+            "Referer": f"{HOTCOIN_WEB_ORIGIN}/",
+            "User-Agent": self.session.headers.get("User-Agent", ""),
+            "sec-ch-ua": self.session.headers.get("sec-ch-ua", ""),
+            "sec-ch-ua-mobile": self.session.headers.get("sec-ch-ua-mobile", "?0"),
+            "sec-ch-ua-platform": self.session.headers.get("sec-ch-ua-platform", '"macOS"'),
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+            "priority": "u=1, i",
+        }
+        if self.token:
+            headers["token"] = self.token
+            headers["_skip_authorization"] = "true"
+        if self.csrf_token:
+            headers["x-csrf-token"] = self.csrf_token
+        return {key: value for key, value in headers.items() if value}
+
+    def _encrypted_payload(self, data: Any) -> dict[str, Any]:
+        timestamp = int(time.time() * 1000)
+        signing_key = self._get_secret_signing_key()
+        secret_params = self._encrypt_secret_params()
+        signing_data = self._sort_ascii(data)
+        if isinstance(signing_data, dict):
+            signing_data = self._sort_ascii({**signing_data, "timestamp": timestamp})
+        signature = self._hotcoin_hmac_sha256(signing_key, self._signature_payload(signing_data))
+        return {
+            **secret_params,
+            "bizData": self._aes_encrypt_base64(signing_data),
+            "signature": signature,
+            "timestamp": timestamp,
+        }
+
+    def _get_secret_signing_key(self) -> str:
+        if self._hotcoin_ssk:
+            return self._hotcoin_ssk
+        timestamp = int(time.time() * 1000)
+        envelope = {
+            **self._encrypt_secret_params(),
+            "bizData": self._aes_encrypt_base64({"bizType": "GSIP", "timestamp": timestamp}),
+            "signature": self._random_crypto_text(32),
+            "timestamp": timestamp,
+        }
+        url = self._add_auth_params(f"{self.trade_base_url}/hk-web/gsip", include_token=False)
+        payload = self._json_request("POST", url, json=envelope, headers=self._v3_headers())
+        encrypted = payload.get("data")
+        if isinstance(encrypted, dict):
+            encrypted = encrypted.get("data")
+        if not isinstance(encrypted, str) or not encrypted:
+            raise RuntimeError(f"Hotcoin gsip response missing encrypted signing key: {payload.get('msg') or payload.get('code')}")
+        try:
+            decoded = json.loads(self._aes_decrypt_to_text(encrypted))
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Hotcoin gsip response could not be decrypted") from exc
+        ssk = str(decoded.get("ssk") or "")
+        if not ssk:
+            raise RuntimeError("Hotcoin gsip response missing signing key")
+        self._hotcoin_ssk = ssk
+        return ssk
+
+    def _encrypt_secret_params(self) -> dict[str, Any]:
+        self._random_key = self._random_crypto_text(16)
+        self._random_iv = self._random_crypto_text(16)
+        return {
+            "randomKey": self._rsa_oaep_encrypt_base64(self._random_key),
+            "randomIv": self._rsa_oaep_encrypt_base64(self._random_iv),
+            "ver": 1,
+        }
+
+    def _aes_encrypt_base64(self, value: Any) -> str:
+        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        padder = PKCS7(128).padder()
+        padded = padder.update(raw) + padder.finalize()
+        encryptor = Cipher(
+            algorithms.AES(self._random_key.encode("utf-8")),
+            modes.CBC(self._random_iv.encode("utf-8")),
+        ).encryptor()
+        encrypted = encryptor.update(padded) + encryptor.finalize()
+        return base64.b64encode(encrypted).decode("ascii")
+
+    def _aes_decrypt_to_text(self, data: str) -> str:
+        encrypted = base64.b64decode(data)
+        decryptor = Cipher(
+            algorithms.AES(self._random_key.encode("utf-8")),
+            modes.CBC(self._random_iv.encode("utf-8")),
+        ).decryptor()
+        padded = decryptor.update(encrypted) + decryptor.finalize()
+        unpadder = PKCS7(128).unpadder()
+        return (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+
+    @staticmethod
+    def _rsa_oaep_encrypt_base64(value: str) -> str:
+        pem = (
+            "-----BEGIN PUBLIC KEY-----\n"
+            + "\n".join(
+                HOTCOIN_MATTS_PUBLIC_KEY[i : i + 64]
+                for i in range(0, len(HOTCOIN_MATTS_PUBLIC_KEY), 64)
+            )
+            + "\n-----END PUBLIC KEY-----\n"
+        )
+        public_key = serialization.load_pem_public_key(pem.encode("ascii"))
+        encrypted = public_key.encrypt(
+            value.encode("utf-8"),
+            asymmetric_padding.OAEP(
+                mgf=asymmetric_padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=b"",
+            ),
+        )
+        return base64.b64encode(encrypted).decode("ascii")
+
+    @staticmethod
+    def _random_crypto_text(length: int) -> str:
+        return "".join(secrets.choice(RANDOM_CHARS) for _ in range(length))
+
+    @classmethod
+    def _sort_ascii(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: cls._sort_ascii(value[key])
+                for key in sorted(value)
+                if value[key] is not None
+            }
+        if isinstance(value, list):
+            return [cls._sort_ascii(item) for item in value]
+        return value
+
+    @staticmethod
+    def _signature_payload(value: Any) -> str:
+        if isinstance(value, dict):
+            items = value.items()
+        elif isinstance(value, list):
+            items = enumerate(value)
+        else:
+            return str(value)
+        parts = []
+        for key, item in items:
+            if item is None:
+                continue
+            if isinstance(item, (dict, list)):
+                rendered = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            else:
+                rendered = str(item)
+            parts.append(f"{key}={rendered}")
+        return "&".join(parts) + ("&" if parts else "")
+
+    @staticmethod
+    def _hotcoin_hmac_sha256(key: str, message: str) -> str:
+        digest = hmac.new(key.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).digest()
+        return base64.b64encode(digest).decode("ascii")
 
     @staticmethod
     def _host(url: str) -> str:
