@@ -1194,7 +1194,7 @@ class OKXQuantEngine:
         df["dt"] = pd.to_datetime(df.ts, unit="ms", utc=True)
         df = df.set_index("dt")
         frame = (
-            df.resample(timeframe)
+            df.resample(self._pandas_resample_rule(timeframe))
             .agg(
                 {
                     "ts": "last",
@@ -1216,9 +1216,21 @@ class OKXQuantEngine:
         return self._closed_ohlcv_rows(rows_out, duration_ms)[-limit:]
 
     @staticmethod
+    def _pandas_resample_rule(timeframe: str) -> str:
+        normalized = timeframe.strip().lower()
+        if normalized.endswith("m") and normalized[:-1].isdigit():
+            return f"{normalized[:-1]}min"
+        if normalized.endswith("h") and normalized[:-1].isdigit():
+            return f"{normalized[:-1]}h"
+        if normalized.endswith("d") and normalized[:-1].isdigit():
+            return f"{normalized[:-1]}D"
+        return timeframe
+
+    @staticmethod
     def _timeframe_duration_ms(timeframe: str) -> int:
         return {
             "5m": 300_000,
+            "15m": 900_000,
             "1h": 3_600_000,
             "4h": 14_400_000,
             "1d": 86_400_000,
